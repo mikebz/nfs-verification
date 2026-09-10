@@ -241,7 +241,10 @@ The rules below are the ones tooling cannot check:
 - Avoid package-level globals. The suite-wide client, environment and
   capabilities set in `TestMain` are the deliberate exception.
 - Shell strings built for exec go through `framework.Quote`. Never concatenate a
-  path into a script unquoted.
+  path into a script unquoted, the paths a helper derives for itself included.
+  Validate any identifier that becomes a filename with `framework.CheckScriptID`:
+  quoting does not stop a path escape, and a helper that is safe only because of
+  who calls it today is one refactor away from not being safe at all.
 
 ## PRs and review
 

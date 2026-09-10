@@ -138,8 +138,9 @@ Each step is one pull request. Later steps depend only on earlier ones.
 
 | Step | Scope | Status |
 |---|---|---|
-| 1 | Approach, harness skeleton, preflight (Section 0), PROV-01, DATA-03, DATA-05 flock | **this change** |
-| 2 | Remaining presubmit cases: PROV-03, PROV-04, DATA-01, DATA-02, DATA-04, OBS-04, SEC-01, SEC-02 | next |
+| 1 | Approach, harness skeleton, preflight (Section 0), PROV-01, DATA-03, DATA-05 flock | done, [PR #1](https://github.com/mikebz/nfs-verification/pull/1) |
+| 2 | Presubmit cases that need nothing the harness does not already have: PROV-03, PROV-04, DATA-01, DATA-04, SEC-01 | **this change** |
+| 2b | The three presubmit cases held back from step 2: DATA-02, OBS-04, SEC-02 | next |
 | 3 | Chaos operations package plus CHAOS-01 and CHAOS-02, the SLO measurement path, fault timelines | |
 | 4 | Grace and lock reclaim: CHAOS-05, CHAOS-06, CHAOS-07, OBS-02, OBS-03 | |
 | 5 | Node and infrastructure faults: CHAOS-03, CHAOS-08 to CHAOS-13, node power implementations | |
@@ -154,6 +155,23 @@ Order rationale: the heaviest weight in the plan is on the singleton in the data
 path, so chaos comes early, right after there are enough presubmit cases to
 prove the harness itself works. Scale and soak come last because they are the
 cases most likely to be blocked by cluster capacity rather than by defects.
+
+Step 2 was split because three of its eight cases cannot yet be written so that
+a failure means what it says, and a presubmit case that fails for its own
+reasons is worse than no case at all:
+
+- **DATA-02** carries the caveat in gap 1 below. It asserts an exact record
+  count under concurrent `O_APPEND` writes, which is an implementation property
+  and not something NFSv4.1 promises. It lands with the failure message that
+  routes it to the boundary discussion rather than to the server owner.
+- **OBS-04** needs a mount that fails on purpose, which means a PV pointing at
+  an export that is not there. That is fault injection, so it lands with the
+  chaos operations package in step 3 rather than being hand-rolled here.
+- **SEC-02** asserts that root is squashed *as configured*. Preflight does not
+  discover the export's squash setting yet, and a case that asserts "as
+  configured" without reading the configuration asserts nothing. SEC-01 already
+  records, in passing, whether root can chown on the share, which is the
+  observation SEC-02 will be built on.
 
 ---
 
@@ -188,6 +206,44 @@ reviewers to reading sixty cases before the plumbing is agreed.
 
 **Not in step 1**: any fault injection, the SLO measurement path, the locktool
 image, fio, snapshots, expansion. Those arrive with the cases that use them.
+
+---
+
+## 3a. What step 2 contains
+
+Five cases, and only the harness pieces they call:
+
+- PROV-03: delete a claim a pod still mounts. The claim stays Terminating with
+  the `pvc-protection` finalizer, the mount keeps working underneath it, and the
+  claim completes once the pod is gone. This is the protection that stands
+  between an ordinary `kubectl delete pvc` and F-001 in
+  [`findings.md`](findings.md), so it is worth a presubmit gate.
+- PROV-04: volume expansion. Control-plane capacity grows, existing data
+  survives, the client does not restart. `df` inside the pod is **recorded, not
+  asserted**: a directory-backed export with no per-volume quota reports the
+  whole backing filesystem to every client and cannot move, and telling that
+  apart from a failed expansion needs the fan-out that PROV-11 works from. When
+  the class does not advertise expansion, the case asserts the API rejects the
+  request, because silently accepting a resize the driver will never perform
+  leaves the claim wedged with nothing to fix it.
+- DATA-01: four pods writing at once, four files, distinct seeds, each file
+  verified by a pod that did not write it. Distinct checksums are asserted too, so two writers
+  landing on one content cannot read as a pass.
+- DATA-04: the negative of DATA-03. A reader on another node may see nothing or
+  part of what an open writer has produced, and the case asserts that is **not**
+  a failure while recording which one this deployment does. The one thing it
+  does fail on is bytes nobody wrote.
+- SEC-01: a pod running as an ordinary uid writes; a pod on another node reads
+  the ownership back. Ownership is read from both clients, because a correct id
+  on the writer and `nobody` on the reader is a per-client idmapper problem and
+  routes to the node, not to the server.
+
+**Harness added**: pod identity (`runAsUser`, `runAsGroup`) in the client pod
+manifest, a writer that holds a descriptor open across execs, `stat` ownership,
+`df` capacity, and PVC expansion. Each is called by a case in this change.
+
+**Still not here**: fault injection, the SLO measurement path, the locktool
+image, fio, snapshots.
 
 ---
 

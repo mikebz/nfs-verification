@@ -10,7 +10,8 @@ End-to-end verification of NFS RWX persistent volumes on Kubernetes.
   real cluster taught us.
 
 This repository currently holds the harness skeleton, preflight, and the first
-three cases. The remaining cases land in the steps listed in `plan.md`.
+eight cases. The remaining cases land in the steps listed in
+[`docs/plan.md`](docs/plan.md).
 
 ## Layout
 
@@ -21,7 +22,7 @@ three cases. The remaining cases land in the steps listed in `plan.md`.
 | `pkg/framework` | Clients, per-case fixture, pods and PVCs from embedded manifests, exec, locks, the privileged node agent, artifact collection |
 | `pkg/framework/manifests` | The YAML the suite applies: the client pod and the node agent DaemonSet |
 | `pkg/preflight` | Section 0 checks and all discovery |
-| `test/e2e` | The cases, named for their plan ID |
+| `test/e2e` | The cases; each names its plan ID in the comment above it |
 | `cmd/preflight` | `make preflight` |
 
 [`AGENTS.md`](AGENTS.md) is the guide for working in this repository: how to
@@ -97,11 +98,25 @@ charged to every case eats the `go test -timeout` budget for the package.
 | ID | Case |
 |---|---|
 | PROV-01 | Dynamic provision, bind, mount, write, delete, backing volume reclaimed |
+| PROV-03 | Delete a claim a pod still mounts; it stays Terminating until the mount is gone |
+| PROV-04 | Volume expansion, or a clean rejection when the class does not advertise it |
+| DATA-01 | Four pods writing at once, four files, cross-verified checksums |
 | DATA-03 | Close-to-open across two nodes |
+| DATA-04 | The negative of DATA-03: what a reader may see before the writer closes |
 | DATA-05 | flock mutual exclusion across two nodes, clean handover on release |
+| SEC-01 | uid and gid preservation across pods on two nodes |
 
-All three are fast enough for a presubmit. Categories become a `go test -run`
+All eight are fast enough for a presubmit. Categories become a `go test -run`
 pattern when there are slow cases to keep out of the fast path.
+
+Two of them are deliberately careful about what they blame. SEC-01 reports
+**blocked**, with the export's own error in the message, when an ordinary uid
+has nowhere to write on the share: that is deployment configuration, and filing
+it against the storage system wastes a week. PROV-04 records what `df` reports
+rather than asserting on it, because an export with no per-volume quota shows
+every client the whole backing filesystem and cannot show a capacity change at
+all; it still asserts that the control plane grew, that the data survived, and
+that the client never restarted.
 
 ## Flags
 
@@ -145,8 +160,21 @@ here would silently invalidate every timing assertion.
 ## State of this code
 
 The harness compiles, `go vet` is clean, and the unit tests in `pkg/slo` and
-`pkg/framework` pass. The three end-to-end cases have not been run against a
-real cluster from this repository yet; they need one with an RWX-capable
-StorageClass and a reachable NFS server workload. Expect the first run to
-surface flag values that need setting for the deployment at hand, which is what
-the specific preflight failure messages exist to make quick.
+`pkg/framework` pass.
+
+The presubmit cases have been run against GKE clusters during review, not by
+the author of this code, and what that first real run produced is recorded in
+[`docs/findings.md`](docs/findings.md) rather than summarised here: a node image
+whose `umount.nfs` wrapper could never unmount anything (F-003), and a
+StorageClass advertising an expansion its provisioner cannot perform (F-004).
+Both arrived looking like storage defects and neither was one. Expect a first
+run on a new cluster to surface flag values that need setting for the deployment
+at hand, which is what the specific preflight failure messages exist to make
+quick.
+
+The unit tests cover the parts of the harness that can be wrong on a
+workstation: every manifest renders and decodes, the capacity and ownership
+parsers are run against the real `stat` and `df` on the machine running the
+test rather than against a written-out fixture, and the background writer
+DATA-04 depends on is run under a real shell. What none of them can tell you is
+whether NFS behaves; that needs a cluster.

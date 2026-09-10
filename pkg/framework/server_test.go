@@ -11,6 +11,15 @@ import (
 // given. The heuristic must never match the suite's own pods: they would be
 // recorded as servers, and the chaos cases would then kill the client pods and
 // the node agent instead of the thing under test.
+// TestServerHeuristicIgnoresHarnessPods covers server discovery when no
+// selector was passed. Getting this wrong is not a failed test: the name
+// heuristic would match the suite's own pods, and the chaos cases would kill
+// the harness instead of the server.
+//
+// Steps:
+//  1. Offer pods that look like servers by port and by name.
+//  2. Offer the suite's own client pods and node agent, which also match.
+//  3. Assert only the real servers are returned.
 func TestServerHeuristicIgnoresHarnessPods(t *testing.T) {
 	pod := func(name string, labels map[string]string, port int32, image string) *corev1.Pod {
 		p := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, Labels: labels}}
