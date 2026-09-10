@@ -99,7 +99,7 @@ told it works stops trusting every later claim, including the true ones.
   // Steps:
   //  1. Provision an RWX claim, mount it in a pod, write a file.
   //  2. Delete the claim while the pod still has it mounted.
-  //  3. Watch for 20s: the claim must stay, with the pvc-protection finalizer.
+  //  3. Watch for the SLO-bound interval: the claim must stay, with the pvc-protection finalizer.
   //  4. Read and write through the mount while the claim is Terminating.
   //  5. Delete the pod and wait for it to leave the API.
   //  6. The claim must then finish deleting.
