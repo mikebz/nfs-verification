@@ -166,6 +166,10 @@ func describeNodes(ctx context.Context, c *framework.Client, e *env.Environment)
 	return nil
 }
 
+// classProbeTimeout bounds one candidate StorageClass. It is the bind timeout
+// from the plan plus room for two pods to pull an image and start.
+const classProbeTimeout = framework.BindTimeout + 90*time.Second
+
 // findRWXClass probes StorageClasses until one gives an RWX volume that two
 // pods on two nodes can mount at once. Nothing in the StorageClass API states
 // which access modes its volumes will support, so the only honest test is to
@@ -182,7 +186,12 @@ func findRWXClass(ctx context.Context, c *framework.Client, fx *framework.Framew
 	}
 	var lastErr error
 	for _, candidate := range candidates {
-		podA, podB, err = probeClass(ctx, fx, candidate, nodeA, nodeB)
+		// Bound each candidate: a class that will never work should cost one
+		// bind timeout, not a full pod-ready timeout, or probing three classes
+		// eats the whole preflight budget.
+		probeCtx, cancel := context.WithTimeout(ctx, classProbeTimeout)
+		podA, podB, err = probeClass(probeCtx, fx, candidate, nodeA, nodeB)
+		cancel()
 		if err == nil {
 			return candidate, podA, podB, nil
 		}
@@ -267,6 +276,10 @@ func mountOnTwoNodes(ctx context.Context, fx *framework.Framework, pvc, nodeA, n
 	podB, err := fx.CreatePod(ctx, specB)
 	if err != nil {
 		return nil, nil, fmt.Errorf("pod on %s: %w", nodeB, err)
+	}
+	if podA.Spec.NodeName == podB.Spec.NodeName {
+		return nil, nil, fmt.Errorf("both preflight pods landed on %s, so nothing was proved about "+
+			"simultaneous mounting from two nodes", podA.Spec.NodeName)
 	}
 	// Read-write on both, simultaneously, verified through the filesystem.
 	if _, err := fx.C.MustSh(ctx, fx.Namespace, podA.Name, "main", "echo from-a > /mnt/share/preflight-a.txt && sync"); err != nil {
