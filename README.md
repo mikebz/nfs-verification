@@ -25,21 +25,32 @@ eight cases. The remaining cases land in the steps listed in
 | `test/e2e` | The cases; each names its plan ID in the comment above it |
 | `cmd/preflight` | `make preflight` |
 
-[`AGENTS.md`](AGENTS.md) holds the conventions this repository is written to,
-including what every test has to say about itself.
+[`AGENTS.md`](AGENTS.md) is the guide for working in this repository: how to
+approach a change, how to write a case, what to claim when you are done.
 
 ## Running
 
 ```sh
+make all                                             # fmt, vet, unit, build
 make unit                                            # harness unit tests, no cluster
 make preflight FLAGS="-storage-class=nfs -lease-seconds=60 -grace-seconds=90"
 make test-e2e  FLAGS="-storage-class=nfs -lease-seconds=60 -grace-seconds=90"
+make clean                                           # remove artifacts/
 ```
 
-The suite creates no namespaces. Everything lands in `default`, named and
-labelled per case so that teardown deletes exactly what the case made. The node
-agent is privileged by design, so a cluster enforcing a restricted Pod Security
-level on `default` cannot run the suite as it stands.
+Everything goes through `make`. The targets carry the flags, the timeouts and
+the run ID, so a result reported from a target is one anyone else can reproduce.
+`FLAGS` passes cluster-specific values through to the binary; `RUN_ID` overrides
+the generated run ID. `make unit` needs no cluster, no network and no
+kubeconfig, and unit tests must stay that way: a test under `pkg/` that needs a
+cluster belongs in `test/e2e` behind a capability check.
+
+The suite creates no namespaces. Everything lands in `default`. Objects are
+named `nfsv-<case>-<run>-<what>` and labelled with the run and the case, so
+teardown deletes exactly that selector, pods first and then claims. The full run
+ID stays in the name: truncating it collides across runs and turns triage into
+guesswork. The node agent is privileged by design, so a cluster enforcing a
+restricted Pod Security level on `default` cannot run the suite as it stands.
 
 Preflight runs once per cluster. A passing result is cached at
 `<repo>/artifacts/preflight-<context>.json`, keyed by kubeconfig context, and
@@ -53,6 +64,34 @@ Nothing runs until preflight passes. Preflight writes
 `artifacts/<run-id>/environment.json`; a failed case writes its own bundle under
 `artifacts/<run-id>/<CASE-ID>/` with pod logs, Kubernetes Events, `/proc/mounts`
 and dmesg from every involved node, and the injected-fault timeline.
+
+## Timeouts and budgets
+
+Every wait in the harness is bounded, and the bounds are named constants in
+`pkg/framework/wait.go` rather than literals at call sites. A timeout bug here
+does not look like a timeout bug: it looks like a test runner killed by its own
+`-timeout` and a pile of leaked claims.
+
+| Constant | Value | What it bounds |
+|---|---|---|
+| `PollInterval` | 2s | Between polls, everywhere |
+| `BindTimeout` | 120s | A claim reaching `Bound`, per Section 0 |
+| `PodReadyTimeout` | 5m | A pod reaching `Ready`, image pull included |
+| `PodTerminateTimeout` | 90s | A deleted pod leaving the API |
+| `DeleteTimeout` | 5m | The whole cleanup for one case |
+| `ArtifactTimeout` | 60s | The failure bundle, inside the cleanup budget |
+| `nodeInspectTimeout` | 10s | One node's inspection, per node |
+
+Two of these are not round numbers by accident. Test pods carry a 5 second
+termination grace period, so a pod still in the API after
+`PodTerminateTimeout` is a node that has stopped answering, not a slow unmount;
+teardown treats it as the hazard it is rather than waiting it out. And artifact
+collection runs on its own clock inside the cleanup budget, so one sick node
+cannot spend the whole budget there and leave nothing for cleanup.
+
+Cleanup budgets nest rather than share, and a case's own budget comes from
+`caseCtx`. Before adding a wait, add up the worst case: a five minute cleanup
+charged to every case eats the `go test -timeout` budget for the package.
 
 ## Cases in this repository so far
 
@@ -128,7 +167,8 @@ surface flag values that need setting for the deployment at hand, which is what
 the specific preflight failure messages exist to make quick.
 
 The unit tests cover the parts of the harness that can be wrong on a
-workstation: every manifest renders and decodes, the `df` and `stat` output the
-cases parse is parsed from real busybox output, and the background writer
+workstation: every manifest renders and decodes, the capacity and ownership
+parsers are run against the real `stat` and `df` on the machine running the
+test rather than against a written-out fixture, and the background writer
 DATA-04 depends on is run under a real shell. What none of them can tell you is
 whether NFS behaves; that needs a cluster.
