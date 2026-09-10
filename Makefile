@@ -24,7 +24,7 @@ fmt:
 
 .PHONY: check-fmt
 check-fmt:
-	@test -z "$$(gofmt -l .)" || (echo "Unformatted files found:" && gofmt -l . && exit 1)
+	@unformatted="$$(gofmt -l .)"; test -z "$$unformatted" || { echo "Unformatted files found:"; printf '%s\n' "$$unformatted"; exit 1; }
 
 .PHONY: vet
 vet:
