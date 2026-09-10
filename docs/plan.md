@@ -39,7 +39,10 @@ cluster, driven over `pods/exec`, using binaries that exist on any Linux image:
   the lock and integrity cases need exact, inspectable operations, and `fio`
   would make the failure harder to read, not easier.
 - `locktool`, a small static Go binary in this repository, arrives with DATA-06
-  for `fcntl` byte-range locks, which busybox `flock` cannot express.
+  for `fcntl` byte-range locks, which busybox `flock` cannot express. It also
+  extends CHAOS-06 to two clients holding disjoint ranges of one file; until
+  then that case asserts reclaim on whole-file locks, which travel to the server
+  as a lock over the whole range.
 
 This is what keeps the suite portable between GKE Standard and bare metal, and
 what keeps a workstation kernel out of the result.
@@ -140,12 +143,12 @@ Each step is one pull request. Later steps depend only on earlier ones.
 |---|---|---|
 | 1 | Approach, harness skeleton, preflight (Section 0), PROV-01, DATA-03, DATA-05 flock | done, [PR #1](https://github.com/mikebz/nfs-verification/pull/1) |
 | 2 | Presubmit cases that need nothing the harness does not already have: PROV-03, PROV-04, DATA-01, DATA-04, SEC-01 | done, [PR #3](https://github.com/mikebz/nfs-verification/pull/3) |
-| 2b | The three presubmit cases held back from step 2: DATA-02, OBS-04, SEC-02 | **this change** |
-| 3 | Chaos operations package plus CHAOS-01 and CHAOS-02, the SLO measurement path, fault timelines | **this change** |
-| 4 | Grace and lock reclaim: CHAOS-05, CHAOS-06, CHAOS-07, OBS-02, OBS-03 | |
+| 2b | The three presubmit cases held back from step 2: DATA-02, OBS-04, SEC-02 | [PR #4](https://github.com/mikebz/nfs-verification/pull/4) |
+| 3 | Chaos operations package plus CHAOS-01 and CHAOS-02, the SLO measurement path, fault timelines | [PR #4](https://github.com/mikebz/nfs-verification/pull/4) |
+| 4 | Grace and lock reclaim: CHAOS-05, CHAOS-06, CHAOS-07, OBS-02, OBS-03, designed in [`03-grace-and-lock-reclaim-design.md`](03-grace-and-lock-reclaim-design.md) | **this change** |
 | 5 | Node and infrastructure faults: CHAOS-03, CHAOS-08 to CHAOS-13, node power implementations | |
 | 6 | Remaining provisioning: PROV-02, PROV-05 to PROV-08, PROV-10, PROV-11 | |
-| 7 | Remaining data cases: DATA-06 to DATA-13, the locktool image for fcntl byte ranges | |
+| 7 | Remaining data cases: DATA-06 to DATA-13, the locktool image for fcntl byte ranges, and the sub-file half of CHAOS-06 it makes possible | |
 | 8 | Scale: SCALE-01, SCALE-02, SCALE-03, SCALE-05, SCALE-06 | |
 | 9 | Security and observability: SEC-03 to SEC-09, OBS-01, OBS-05, OBS-06, OBS-07 | |
 | 10 | Soak gate: PROV-09, DATA-14, CHAOS-14 to CHAOS-16, SCALE-04, SCALE-07 | |
@@ -302,6 +305,58 @@ Section 4.2 split exists: `make test-presubmit` skips `TestChaos...` and
 Grace and reclaim (CHAOS-05 to CHAOS-07) are step 4, and they are where lock
 behaviour gets pinned down properly; CHAOS-02 asserts only that a lock held
 across a failover is still exclusive afterwards.
+
+---
+
+## 3c. What step 4 contains
+
+Five cases, designed first in
+[`03-grace-and-lock-reclaim-design.md`](03-grace-and-lock-reclaim-design.md),
+and the two harness pieces they call. Step 3 could injure the server and time
+the outage; it could not see grace, which is the dominant term in every number
+it reported and the third question in the triage runbook.
+
+- CHAOS-05: five failovers in a row, each injected once the previous one has
+  recovered. Every cycle is asserted on its own, because a total that fits
+  inside a wall clock proves nothing if one cycle inside it took four minutes.
+  Where grace is observable, grace entered more than once per cycle fails the
+  case as a re-entry loop, which is the failure that presents as a hung client
+  in front of a healthy server.
+- CHAOS-06: locks held on several files across a failover, asserted afterwards
+  from both ends: every holder still holds, and a client on another node is
+  still refused. The reclaimed fraction is reported against the SLO row, which
+  is 100%.
+- CHAOS-07: a second client attempting a **new** lock while grace is in force.
+  It must never be granted inside the window, and it must be granted after it.
+  A client with outstanding un-reclaimed state is held across the whole case, so
+  the server cannot lift grace early and let the case pass vacuously.
+- OBS-02: a failover is visible to whoever runs the cluster, with a timestamp
+  and a duration, through the server's log stream or the Kubernetes API. A
+  failover only the client noticed is an observability defect.
+- OBS-03: grace entry and exit are both observable and the window is
+  measurable, against the two-lease bound in Section 3.8. This is the case the
+  plan says CHAOS-05 needs to be diagnosable at all.
+
+**Harness added**: a grace observer that reads the server's log stream through
+the Kubernetes API and classifies the lines announcing grace entry and exit,
+timestamped by the container runtime rather than by parsing each server's own
+format; and a lock probe that attempts a new lock once per second from a second
+client, logging outcomes on the pod's own filesystem in the same three-field
+format as the workload, so one parser serves both.
+
+**Whole-file, not byte ranges.** CHAOS-06 in the test plan says byte-range
+locks, and nothing on a busybox image can take one. A whole-file lock travels
+to an NFSv4 server as a lock over the whole range and is reclaimed by the same
+mechanism, so reclaim, exclusivity and the grace bar on new state are all
+asserted now. The sub-file dimension, two clients holding disjoint ranges of one
+file, arrives with `locktool` in step 7.
+
+**Gates.** The chaos name prefix now marks a case that injures the server,
+whatever section of the plan it comes from: OBS-02 and OBS-03 inject a fault,
+and the fast path holds no fault injection.
+
+**Still not here**: node power operations, network faults, the locktool image,
+metrics scraping, and any assertion that an alert fired.
 
 ---
 
