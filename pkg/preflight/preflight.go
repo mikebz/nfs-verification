@@ -181,16 +181,10 @@ func findRWXClass(ctx context.Context, c *framework.Client, e *env.Environment, 
 	if len(candidates) == 0 {
 		return "", "", nil, nil, fmt.Errorf("no RWX-capable StorageClass found: cluster has no StorageClasses")
 	}
-	fx, closeFx, err = framework.NewSystem(ctx, c, e, caps, "PREFLIGHT")
-	if err != nil {
-		return "", "", nil, nil, fmt.Errorf("creating preflight namespace: %w", err)
-	}
+	fx, closeFx = framework.NewSystem(c, e, caps, "PREFLIGHT")
 	var lastErr error
 	for _, candidate := range candidates {
-		name := "preflight-rwx-" + strings.ToLower(candidate)
-		if len(name) > 63 {
-			name = name[:63]
-		}
+		name := "rwx-" + strings.ToLower(candidate)
 		if _, err := fx.CreatePVC(ctx, framework.PVCSpec{Name: name, StorageClass: candidate}); err != nil {
 			lastErr = err
 			continue

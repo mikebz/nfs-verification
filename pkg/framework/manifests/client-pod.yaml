@@ -1,0 +1,45 @@
+# The standard test client: a shell holding the mount open so that cases drive
+# I/O through pods/exec with portable binaries (dd, sha256sum, flock, stat).
+# The harness never mounts the share itself.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ .Name | q }}
+  namespace: {{ .Namespace | q }}
+  labels:
+    {{- range $key, $value := .Labels }}
+    {{ $key | q }}: {{ $value | q }}
+    {{- end }}
+spec:
+  restartPolicy: Always
+  # Test pods are disposable; a long grace period only makes the cases that
+  # delete them slower to observe.
+  terminationGracePeriodSeconds: 5
+  {{- if .Node }}
+  # Cross-node cases pin explicitly rather than hoping the scheduler spreads
+  # them, so that a failure names the node it happened on.
+  nodeName: {{ .Node | q }}
+  {{- end }}
+  containers:
+    - name: main
+      image: {{ .Image | q }}
+      command:
+        {{- range .Command }}
+        - {{ . | q }}
+        {{- end }}
+      volumeMounts:
+        {{- range .Mounts }}
+        - name: {{ .VolumeName | q }}
+          mountPath: {{ .Path | q }}
+          readOnly: {{ .ReadOnly }}
+          {{- if .SubPath }}
+          subPath: {{ .SubPath | q }}
+          {{- end }}
+        {{- end }}
+  volumes:
+    {{- range .Mounts }}
+    - name: {{ .VolumeName | q }}
+      persistentVolumeClaim:
+        claimName: {{ .Claim | q }}
+        readOnly: {{ .ReadOnly }}
+    {{- end }}

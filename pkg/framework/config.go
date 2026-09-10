@@ -70,8 +70,9 @@ type Config struct {
 	GCloudZone    string
 	NodePowerCmd  string
 
-	KeepNamespaces bool
-	Verbose        bool
+	Namespace   string
+	KeepObjects bool
+	Verbose     bool
 
 	Delegations string
 	EnvFile     string
@@ -106,7 +107,8 @@ func init() {
 	flag.StringVar(&cfg.GCloudZone, "gcloud-zone", "", "GCP zone for node stop/start on GKE")
 	flag.StringVar(&cfg.NodePowerCmd, "node-power-cmd", "", "bare metal power command template, e.g. 'ipmitool -H {{.Node}} power {{.Action}}'")
 
-	flag.BoolVar(&cfg.KeepNamespaces, "keep-namespaces", false, "do not delete test namespaces, for triage")
+	flag.StringVar(&cfg.Namespace, "namespace", "default", "namespace for the test workloads; the suite creates no namespaces of its own")
+	flag.BoolVar(&cfg.KeepObjects, "keep-objects", false, "do not delete the objects a case created, for triage")
 	flag.BoolVar(&cfg.Verbose, "v-harness", false, "log every harness action")
 
 	flag.StringVar(&cfg.Delegations, "delegations", "auto", "whether delegations are enabled: auto, on, off")

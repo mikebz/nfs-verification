@@ -32,11 +32,11 @@ func (f *Framework) CollectArtifacts(ctx context.Context) error {
 	if err := f.dumpTimeline(dir); err != nil {
 		errs = append(errs, fmt.Sprintf("timeline: %v", err))
 	}
-	if err := f.dumpPods(ctx, dir, f.Namespace, "client"); err != nil {
+	if err := f.dumpPods(ctx, dir, f.Namespace, f.Selector(), "client"); err != nil {
 		errs = append(errs, fmt.Sprintf("client pods: %v", err))
 	}
 	if ns := f.Env.ServerNamespace(); ns != "" {
-		if err := f.dumpPods(ctx, dir, ns, "server"); err != nil {
+		if err := f.dumpPods(ctx, dir, ns, Cfg().ServerSelector, "server"); err != nil {
 			errs = append(errs, fmt.Sprintf("server pods: %v", err))
 		}
 	}
@@ -55,8 +55,8 @@ func (f *Framework) CollectArtifacts(ctx context.Context) error {
 	return nil
 }
 
-func (f *Framework) dumpPods(ctx context.Context, dir, ns, kind string) error {
-	pods, err := f.C.Kube.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{})
+func (f *Framework) dumpPods(ctx context.Context, dir, ns, selector, kind string) error {
+	pods, err := f.C.Kube.CoreV1().Pods(ns).List(ctx, ListOptions(selector))
 	if err != nil {
 		return err
 	}

@@ -13,7 +13,7 @@ import (
 // PROV-01: dynamic provision, bind, mount, write, delete. The PV must be
 // removed, not merely unbound: an unreclaimed backing volume is a leak that
 // surfaces weeks later as a quota failure with no obvious cause.
-func TestPROV01_ProvisionMountWriteDelete(t *testing.T) {
+func TestProvisionMountWriteDelete(t *testing.T) {
 	f := framework.New(t, "PROV-01", framework.GatePresubmit)
 	ctx, cancel := caseCtx(t, 15*time.Minute)
 	defer cancel()

@@ -20,10 +20,29 @@ collects artifacts and asserts.
 
 The harness is a **Kubernetes client, not an NFS client**. It never mounts the
 share itself. Every byte of I/O in every assertion comes from a pod inside the
-cluster running a portable binary (`dd`, `sha256sum`, `flock`, `stat`, later
-`fio`), driven over `pods/exec`. This is what keeps the suite portable between
-GKE Standard and bare metal, and what keeps a workstation kernel out of the
-result.
+cluster, driven over `pods/exec`, using binaries that exist on any Linux image:
+
+- `dd` writes and reads at a controlled block size and offset, and is the only
+  portable way to ask for `O_DIRECT` or an fsync on each block.
+- `sha256sum` produces the checksum that turns "the data came back" into an
+  assertion, and it runs in a different pod from the writer so the comparison
+  crosses the server rather than a local page cache.
+- `flock` takes and probes an advisory whole-file lock, which is how mutual
+  exclusion across nodes is tested without a lock daemon.
+- `stat` reports size, ownership and timestamps as the client sees them, for
+  the sparse-file, identity and squash cases.
+- `df` reports capacity as the workload sees it, which the expansion and
+  capacity cases compare against the control plane.
+- `fio` arrives with the load cases (DATA-14 and the scale soaks). It is the
+  only tool here that is not on a stock image, so it comes from a supplied
+  `-fio-image` and its cases skip without one. Nothing in this change uses it:
+  the lock and integrity cases need exact, inspectable operations, and `fio`
+  would make the failure harder to read, not easier.
+- `locktool`, a small static Go binary in this repository, arrives with DATA-06
+  for `fcntl` byte-range locks, which busybox `flock` cannot express.
+
+This is what keeps the suite portable between GKE Standard and bare metal, and
+what keeps a workstation kernel out of the result.
 
 ### Structure
 
@@ -44,6 +63,26 @@ attached to every failure report.
 A plan that requires humans to type version numbers correctly is wrong within a
 sprint. The flags that remain exist only for things a cluster genuinely cannot
 answer, and each one is listed in the README with why.
+
+### Namespaces and object naming
+
+The suite creates no namespaces. Everything lands in one namespace, `default`
+unless `-namespace` says otherwise, including the privileged node agent. Cases
+are kept apart by name and by label instead: every object a case creates is
+named `nfsv-<case>-<run>-<what>` and labelled with the run and the case, and
+teardown deletes exactly that label selector, pods first and then claims. The
+trade is deliberate: a namespace per case is tidier, but it hides ownership
+behind a generated name and it puts a namespace deletion, which is slow and
+which can wedge on a stuck finalizer, on the path of every case.
+
+### Objects come from manifests
+
+Pods and the node agent DaemonSet are embedded YAML templates under
+`pkg/framework/manifests`, rendered and decoded into typed objects. A manifest
+reads like something a person would apply, and it can be diffed against what
+was actually applied. Unit tests render every manifest and assert on the decoded
+object, so an indentation slip fails on a workstation rather than against a
+cluster.
 
 ### Gating and skipping
 
@@ -116,13 +155,16 @@ cases most likely to be blocked by cluster capacity rather than by defects.
   profiles. Unit-tested, including the fact that a 60s target under a 90s grace
   period is unachievable, which is why the default profile uses grace + 30s.
 - `pkg/env` — the environment record and its JSON form.
-- `pkg/framework` — clients, per-case fixture and namespace, pod and PVC
-  builders, exec, polling and measurement, flock helpers, the privileged node
-  agent, artifact collection, gating.
+- `pkg/framework` — clients, the per-case fixture, pod and PVC builders backed
+  by embedded YAML manifests, exec, polling and measurement, flock helpers, the
+  privileged node agent, artifact collection, gating.
 - `pkg/preflight` — Section 0 checks and all discovery.
 - `cmd/preflight` — `make preflight`, exits non-zero with a specific reason.
 
 **Cases**
+
+Test functions are named for what they do, not for their plan ID; the ID lives
+in the comment above each one.
 
 - PROV-01: provision, bind, mount, write, checksum, delete, and confirm the
   backing volume is reclaimed.

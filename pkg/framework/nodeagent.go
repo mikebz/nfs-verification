@@ -13,11 +13,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// AgentNamespace holds the one privileged component in the suite. Its absence
-// is a preflight failure rather than a silent skip: without it there are no
-// node-level assertions at all.
-const AgentNamespace = "nfs-verification-agent"
-
+// agentDaemonSet is the one privileged component in the suite. Its absence is a
+// preflight failure rather than a silent skip: without it there are no
+// node-level assertions at all. It lives in the configured namespace like
+// everything else the suite creates.
 const agentDaemonSet = "nfs-verification-node-agent"
 
 // Agent runs commands in the host namespaces of a node, which is how the suite
@@ -50,59 +49,25 @@ func NodeAgent(ctx context.Context, c *Client) (*Agent, error) {
 }
 
 func installAgent(ctx context.Context, c *Client) (*Agent, error) {
-	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
-		Name: AgentNamespace,
-		Labels: map[string]string{
-			// The agent is privileged by design; say so explicitly so a cluster
-			// running Pod Security admission rejects it loudly, not silently.
-			"pod-security.kubernetes.io/enforce": "privileged",
-			"nfs-verification/component":         "node-agent",
-		},
-	}}
-	if _, err := c.Kube.CoreV1().Namespaces().Create(ctx, ns, metav1.CreateOptions{}); err != nil && !isAlreadyExists(err) {
-		return nil, fmt.Errorf("creating agent namespace: %w", err)
+	ns := Cfg().Namespace
+	var ds appsv1.DaemonSet
+	if err := render("node-agent-daemonset.yaml", map[string]string{
+		"Name":      agentDaemonSet,
+		"Namespace": ns,
+		"Image":     Cfg().ToolsImage,
+	}, &ds); err != nil {
+		return nil, err
 	}
-
-	priv := true
-	hostPathDir := corev1.HostPathDirectory
-	labels := map[string]string{"app": agentDaemonSet}
-	ds := &appsv1.DaemonSet{
-		ObjectMeta: metav1.ObjectMeta{Name: agentDaemonSet, Namespace: AgentNamespace, Labels: labels},
-		Spec: appsv1.DaemonSetSpec{
-			Selector: &metav1.LabelSelector{MatchLabels: labels},
-			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{Labels: labels},
-				Spec: corev1.PodSpec{
-					HostPID:     true,
-					HostNetwork: true,
-					HostIPC:     true,
-					// Run everywhere, including control plane and cordoned or
-					// tainted nodes, so a drained node can still be inspected.
-					Tolerations: []corev1.Toleration{{Operator: corev1.TolerationOpExists}},
-					Containers: []corev1.Container{{
-						Name:            "agent",
-						Image:           Cfg().ToolsImage,
-						Command:         []string{"sh", "-c", "sleep infinity"},
-						SecurityContext: &corev1.SecurityContext{Privileged: &priv},
-						VolumeMounts: []corev1.VolumeMount{
-							{Name: "host", MountPath: "/host", ReadOnly: true},
-						},
-					}},
-					Volumes: []corev1.Volume{{
-						Name:         "host",
-						VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/", Type: &hostPathDir}},
-					}},
-				},
-			},
-		},
-	}
-	if _, err := c.Kube.AppsV1().DaemonSets(AgentNamespace).Create(ctx, ds, metav1.CreateOptions{}); err != nil && !isAlreadyExists(err) {
-		return nil, fmt.Errorf("creating node agent DaemonSet: %w", err)
+	if _, err := c.Kube.AppsV1().DaemonSets(ns).Create(ctx, &ds, metav1.CreateOptions{}); err != nil && !isAlreadyExists(err) {
+		return nil, fmt.Errorf("creating the node agent DaemonSet in %s: %w. "+
+			"The agent is privileged by design; if Pod Security admission rejected it, either label the "+
+			"namespace pod-security.kubernetes.io/enforce=privileged or point -namespace at one that allows it",
+			ns, err)
 	}
 
 	a := &Agent{c: c, pods: map[string]string{}}
 	err := Poll(ctx, PollInterval, PodReadyTimeout, func(ctx context.Context) (bool, error) {
-		cur, err := c.Kube.AppsV1().DaemonSets(AgentNamespace).Get(ctx, agentDaemonSet, metav1.GetOptions{})
+		cur, err := c.Kube.AppsV1().DaemonSets(ns).Get(ctx, agentDaemonSet, metav1.GetOptions{})
 		if err != nil {
 			return false, err
 		}
@@ -122,7 +87,7 @@ func installAgent(ctx context.Context, c *Client) (*Agent, error) {
 }
 
 func (a *Agent) refresh(ctx context.Context) error {
-	pods, err := a.c.Kube.CoreV1().Pods(AgentNamespace).List(ctx, ListOptions("app="+agentDaemonSet))
+	pods, err := a.c.Kube.CoreV1().Pods(Cfg().Namespace).List(ctx, ListOptions("app="+agentDaemonSet))
 	if err != nil {
 		return err
 	}
@@ -163,7 +128,7 @@ func (a *Agent) Run(ctx context.Context, node, script string) (string, error) {
 	// nsenter into PID 1 puts the command in the host mount, network, IPC, UTS
 	// and PID namespaces, which is what makes /proc/mounts and signals real.
 	wrapped := fmt.Sprintf("nsenter -t 1 -m -u -i -n -p -- sh -c %s", shellQuote(script))
-	r := a.c.Sh(ctx, AgentNamespace, pod, "agent", wrapped)
+	r := a.c.Sh(ctx, Cfg().Namespace, pod, "agent", wrapped)
 	if r.Err != nil {
 		return r.Combined(), fmt.Errorf("node %s: %w: %s", node, r.Err, r.Combined())
 	}

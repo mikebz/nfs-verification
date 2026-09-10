@@ -20,7 +20,8 @@ type MountSpec struct {
 
 // PodSpec is the subset of the pod API the suite needs. Anything not here is
 // deliberately absent: a test pod that needs more than this is testing the pod
-// API rather than the storage system.
+// API rather than the storage system. Fields arrive with the cases that need
+// them, the identity fields with SEC-01 and SEC-02.
 type PodSpec struct {
 	Name    string
 	Image   string
@@ -28,83 +29,71 @@ type PodSpec struct {
 	Mounts  []MountSpec
 	// Node pins the pod. Cross-node cases pin explicitly rather than hoping the
 	// scheduler spreads them.
-	Node string
-	// RunAsUser and FSGroup drive the identity cases.
-	RunAsUser  *int64
-	RunAsGroup *int64
-	FSGroup    *int64
-	Privileged bool
-	Labels     map[string]string
-	// RestartNever makes the pod a one-shot job-like unit whose exit code is
-	// the assertion.
-	RestartNever bool
-	Env          []corev1.EnvVar
+	Node   string
+	Labels map[string]string
 }
 
-// PodBuilder assembles a pod object from a PodSpec.
-func (f *Framework) PodBuilder(spec PodSpec) *corev1.Pod {
-	image := spec.Image
-	if image == "" {
-		image = Cfg().ToolsImage
+// podTemplateData is what manifests/client-pod.yaml is rendered against.
+type podTemplateData struct {
+	Name      string
+	Namespace string
+	Image     string
+	Node      string
+	Command   []string
+	Labels    map[string]string
+	Mounts    []podMountData
+}
+
+type podMountData struct {
+	VolumeName string
+	Claim      string
+	Path       string
+	ReadOnly   bool
+	SubPath    string
+}
+
+// PodBuilder renders manifests/client-pod.yaml into a pod object.
+func (f *Framework) PodBuilder(spec PodSpec) (*corev1.Pod, error) {
+	data := podTemplateData{
+		Name:      f.Name(spec.Name),
+		Namespace: f.Namespace,
+		Image:     spec.Image,
+		Node:      spec.Node,
+		Command:   spec.Command,
+		Labels:    f.Labels(),
 	}
-	cmd := spec.Command
-	if len(cmd) == 0 {
-		cmd = []string{"sh", "-c", "sleep infinity"}
+	if data.Image == "" {
+		data.Image = Cfg().ToolsImage
 	}
-	labels := f.Labels()
+	if len(data.Command) == 0 {
+		data.Command = []string{"sh", "-c", "sleep infinity"}
+	}
 	for k, v := range spec.Labels {
-		labels[k] = v
+		data.Labels[k] = v
 	}
-	var mounts []corev1.VolumeMount
-	var volumes []corev1.Volume
 	for i, m := range spec.Mounts {
-		name := fmt.Sprintf("vol%d", i)
-		mounts = append(mounts, corev1.VolumeMount{Name: name, MountPath: m.Path, ReadOnly: m.ReadOnly, SubPath: m.SubPath})
-		volumes = append(volumes, corev1.Volume{
-			Name: name,
-			VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-				ClaimName: m.Claim, ReadOnly: m.ReadOnly,
-			}},
+		data.Mounts = append(data.Mounts, podMountData{
+			VolumeName: fmt.Sprintf("vol%d", i),
+			Claim:      m.Claim,
+			Path:       m.Path,
+			ReadOnly:   m.ReadOnly,
+			SubPath:    m.SubPath,
 		})
 	}
-	restart := corev1.RestartPolicyAlways
-	if spec.RestartNever {
-		restart = corev1.RestartPolicyNever
+	var pod corev1.Pod
+	if err := render("client-pod.yaml", data, &pod); err != nil {
+		return nil, err
 	}
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: spec.Name, Namespace: f.Namespace, Labels: labels},
-		Spec: corev1.PodSpec{
-			RestartPolicy: restart,
-			NodeName:      spec.Node,
-			Containers: []corev1.Container{{
-				Name:         "main",
-				Image:        image,
-				Command:      cmd,
-				VolumeMounts: mounts,
-				Env:          spec.Env,
-			}},
-			Volumes: volumes,
-			// Test pods are disposable; a long grace period only makes
-			// force-delete cases slower to observe.
-			TerminationGracePeriodSeconds: ptr(int64(5)),
-		},
-	}
-	if spec.Privileged {
-		pod.Spec.Containers[0].SecurityContext = &corev1.SecurityContext{Privileged: ptr(true)}
-	}
-	if spec.RunAsUser != nil || spec.FSGroup != nil || spec.RunAsGroup != nil {
-		pod.Spec.SecurityContext = &corev1.PodSecurityContext{
-			RunAsUser:  spec.RunAsUser,
-			RunAsGroup: spec.RunAsGroup,
-			FSGroup:    spec.FSGroup,
-		}
-	}
-	return pod
+	return &pod, nil
 }
 
 // CreatePod creates a pod and waits for it to be Running and Ready.
 func (f *Framework) CreatePod(ctx context.Context, spec PodSpec) (*corev1.Pod, error) {
-	pod, err := f.C.Kube.CoreV1().Pods(f.Namespace).Create(ctx, f.PodBuilder(spec), metav1.CreateOptions{})
+	obj, err := f.PodBuilder(spec)
+	if err != nil {
+		return nil, err
+	}
+	pod, err := f.C.Kube.CoreV1().Pods(f.Namespace).Create(ctx, obj, metav1.CreateOptions{})
 	if err != nil {
 		return nil, err
 	}
@@ -123,6 +112,7 @@ func (f *Framework) MustPod(ctx context.Context, spec PodSpec) *corev1.Pod {
 
 // WaitPodReady waits for a pod to be Running with all containers ready.
 func (f *Framework) WaitPodReady(ctx context.Context, name string, timeout time.Duration) (*corev1.Pod, error) {
+	name = f.Name(name)
 	var ready *corev1.Pod
 	err := Poll(ctx, PollInterval, timeout, func(ctx context.Context) (bool, error) {
 		pod, err := f.C.Kube.CoreV1().Pods(f.Namespace).Get(ctx, name, metav1.GetOptions{})
@@ -148,6 +138,7 @@ func (f *Framework) WaitPodReady(ctx context.Context, name string, timeout time.
 
 // WaitPodGone waits for a pod to disappear from the API.
 func (f *Framework) WaitPodGone(ctx context.Context, name string, timeout time.Duration) error {
+	name = f.Name(name)
 	return Poll(ctx, PollInterval, timeout, func(ctx context.Context) (bool, error) {
 		_, err := f.C.Kube.CoreV1().Pods(f.Namespace).Get(ctx, name, metav1.GetOptions{})
 		if err != nil {
@@ -160,21 +151,21 @@ func (f *Framework) WaitPodGone(ctx context.Context, name string, timeout time.D
 // DeletePodNow force-deletes a pod, which is how the lock-release cases model a
 // client that vanished without unlocking.
 func (f *Framework) DeletePodNow(ctx context.Context, name string) error {
-	return IgnoreNotFound(f.C.Kube.CoreV1().Pods(f.Namespace).Delete(ctx, name, DeleteNow()))
+	return IgnoreNotFound(f.C.Kube.CoreV1().Pods(f.Namespace).Delete(ctx, f.Name(name), DeleteNow()))
 }
 
 // Sh runs a shell snippet in a pod of this namespace.
 func (f *Framework) Sh(ctx context.Context, pod, script string) ExecResult {
-	return f.C.Sh(ctx, f.Namespace, pod, "main", script)
+	return f.C.Sh(ctx, f.Namespace, f.Name(pod), "main", script)
 }
 
 // MustShf runs a shell snippet in a pod and fails the test on error.
 func (f *Framework) MustShf(ctx context.Context, pod, format string, args ...any) string {
 	f.T.Helper()
 	script := fmt.Sprintf(format, args...)
-	out, err := f.C.MustSh(ctx, f.Namespace, pod, "main", script)
+	out, err := f.C.MustSh(ctx, f.Namespace, f.Name(pod), "main", script)
 	if err != nil {
-		f.T.Fatalf("running %q in %s: %v", script, pod, err)
+		f.T.Fatalf("running %q in %s: %v", script, f.Name(pod), err)
 	}
 	return out
 }

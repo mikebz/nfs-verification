@@ -6,9 +6,7 @@ import (
 	"log"
 	"strings"
 	"testing"
-	"time"
 
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/mikebz/nfs-verification/pkg/env"
@@ -28,8 +26,10 @@ type TestingT interface {
 	Name() string
 }
 
-// Framework is the per-test fixture: one namespace, the shared clients, and the
-// environment record discovered at preflight.
+// Framework is the per-test fixture: the shared clients, the environment record
+// discovered at preflight, and a name prefix that keeps one case's objects
+// apart from another's. It creates no namespace: everything the suite makes
+// lands in the configured namespace, which defaults to default.
 type Framework struct {
 	T    TestingT
 	C    *Client
@@ -43,49 +43,47 @@ type Framework struct {
 	faults   []FaultEvent
 }
 
-// New creates a namespace-scoped fixture for one case. caseID is the plan's ID,
-// for example "DATA-05"; it lands in labels and in the artifact bundle so a
-// failure can be traced back to the case that produced it.
+// New creates the fixture for one case. caseID is the plan's ID, for example
+// "DATA-05"; it prefixes every object the case creates, lands in labels, and
+// names the artifact bundle, so a stray object can be traced back to the case
+// and the run that made it.
 func New(t *testing.T, caseID string, gate Gate) *Framework {
 	t.Helper()
 	RequireGate(t, gate)
 	if suiteErr != nil {
 		t.Fatalf("suite not initialized: %v", suiteErr)
 	}
-	f := &Framework{T: t, C: suiteClient, Env: suiteEnv, Caps: suiteCaps, CaseID: caseID}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-	ns, err := f.createNamespace(ctx)
-	if err != nil {
-		t.Fatalf("creating namespace for %s: %v", caseID, err)
+	f := &Framework{
+		T: t, C: suiteClient, Env: suiteEnv, Caps: suiteCaps,
+		CaseID:    caseID,
+		Namespace: Cfg().Namespace,
 	}
-	f.Namespace = ns
 
 	t.Cleanup(func() {
-		cctx, ccancel := context.WithTimeout(context.Background(), DeleteTimeout)
-		defer ccancel()
+		ctx, cancel := context.WithTimeout(context.Background(), DeleteTimeout)
+		defer cancel()
 		if f.T != nil && f.T.Failed() {
-			// Artifacts before teardown: a deleted namespace tells no stories.
-			if err := f.CollectArtifacts(cctx); err != nil {
+			// Artifacts before teardown: deleted pods tell no stories.
+			if err := f.CollectArtifacts(ctx); err != nil {
 				t.Logf("collecting artifacts: %v", err)
 			}
 		}
 		for i := len(f.cleanups) - 1; i >= 0; i-- {
-			f.cleanups[i](cctx)
+			f.cleanups[i](ctx)
 		}
-		if Cfg().KeepNamespaces {
-			t.Logf("keeping namespace %s for triage", f.Namespace)
+		if Cfg().KeepObjects {
+			t.Logf("keeping the objects of %s in namespace %s for triage (selector %s)",
+				f.CaseID, f.Namespace, f.Selector())
 			return
 		}
-		if err := IgnoreNotFound(f.C.Kube.CoreV1().Namespaces().Delete(cctx, f.Namespace, metav1.DeleteOptions{})); err != nil {
-			t.Logf("deleting namespace %s: %v", f.Namespace, err)
+		if err := f.DeleteCaseObjects(ctx); err != nil {
+			t.Logf("cleaning up after %s: %v", f.CaseID, err)
 		}
 	})
 	return f
 }
 
-// Defer registers a cleanup that runs before the namespace is deleted.
+// Defer registers a cleanup that runs before the case's objects are deleted.
 func (f *Framework) Defer(fn func(context.Context)) { f.cleanups = append(f.cleanups, fn) }
 
 // Labels are stamped on everything the fixture creates.
@@ -96,17 +94,53 @@ func (f *Framework) Labels() map[string]string {
 	}
 }
 
-func (f *Framework) createNamespace(ctx context.Context) (string, error) {
-	base := fmt.Sprintf("nfsv-%s-", strings.ToLower(strings.ReplaceAll(f.CaseID, "_", "-")))
-	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
-		GenerateName: base,
-		Labels:       f.Labels(),
-	}}
-	created, err := f.C.Kube.CoreV1().Namespaces().Create(ctx, ns, metav1.CreateOptions{})
-	if err != nil {
-		return "", err
+// Name prefixes a logical object name with the case and run, so that two cases
+// in one namespace cannot collide and a leftover object says where it came
+// from. It is idempotent, so passing an already-prefixed name is harmless.
+func (f *Framework) Name(logical string) string {
+	prefix := f.prefix()
+	if strings.HasPrefix(logical, prefix) {
+		return logical
 	}
-	return created.Name, nil
+	return prefix + logical
+}
+
+func (f *Framework) prefix() string {
+	run := Cfg().RunID
+	if i := strings.LastIndex(run, "-"); i >= 0 && i+1 < len(run) {
+		run = run[i+1:]
+	}
+	return fmt.Sprintf("nfsv-%s-%s-", strings.ToLower(strings.ReplaceAll(f.CaseID, "_", "-")), run)
+}
+
+// Selector matches everything this case created.
+func (f *Framework) Selector() string {
+	return fmt.Sprintf("nfs-verification/run=%s,nfs-verification/case=%s",
+		Cfg().RunID, strings.ToLower(f.CaseID))
+}
+
+// DeleteCaseObjects removes what the case made. Pods go first and are waited
+// out: deleting a claim while a pod still mounts it is PROV-03's assertion, not
+// a teardown strategy.
+func (f *Framework) DeleteCaseObjects(ctx context.Context) error {
+	pods := f.C.Kube.CoreV1().Pods(f.Namespace)
+	if err := pods.DeleteCollection(ctx, DeleteNow(), ListOptions(f.Selector())); err != nil {
+		return fmt.Errorf("deleting pods: %w", err)
+	}
+	if err := Poll(ctx, PollInterval, DeleteTimeout, func(ctx context.Context) (bool, error) {
+		list, err := pods.List(ctx, ListOptions(f.Selector()))
+		if err != nil {
+			return false, err
+		}
+		return len(list.Items) == 0, fmt.Errorf("%d pods still terminating", len(list.Items))
+	}); err != nil {
+		return fmt.Errorf("waiting for pods to go away: %w", err)
+	}
+	if err := f.C.Kube.CoreV1().PersistentVolumeClaims(f.Namespace).
+		DeleteCollection(ctx, metav1.DeleteOptions{}, ListOptions(f.Selector())); err != nil {
+		return fmt.Errorf("deleting claims: %w", err)
+	}
+	return nil
 }
 
 // Logf logs through the test, prefixed with the case ID. Preflight fixtures
@@ -140,21 +174,16 @@ func (f *Framework) Faults() []FaultEvent { return f.faults }
 
 // NewSystem builds a fixture with no test attached, for preflight and for
 // tooling. The caller owns teardown via the returned close function.
-func NewSystem(ctx context.Context, c *Client, e *env.Environment, caps Capabilities, caseID string) (*Framework, func(context.Context), error) {
-	f := &Framework{C: c, Env: e, Caps: caps, CaseID: caseID}
-	ns, err := f.createNamespace(ctx)
-	if err != nil {
-		return nil, nil, err
-	}
-	f.Namespace = ns
+func NewSystem(c *Client, e *env.Environment, caps Capabilities, caseID string) (*Framework, func(context.Context)) {
+	f := &Framework{C: c, Env: e, Caps: caps, CaseID: caseID, Namespace: Cfg().Namespace}
 	closeFn := func(ctx context.Context) {
 		for i := len(f.cleanups) - 1; i >= 0; i-- {
 			f.cleanups[i](ctx)
 		}
-		if Cfg().KeepNamespaces {
+		if Cfg().KeepObjects {
 			return
 		}
-		_ = IgnoreNotFound(c.Kube.CoreV1().Namespaces().Delete(ctx, ns, metav1.DeleteOptions{}))
+		_ = f.DeleteCaseObjects(ctx)
 	}
-	return f, closeFn, nil
+	return f, closeFn
 }

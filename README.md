@@ -16,7 +16,8 @@ three cases. The remaining cases land in the steps listed in `plan.md`.
 |---|---|
 | `pkg/slo` | Timing and correctness targets, and the two lease/grace profiles |
 | `pkg/env` | The environment record written to `artifacts/<run-id>/environment.json` |
-| `pkg/framework` | Clients, per-case fixture, pods, PVCs, exec, locks, the privileged node agent, artifact collection |
+| `pkg/framework` | Clients, per-case fixture, pods and PVCs from embedded manifests, exec, locks, the privileged node agent, artifact collection |
+| `pkg/framework/manifests` | The YAML the suite applies: the client pod and the node agent DaemonSet |
 | `pkg/preflight` | Section 0 checks and all discovery |
 | `test/e2e` | The cases, named for their plan ID |
 | `cmd/preflight` | `make preflight` |
@@ -28,6 +29,12 @@ make unit                                            # harness unit tests, no cl
 make preflight   FLAGS="-server-namespace=nfs -server-selector=app=nfs-server"
 make test-presubmit FLAGS="-server-namespace=nfs -server-selector=app=nfs-server"
 ```
+
+The suite creates no namespaces. Everything lands in `default`, or in
+`-namespace`, and is named and labelled per case so that teardown deletes
+exactly what the case made. The node agent is privileged by design, so a
+namespace enforcing a restricted Pod Security level will reject it; preflight
+says so and names the remedy.
 
 Nothing runs until preflight passes. Preflight writes
 `artifacts/<run-id>/environment.json`; a failed case writes its own bundle under
