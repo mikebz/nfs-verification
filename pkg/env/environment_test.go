@@ -9,7 +9,7 @@ import (
 )
 
 // Preflight serializes the environment record to artifacts/<run-id>/environment.json
-// and reruns load it back via -env-file. A serialization or deserialization bug
+// and loads it back on reruns via -env-file. A serialization or deserialization bug
 // here corrupts the environment record silently.
 
 // TestEnvironmentRoundTrip verifies that an Environment record with nodes,
