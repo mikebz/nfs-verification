@@ -208,3 +208,49 @@ func TestClientPodManifestIdentityIsOptional(t *testing.T) {
 		t.Errorf("a pod that pinned no identity got one: %+v", plain.Spec.SecurityContext)
 	}
 }
+
+// TestBrokenNFSVolumeManifestRenders covers the volume OBS-04 manufactures a
+// mount failure with. Every property here is what keeps the case from touching
+// anything real: an address that cannot route, a class no provisioner adopts,
+// and a reclaim policy for a volume nothing provisioned.
+//
+// Steps:
+//  1. Render the PV.
+//  2. Assert the server address stays inside the range RFC 5737 reserves for
+//     documentation.
+//  3. Assert the reclaim policy is Retain and the storage class is empty.
+//  4. Assert the mount options and capacity survived decoding.
+func TestBrokenNFSVolumeManifestRenders(t *testing.T) {
+	f := &Framework{CaseID: "OBS-04"}
+	var pv corev1.PersistentVolume
+	err := render("static-nfs-pv.yaml", map[string]any{
+		"Name": f.Name("obs04"), "Labels": f.Labels(), "Size": "1Gi",
+		"Server": UnroutableServer, "Path": "/export/does-not-exist",
+		"Options": []string{"vers=4.1", "soft", "retry=1"},
+	}, &pv)
+	if err != nil {
+		t.Fatalf("rendering the broken PV: %v", err)
+	}
+	if pv.Spec.NFS == nil || pv.Spec.NFS.Server != UnroutableServer {
+		t.Fatalf("the volume does not point where the case intends: %+v", pv.Spec)
+	}
+	// RFC 5737 reserves this range for documentation. If this ever renders as a
+	// routable address, the case stops manufacturing a failure and starts
+	// mounting something real.
+	if !strings.HasPrefix(pv.Spec.NFS.Server, "192.0.2.") {
+		t.Errorf("server %q is outside the range reserved for documentation", pv.Spec.NFS.Server)
+	}
+	if pv.Spec.PersistentVolumeReclaimPolicy != corev1.PersistentVolumeReclaimRetain {
+		t.Errorf("reclaim policy is %s: nothing provisioned this volume, so nothing can delete it",
+			pv.Spec.PersistentVolumeReclaimPolicy)
+	}
+	if pv.Spec.StorageClassName != "" {
+		t.Errorf("storage class is %q, want empty so no provisioner adopts the volume", pv.Spec.StorageClassName)
+	}
+	if got := pv.Spec.MountOptions; len(got) != 3 || got[0] != "vers=4.1" {
+		t.Errorf("mount options did not survive decoding: %v", got)
+	}
+	if q := pv.Spec.Capacity[corev1.ResourceStorage]; q.String() != "1Gi" {
+		t.Errorf("capacity is %s, want 1Gi", q.String())
+	}
+}

@@ -3,6 +3,7 @@ package e2e
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -254,3 +255,129 @@ func TestNoVisibilityBeforeClose(t *testing.T) {
 	}
 	t.Logf("the reader on %s saw the closed file after %s", nodeB, time.Since(start).Round(time.Millisecond))
 }
+
+// appendCaveat is attached to every DATA-02 failure. NFSv4.1 has no append
+// operation: a client implements O_APPEND by writing at the offset it believes
+// to be end of file, and with several clients appending at once that belief can
+// be stale. An exact record count is therefore an implementation property, not
+// a protocol guarantee, and a failure here belongs in the boundary discussion
+// before it is filed against the server.
+const appendCaveat = "\n\nNote before filing: NFSv4.1 has no append operation. A client implements O_APPEND " +
+	"by writing at the offset it believes to be end of file, so concurrent appends from several clients " +
+	"are an implementation property and not something the protocol promises (see gap 1 in docs/plan.md). " +
+	"Route this to the boundary discussion, not to the server owner, unless records are torn rather than lost: " +
+	"a torn record is corruption under any reading."
+
+// DATA-02: N pods append to one file with O_APPEND. Every record must arrive
+// whole, and the byte count must be exact. The second half of that is the
+// assertion the plan flags as stronger than the protocol, so it fails with the
+// caveat above rather than as a bare mismatch.
+//
+// Steps:
+//  1. Put four pods on the available worker nodes, round robin, on one claim,
+//     and truncate the shared file.
+//  2. Have all four append fifty short records at the same time, each through
+//     one descriptor held open for its whole loop.
+//  3. Read the file from a pod that did not write it.
+//  4. Assert every line is a whole record, and that no record appears twice.
+//     A torn record is corruption under any reading of the protocol.
+//  5. Assert the line count is exactly what was written. This is the flagged
+//     assertion, so a mismatch carries the note that routes it.
+func TestConcurrentAppendToOneFile(t *testing.T) {
+	f := framework.New(t, "DATA-02")
+	ctx, cancel := caseCtx(t, 20*time.Minute)
+	defer cancel()
+
+	nodes, err := f.WorkerNodes(ctx)
+	if err != nil {
+		t.Fatalf("listing worker nodes: %v", err)
+	}
+	if len(nodes) == 0 {
+		t.Fatalf("no schedulable worker nodes")
+	}
+	// Records are one short line each, well under a page, so a torn record
+	// means the append path tore it and not that the record was too large to
+	// write in one operation.
+	const (
+		appenders = 4
+		records   = 50
+	)
+	pvc := f.MustRWXPVC(ctx, "data02")
+	pods := make([]string, appenders)
+	for i := range pods {
+		pods[i] = fmt.Sprintf("appender%d", i)
+		f.MustPod(ctx, toolsPod(pods[i], pvc.Name, nodes[i%len(nodes)]))
+	}
+
+	path := fileIn("data02.log")
+	f.MustShf(ctx, pods[0], ": > %s", framework.Quote(path))
+
+	// The redirect wraps the whole loop, so the file is opened once with
+	// O_APPEND and every record is written through that one descriptor. That is
+	// the shape of a real log appender, and it is the harder case: a client
+	// that reopened per record would revalidate the size each time and lose the
+	// property under test. Running the loop inside the pod rather than driving
+	// each record over exec is what makes the appends concurrent at all.
+	errs := make([]error, appenders)
+	var wg sync.WaitGroup
+	for i, pod := range pods {
+		wg.Add(1)
+		go func(i int, pod string) {
+			defer wg.Done()
+			_, errs[i] = f.C.MustSh(ctx, framework.Namespace, f.Name(pod), "main", fmt.Sprintf(
+				`set -e; name=%s; { i=0; while [ $i -lt %d ]; do i=$((i+1)); `+
+					`printf 'record-from-%%s-%%04d\n' "$name" "$i"; done; } >> %s; echo done`,
+				framework.Quote(pod), records, framework.Quote(path)))
+		}(i, pod)
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("appender %d (%s): %v", i, pods[i], err)
+		}
+	}
+
+	// Read from a pod that did not write, so the comparison crosses the server.
+	reader := pods[appenders-1]
+	out := f.MustShf(ctx, reader, "cat %s", framework.Quote(path))
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	if out == "" {
+		lines = nil
+	}
+
+	// Integrity first, because it is the assertion that holds under any reading
+	// of the protocol: a record that arrived must have arrived whole.
+	valid := map[string]int{}
+	var torn []string
+	for _, line := range lines {
+		if appendRecord.MatchString(line) {
+			valid[line]++
+			continue
+		}
+		torn = append(torn, line)
+	}
+	if len(torn) > 0 {
+		show := torn
+		if len(show) > 5 {
+			show = show[:5]
+		}
+		t.Errorf("%d of %d lines are not whole records, so concurrent appends interleaved within a record: %q",
+			len(torn), len(lines), show)
+	}
+	for line, n := range valid {
+		if n > 1 {
+			t.Errorf("record %q appears %d times: an append was applied more than once", line, n)
+		}
+	}
+
+	// Then the count, which is the part the plan flags.
+	want := appenders * records
+	if len(lines) != want {
+		t.Errorf("the file holds %d lines, want %d from %d appenders writing %d records each; "+
+			"%d whole, %d torn%s", len(lines), want, appenders, records, len(valid), len(torn), appendCaveat)
+	}
+}
+
+// appendRecord matches a whole record. Anything else in the file is two writes
+// that landed on top of each other.
+var appendRecord = regexp.MustCompile(`^record-from-[a-z0-9-]+-\d{4}$`)
