@@ -3,10 +3,12 @@ package framework
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -163,4 +165,92 @@ func (f *Framework) WaitPVCGone(ctx context.Context, name string, timeout time.D
 		}
 		return false, fmt.Errorf("pvc %s still present", name)
 	})
+}
+
+// ExpandPVC requests a new size on an existing claim. It returns the API's
+// error unwrapped, because a class that does not advertise expansion is
+// expected to reject the request and the case asserts on that rejection.
+func (f *Framework) ExpandPVC(ctx context.Context, name, size string) error {
+	qty, err := resource.ParseQuantity(size)
+	if err != nil {
+		return fmt.Errorf("parsing size %q: %w", size, err)
+	}
+	claims := f.C.Kube.CoreV1().PersistentVolumeClaims(Namespace)
+	// Read-modify-write, retried on conflict: the resize controller writes to
+	// the same object, so a stale read here is ordinary rather than a defect.
+	return retryOnConflict(func() error {
+		pvc, err := claims.Get(ctx, f.Name(name), metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		if pvc.Spec.Resources.Requests == nil {
+			pvc.Spec.Resources.Requests = corev1.ResourceList{}
+		}
+		pvc.Spec.Resources.Requests[corev1.ResourceStorage] = qty
+		_, err = claims.Update(ctx, pvc, metav1.UpdateOptions{})
+		return err
+	})
+}
+
+// WaitPVCCapacity waits for status.capacity to reach at least size. Status, not
+// spec: spec is what was asked for, status is what the driver delivered.
+func (f *Framework) WaitPVCCapacity(ctx context.Context, name, size string, timeout time.Duration) (resource.Quantity, error) {
+	want, err := resource.ParseQuantity(size)
+	if err != nil {
+		return resource.Quantity{}, fmt.Errorf("parsing size %q: %w", size, err)
+	}
+	var got resource.Quantity
+	err = Poll(ctx, PollInterval, timeout, func(ctx context.Context) (bool, error) {
+		pvc, err := f.C.Kube.CoreV1().PersistentVolumeClaims(Namespace).Get(ctx, f.Name(name), metav1.GetOptions{})
+		if err != nil {
+			return false, err
+		}
+		got = pvc.Status.Capacity[corev1.ResourceStorage]
+		if got.Cmp(want) >= 0 {
+			return true, nil
+		}
+		return false, fmt.Errorf("claim %s reports %s, want at least %s%s",
+			name, got.String(), want.String(), describeResizeConditions(pvc))
+	})
+	return got, err
+}
+
+// describeResizeConditions names the resize condition the driver left behind,
+// which is the difference between "expansion is still running" and "expansion
+// needs a pod restart the case is not doing".
+func describeResizeConditions(pvc *corev1.PersistentVolumeClaim) string {
+	var parts []string
+	for _, c := range pvc.Status.Conditions {
+		parts = append(parts, fmt.Sprintf("%s=%s(%s)", c.Type, c.Status, c.Message))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return " [" + strings.Join(parts, " ") + "]"
+}
+
+// retryOnConflict retries a read-modify-write a few times on a conflict.
+func retryOnConflict(fn func() error) error {
+	var err error
+	for i := 0; i < 5; i++ {
+		if err = fn(); !apierrors.IsConflict(err) {
+			return err
+		}
+	}
+	return err
+}
+
+// GetPVC returns a claim by its logical name.
+func (f *Framework) GetPVC(ctx context.Context, name string) (*corev1.PersistentVolumeClaim, error) {
+	return f.C.Kube.CoreV1().PersistentVolumeClaims(Namespace).Get(ctx, f.Name(name), metav1.GetOptions{})
+}
+
+// DeletePVC deletes a claim. Deleting one a pod still mounts is a supported
+// operation, not a hazard: the pvc-protection finalizer holds the object in
+// Terminating until the mount is gone, which is exactly what PROV-03 asserts.
+// The hazard in docs/findings.md F-001 is deleting the claim after the pod has
+// been *force* removed from the API, which defeats that protection.
+func (f *Framework) DeletePVC(ctx context.Context, name string) error {
+	return IgnoreNotFound(f.C.Kube.CoreV1().PersistentVolumeClaims(Namespace).
+		Delete(ctx, f.Name(name), metav1.DeleteOptions{}))
 }

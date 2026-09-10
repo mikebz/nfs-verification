@@ -115,3 +115,48 @@ func TestNameIsIdempotent(t *testing.T) {
 		t.Errorf("prefixing twice changed the name: %q then %q", once, twice)
 	}
 }
+
+func TestClientPodManifestIdentity(t *testing.T) {
+	f := &Framework{CaseID: "SEC-01"}
+	pod, err := f.PodBuilder(PodSpec{
+		Name:      "writer",
+		Mounts:    []MountSpec{{Claim: "share", Path: "/mnt/share"}},
+		RunAsUser: Int64(1234), RunAsGroup: Int64(5678),
+	})
+	if err != nil {
+		t.Fatalf("rendering a pod with an identity: %v", err)
+	}
+	sc := pod.Spec.SecurityContext
+	if sc == nil || sc.RunAsUser == nil || sc.RunAsGroup == nil {
+		t.Fatalf("identity did not survive decoding: %+v", sc)
+	}
+	if *sc.RunAsUser != 1234 || *sc.RunAsGroup != 5678 {
+		t.Errorf("pod runs as %d:%d, want 1234:5678", *sc.RunAsUser, *sc.RunAsGroup)
+	}
+}
+
+func TestClientPodManifestIdentityIsOptional(t *testing.T) {
+	f := &Framework{CaseID: "DATA-01"}
+	// uid 0 is a value, not an absence: a case that pins root must render a
+	// security context, and a case that pins nothing must not.
+	pod, err := f.PodBuilder(PodSpec{Name: "writer", RunAsUser: Int64(0)})
+	if err != nil {
+		t.Fatalf("rendering a pod pinned to root: %v", err)
+	}
+	if pod.Spec.SecurityContext == nil || pod.Spec.SecurityContext.RunAsUser == nil ||
+		*pod.Spec.SecurityContext.RunAsUser != 0 {
+		t.Errorf("uid 0 was dropped as if it were unset: %+v", pod.Spec.SecurityContext)
+	}
+	if pod.Spec.SecurityContext.RunAsGroup != nil {
+		t.Errorf("an unset gid rendered anyway: %+v", pod.Spec.SecurityContext)
+	}
+
+	plain, err := f.PodBuilder(PodSpec{Name: "writer"})
+	if err != nil {
+		t.Fatalf("rendering a pod with no identity: %v", err)
+	}
+	if plain.Spec.SecurityContext != nil && (plain.Spec.SecurityContext.RunAsUser != nil ||
+		plain.Spec.SecurityContext.RunAsGroup != nil) {
+		t.Errorf("a pod that pinned no identity got one: %+v", plain.Spec.SecurityContext)
+	}
+}

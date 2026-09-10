@@ -21,6 +21,10 @@ const (
 	PodTerminateTimeout = 90 * time.Second
 	// ArtifactTimeout bounds one case's artifact collection.
 	ArtifactTimeout = 60 * time.Second
+	// ExpandTimeout bounds a volume expansion. Generous on purpose: expansion
+	// is a control plane round trip through the driver, and on a shared server
+	// it may be a quota change rather than a block resize.
+	ExpandTimeout = 5 * time.Minute
 )
 
 // Poll calls fn until it returns done, an error, or the deadline passes. The
