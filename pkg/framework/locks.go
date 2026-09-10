@@ -26,7 +26,9 @@ type LockHolder struct {
 // until Release, or until the pod dies. It returns once the lock is confirmed
 // held, so a caller never races its own fixture.
 func (f *Framework) HoldFlock(ctx context.Context, pod, path, id string) (*LockHolder, error) {
-	l := &LockHolder{f: f, Pod: pod, Path: path, ID: id,
+	// Resolve the logical pod name once, here, so that State and Release cannot
+	// drift from the pod the lock was taken in.
+	l := &LockHolder{f: f, Pod: f.Name(pod), Path: path, ID: id,
 		state: "/tmp/lock-" + id + ".state", run: "/tmp/lock-" + id + ".run"}
 	script := fmt.Sprintf(`
 set -u
@@ -47,7 +49,7 @@ HOLDEOF
 setsid sh /tmp/hold-%[3]s.sh %[4]s %[1]s %[2]s >/dev/null 2>&1 </dev/null &
 echo launched
 `, shellQuote(l.state), shellQuote(l.run), id, shellQuote(path))
-	if _, err := f.C.MustSh(ctx, f.Namespace, pod, "main", script); err != nil {
+	if _, err := f.C.MustSh(ctx, f.Namespace, l.Pod, "main", script); err != nil {
 		return nil, err
 	}
 	if err := Poll(ctx, FastPoll, 2*time.Minute, func(ctx context.Context) (bool, error) {
@@ -56,11 +58,11 @@ echo launched
 			return false, err
 		}
 		if s == "failed" {
-			return false, fmt.Errorf("lock acquisition failed in %s", pod)
+			return false, fmt.Errorf("lock acquisition failed in %s", l.Pod)
 		}
 		return s == "held", nil
 	}); err != nil {
-		return nil, fmt.Errorf("holding lock %s in %s: %w", id, pod, err)
+		return nil, fmt.Errorf("holding lock %s in %s: %w", id, l.Pod, err)
 	}
 	return l, nil
 }

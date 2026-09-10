@@ -189,7 +189,9 @@ image, fio, snapshots, expansion. Those arrive with the cases that use them.
    several clients are an implementation property, not a protocol guarantee. The
    case will carry that caveat in its failure message so a failure is routed to
    the boundary discussion before it is filed as a server defect.
-2. **Lease and grace are not discoverable on every implementation.** Preflight
+2. **Lease and grace are not discoverable on every implementation.** Confirmed
+   on the first real run: the in-cluster NFS provisioner exposes neither, so the
+   run needs `-lease-seconds` and `-grace-seconds`. Preflight
    reads them from the server pod spec or a mounted ConfigMap and otherwise
    fails, asking for `-lease-seconds` and `-grace-seconds`. If that proves
    noisy in practice, the alternative is a small read-only probe against the
@@ -202,6 +204,8 @@ image, fio, snapshots, expansion. Those arrive with the cases that use them.
    plan. Preflight records both required settings; the case reports blocked, not
    failed, when either is missing.
 5. **Server discovery is a heuristic** when `-server-selector` is not passed:
-   pods exposing port 2049, or named for a known userspace server. Passing the
-   selector is the supported path and preflight says so in `environment.json`
-   when it had to guess.
+   pods exposing port 2049, or named for a known userspace server, excluding
+   anything the suite itself created. Passing the selector is the supported
+   path, and preflight says so in `environment.json` when it had to guess. The
+   heuristic has a unit test, because getting it wrong means the chaos cases
+   kill the harness instead of the server.

@@ -58,7 +58,24 @@ func runningOnly(pods []corev1.Pod) []corev1.Pod {
 
 var serverNameHint = regexp.MustCompile(`(?i)(nfs|ganesha|nfsd)`)
 
+// ownedByHarness reports whether a pod is one the suite created. Without this
+// the name heuristic below matches the suite's own client pods and its node
+// agent, which then get recorded as servers and, worse, killed by the chaos
+// cases as if they were.
+func ownedByHarness(p *corev1.Pod) bool {
+	if _, ok := p.Labels["nfs-verification/run"]; ok {
+		return true
+	}
+	if p.Labels["app"] == agentDaemonSet {
+		return true
+	}
+	return strings.HasPrefix(p.Name, "nfsv-") || strings.HasPrefix(p.Name, "nfs-verification-")
+}
+
 func looksLikeNFSServer(p *corev1.Pod) bool {
+	if ownedByHarness(p) {
+		return false
+	}
 	for _, c := range p.Spec.Containers {
 		for _, port := range c.Ports {
 			if port.ContainerPort == nfsPort {

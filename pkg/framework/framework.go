@@ -106,11 +106,10 @@ func (f *Framework) Name(logical string) string {
 }
 
 func (f *Framework) prefix() string {
-	run := Cfg().RunID
-	if i := strings.LastIndex(run, "-"); i >= 0 && i+1 < len(run) {
-		run = run[i+1:]
-	}
-	return fmt.Sprintf("nfsv-%s-%s-", strings.ToLower(strings.ReplaceAll(f.CaseID, "_", "-")), run)
+	// The whole run id, not a suffix of it: two runs at the same time of day on
+	// different days would otherwise collide on a leftover object.
+	return fmt.Sprintf("nfsv-%s-%s-",
+		strings.ToLower(strings.ReplaceAll(f.CaseID, "_", "-")), strings.ToLower(Cfg().RunID))
 }
 
 // Selector matches everything this case created.

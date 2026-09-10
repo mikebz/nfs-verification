@@ -18,14 +18,18 @@ func TestProvisionMountWriteDelete(t *testing.T) {
 	ctx, cancel := caseCtx(t, 15*time.Minute)
 	defer cancel()
 
-	pvc := f.MustBoundRWXPVC(ctx, "prov01")
+	pvc := f.MustRWXPVC(ctx, "prov01")
+	// The pod comes before the bind check: a class that binds on first consumer
+	// has nothing to bind to until something is scheduled.
+	pod := f.MustPod(ctx, toolsPod("writer", pvc.Name, ""))
+	if _, err := f.WaitPVCBound(ctx, pvc.Name, framework.BindTimeout); err != nil {
+		t.Fatalf("claim did not bind once a pod consumed it: %v", err)
+	}
 	pv, err := f.PVForClaim(ctx, pvc.Name)
 	if err != nil {
 		t.Fatalf("resolving the bound PV: %v", err)
 	}
 	f.Logf("claim %s bound to %s on StorageClass %s", pvc.Name, pv.Name, f.Env.StorageClass)
-
-	pod := f.MustPod(ctx, toolsPod("writer", pvc.Name, ""))
 	want, err := f.WriteFile(ctx, pod.Name, fileIn("prov01.dat"), 1<<20, "prov01")
 	if err != nil {
 		t.Fatalf("writing to the share: %v", err)

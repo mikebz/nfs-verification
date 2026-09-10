@@ -17,8 +17,12 @@ spec:
   terminationGracePeriodSeconds: 5
   {{- if .Node }}
   # Cross-node cases pin explicitly rather than hoping the scheduler spreads
-  # them, so that a failure names the node it happened on.
-  nodeName: {{ .Node | q }}
+  # them, so that a failure names the node it happened on. This is a selector
+  # rather than nodeName on purpose: nodeName bypasses the scheduler, and a
+  # StorageClass with volumeBindingMode WaitForFirstConsumer then never binds,
+  # because it waits for the annotation the scheduler writes.
+  nodeSelector:
+    kubernetes.io/hostname: {{ .Node | q }}
   {{- end }}
   containers:
     - name: main

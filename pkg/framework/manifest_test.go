@@ -19,7 +19,9 @@ func TestClientPodManifestRenders(t *testing.T) {
 		Image: "alpine:3.20",
 		Node:  "worker-1",
 		Mounts: []MountSpec{
-			{Claim: "nfsv-data05-share", Path: "/mnt/share"},
+			// One claim already carries the prefix, one does not. Both must
+			// end up addressing the same object.
+			{Claim: f.Name("share"), Path: "/mnt/share"},
 			{Claim: "second", Path: "/mnt/other", ReadOnly: true, SubPath: "sub"},
 		},
 		Labels: map[string]string{"role": "stranded"},
@@ -33,8 +35,13 @@ func TestClientPodManifestRenders(t *testing.T) {
 	if pod.Namespace != "default" {
 		t.Errorf("namespace %q, want default: the suite creates no namespaces", pod.Namespace)
 	}
-	if pod.Spec.NodeName != "worker-1" {
-		t.Errorf("nodeName %q, want worker-1", pod.Spec.NodeName)
+	// A selector, not nodeName: nodeName bypasses the scheduler, and a
+	// WaitForFirstConsumer class then never binds.
+	if pod.Spec.NodeName != "" {
+		t.Errorf("nodeName is set to %q; pinning must go through the scheduler", pod.Spec.NodeName)
+	}
+	if got := pod.Spec.NodeSelector["kubernetes.io/hostname"]; got != "worker-1" {
+		t.Errorf("node selector is %q, want worker-1", got)
 	}
 	if len(pod.Spec.Containers) != 1 || pod.Spec.Containers[0].Image != "alpine:3.20" {
 		t.Fatalf("unexpected containers: %+v", pod.Spec.Containers)
@@ -45,8 +52,11 @@ func TestClientPodManifestRenders(t *testing.T) {
 	if n := len(pod.Spec.Volumes); n != 2 {
 		t.Fatalf("got %d volumes, want 2", n)
 	}
-	if pod.Spec.Volumes[0].PersistentVolumeClaim.ClaimName != "nfsv-data05-share" {
-		t.Errorf("claim name was rewritten: %q", pod.Spec.Volumes[0].PersistentVolumeClaim.ClaimName)
+	if got, want := pod.Spec.Volumes[0].PersistentVolumeClaim.ClaimName, f.Name("share"); got != want {
+		t.Errorf("an already-prefixed claim was rewritten: got %q, want %q", got, want)
+	}
+	if got, want := pod.Spec.Volumes[1].PersistentVolumeClaim.ClaimName, f.Name("second"); got != want {
+		t.Errorf("a logical claim name was not resolved: got %q, want %q", got, want)
 	}
 	vm := pod.Spec.Containers[0].VolumeMounts
 	if len(vm) != 2 || vm[0].MountPath != "/mnt/share" || vm[1].SubPath != "sub" || !vm[1].ReadOnly {
@@ -69,8 +79,8 @@ func TestClientPodManifestWithNoMounts(t *testing.T) {
 	if len(pod.Spec.Volumes) != 0 || len(pod.Spec.Containers[0].VolumeMounts) != 0 {
 		t.Errorf("empty mount list did not render empty: %+v", pod.Spec)
 	}
-	if pod.Spec.NodeName != "" {
-		t.Errorf("unpinned pod got nodeName %q", pod.Spec.NodeName)
+	if len(pod.Spec.NodeSelector) != 0 {
+		t.Errorf("unpinned pod got a node selector: %v", pod.Spec.NodeSelector)
 	}
 }
 

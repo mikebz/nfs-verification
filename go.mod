@@ -1,6 +1,6 @@
 module github.com/mikebz/nfs-verification
 
-go 1.24.7
+go 1.24
 
 require (
 	k8s.io/api v0.31.3

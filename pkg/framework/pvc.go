@@ -69,17 +69,43 @@ func (f *Framework) WaitPVCBound(ctx context.Context, name string, timeout time.
 	return bound, err
 }
 
-// MustBoundRWXPVC creates an RWX claim and waits for it to bind.
-func (f *Framework) MustBoundRWXPVC(ctx context.Context, name string) *corev1.PersistentVolumeClaim {
+// MustRWXPVC creates an RWX claim, and waits for it to bind when the class
+// binds immediately. Under WaitForFirstConsumer it returns the claim unbound:
+// such a class binds only once a pod referencing it is scheduled, so waiting
+// here would deadlock against the case that is about to create that pod.
+func (f *Framework) MustRWXPVC(ctx context.Context, name string) *corev1.PersistentVolumeClaim {
 	f.T.Helper()
-	if _, err := f.CreatePVC(ctx, PVCSpec{Name: name}); err != nil {
+	pvc, err := f.CreatePVC(ctx, PVCSpec{Name: name})
+	if err != nil {
 		f.T.Fatalf("creating RWX PVC %s: %v", name, err)
 	}
-	pvc, err := f.WaitPVCBound(ctx, name, BindTimeout)
+	mode, err := f.BindingMode(ctx, f.Env.StorageClass)
+	if err != nil {
+		f.T.Fatalf("reading the binding mode of StorageClass %s: %v", f.Env.StorageClass, err)
+	}
+	if mode == storagev1.VolumeBindingWaitForFirstConsumer {
+		f.Logf("StorageClass %s binds on first consumer; %s stays Pending until a pod is scheduled",
+			f.Env.StorageClass, pvc.Name)
+		return pvc
+	}
+	bound, err := f.WaitPVCBound(ctx, name, BindTimeout)
 	if err != nil {
 		f.T.Fatalf("RWX PVC %s did not bind: %v", name, err)
 	}
-	return pvc
+	return bound
+}
+
+// BindingMode reports when a StorageClass binds its volumes. An unset mode is
+// Immediate, per the API's own default.
+func (f *Framework) BindingMode(ctx context.Context, class string) (storagev1.VolumeBindingMode, error) {
+	sc, err := f.C.Kube.StorageV1().StorageClasses().Get(ctx, class, metav1.GetOptions{})
+	if err != nil {
+		return "", err
+	}
+	if sc.VolumeBindingMode == nil {
+		return storagev1.VolumeBindingImmediate, nil
+	}
+	return *sc.VolumeBindingMode, nil
 }
 
 // RWXStorageClasses returns every StorageClass in the cluster, so preflight can

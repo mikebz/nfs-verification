@@ -10,6 +10,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	storagev1 "k8s.io/api/storage/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
@@ -59,11 +60,14 @@ func Run(ctx context.Context) (*Result, error) {
 	}
 	caps.NodeAgent = true
 
-	// Check: an RWX-capable StorageClass exists and a PVC on it binds.
-	sc, pvcName, fx, closeFx, err := findRWXClass(ctx, c, e, caps)
-	if closeFx != nil {
-		defer closeFx(context.WithoutCancel(ctx))
-	}
+	// Checks: an RWX-capable StorageClass exists, a PVC on it binds, and two
+	// pods on two different nodes both mount it read-write. These are one probe
+	// rather than three, because a class that binds on first consumer only
+	// binds once the pods exist.
+	fx, closeFx := framework.NewSystem(c, e, caps, "PREFLIGHT")
+	defer closeFx(context.WithoutCancel(ctx))
+
+	sc, podA, podB, err := findRWXClass(ctx, c, fx, workers[0], workers[1])
 	if err != nil {
 		return nil, err
 	}
@@ -74,12 +78,6 @@ func Run(ctx context.Context) (*Result, error) {
 	caps.CanExpand, _ = c.SupportsExpansion(ctx, sc)
 	caps.CanSnapshot = c.HasAPI(schema.GroupVersionResource{
 		Group: "snapshot.storage.k8s.io", Version: "v1", Resource: "volumesnapshots"})
-
-	// Check: two pods on two different nodes both mount it read-write.
-	podA, podB, err := mountOnTwoNodes(ctx, fx, pvcName, workers[0], workers[1])
-	if err != nil {
-		return nil, fmt.Errorf("RWX PVC not simultaneously mountable: %w", err)
-	}
 
 	// Check: the mount is NFS and negotiates 4.1. Read from /proc/mounts on the
 	// node, which is what the driver actually set, not what was requested.
@@ -168,37 +166,67 @@ func describeNodes(ctx context.Context, c *framework.Client, e *env.Environment)
 	return nil
 }
 
-// findRWXClass probes StorageClasses until one binds an RWX claim. Nothing in
-// the StorageClass API states which access modes its volumes will support, so
-// the only honest test is to ask for one.
-func findRWXClass(ctx context.Context, c *framework.Client, e *env.Environment, caps framework.Capabilities) (
-	sc string, pvcName string, fx *framework.Framework, closeFx func(context.Context), err error) {
+// findRWXClass probes StorageClasses until one gives an RWX volume that two
+// pods on two nodes can mount at once. Nothing in the StorageClass API states
+// which access modes its volumes will support, so the only honest test is to
+// ask for one and use it.
+func findRWXClass(ctx context.Context, c *framework.Client, fx *framework.Framework, nodeA, nodeB string) (
+	sc string, podA, podB *corev1.Pod, err error) {
 
 	candidates, err := candidateClasses(ctx, c)
 	if err != nil {
-		return "", "", nil, nil, err
+		return "", nil, nil, err
 	}
 	if len(candidates) == 0 {
-		return "", "", nil, nil, fmt.Errorf("no RWX-capable StorageClass found: cluster has no StorageClasses")
+		return "", nil, nil, fmt.Errorf("no RWX-capable StorageClass found: cluster has no StorageClasses")
 	}
-	fx, closeFx = framework.NewSystem(c, e, caps, "PREFLIGHT")
 	var lastErr error
 	for _, candidate := range candidates {
-		name := "rwx-" + strings.ToLower(candidate)
-		if _, err := fx.CreatePVC(ctx, framework.PVCSpec{Name: name, StorageClass: candidate}); err != nil {
-			lastErr = err
-			continue
+		podA, podB, err = probeClass(ctx, fx, candidate, nodeA, nodeB)
+		if err == nil {
+			return candidate, podA, podB, nil
 		}
-		if _, err := fx.WaitPVCBound(ctx, name, framework.BindTimeout); err != nil {
-			lastErr = fmt.Errorf("RWX PVC did not bind on StorageClass %q: %w", candidate, err)
-			continue
-		}
-		return candidate, name, fx, closeFx, nil
+		lastErr = fmt.Errorf("StorageClass %q: %w", candidate, err)
 	}
 	if framework.Cfg().StorageClass != "" {
-		return "", "", fx, closeFx, fmt.Errorf("RWX PVC did not bind: %w", lastErr)
+		return "", nil, nil, lastErr
 	}
-	return "", "", fx, closeFx, fmt.Errorf("no RWX-capable StorageClass found: %v", lastErr)
+	return "", nil, nil, fmt.Errorf("no RWX-capable StorageClass found: %w", lastErr)
+}
+
+// probeClass asks one class for an RWX volume and mounts it from two nodes.
+func probeClass(ctx context.Context, fx *framework.Framework, class, nodeA, nodeB string) (*corev1.Pod, *corev1.Pod, error) {
+	name := "rwx-" + strings.ToLower(class)
+	pvc, err := fx.CreatePVC(ctx, framework.PVCSpec{Name: name, StorageClass: class})
+	if err != nil {
+		return nil, nil, fmt.Errorf("creating an RWX claim: %w", err)
+	}
+	mode, err := fx.BindingMode(ctx, class)
+	if err != nil {
+		return nil, nil, err
+	}
+	// An immediate class must bind on its own; a first-consumer class binds
+	// only once a pod referencing it is scheduled, so the pods come first and
+	// the bind check follows them.
+	if mode != storagev1.VolumeBindingWaitForFirstConsumer {
+		if _, err := fx.WaitPVCBound(ctx, pvc.Name, framework.BindTimeout); err != nil {
+			return nil, nil, fmt.Errorf("RWX PVC did not bind: %w", err)
+		}
+	}
+
+	podA, podB, mountErr := mountOnTwoNodes(ctx, fx, pvc.Name, nodeA, nodeB)
+	if mountErr != nil {
+		// Distinguish the two failures the plan names: a claim that never
+		// bound, and a bound claim that two nodes cannot mount at once.
+		if _, err := fx.WaitPVCBound(ctx, pvc.Name, framework.PollInterval); err != nil {
+			return nil, nil, fmt.Errorf("RWX PVC did not bind: %w", err)
+		}
+		return nil, nil, fmt.Errorf("RWX PVC not simultaneously mountable: %w", mountErr)
+	}
+	if _, err := fx.WaitPVCBound(ctx, pvc.Name, framework.BindTimeout); err != nil {
+		return nil, nil, fmt.Errorf("RWX PVC did not bind: %w", err)
+	}
+	return podA, podB, nil
 }
 
 func candidateClasses(ctx context.Context, c *framework.Client) ([]string, error) {
@@ -230,8 +258,8 @@ func provisionerOf(ctx context.Context, c *framework.Client, name string) (strin
 }
 
 func mountOnTwoNodes(ctx context.Context, fx *framework.Framework, pvc, nodeA, nodeB string) (*corev1.Pod, *corev1.Pod, error) {
-	specA := framework.PodSpec{Name: "preflight-a", Node: nodeA, Mounts: []framework.MountSpec{{Claim: pvc, Path: "/mnt/share"}}}
-	specB := framework.PodSpec{Name: "preflight-b", Node: nodeB, Mounts: []framework.MountSpec{{Claim: pvc, Path: "/mnt/share"}}}
+	specA := framework.PodSpec{Name: "a", Node: nodeA, Mounts: []framework.MountSpec{{Claim: pvc, Path: "/mnt/share"}}}
+	specB := framework.PodSpec{Name: "b", Node: nodeB, Mounts: []framework.MountSpec{{Claim: pvc, Path: "/mnt/share"}}}
 	podA, err := fx.CreatePod(ctx, specA)
 	if err != nil {
 		return nil, nil, fmt.Errorf("pod on %s: %w", nodeA, err)

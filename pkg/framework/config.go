@@ -1,7 +1,8 @@
 // Package framework is the Kubernetes-side harness. It runs on the operator's
-// workstation, outside the cluster: it creates namespaces, PVCs, pods and
-// DaemonSets, injects faults, collects artifacts and asserts. It is a
-// Kubernetes client, never an NFS client. All I/O comes from in-cluster pods.
+// workstation, outside the cluster: it creates PVCs, pods and DaemonSets in an
+// existing namespace, injects faults, collects artifacts and asserts. It
+// creates no namespaces of its own. It is a Kubernetes client, never an NFS
+// client: all I/O comes from in-cluster pods.
 package framework
 
 import (
@@ -84,7 +85,7 @@ func init() {
 	flag.StringVar(&cfg.Kubeconfig, "kubeconfig", os.Getenv("KUBECONFIG"), "path to kubeconfig; defaults to $KUBECONFIG then ~/.kube/config")
 	flag.StringVar(&cfg.Context, "context", "", "kubeconfig context to use")
 	flag.StringVar(&cfg.StorageClass, "storage-class", "", "RWX-capable StorageClass; discovered when empty")
-	flag.StringVar(&cfg.PVCSize, "pvc-size", "10Gi", "size for test PVCs")
+	flag.StringVar(&cfg.PVCSize, "pvc-size", "1Gi", "size for test PVCs; small on purpose, since a backing volume that cannot satisfy it fails every case")
 
 	flag.StringVar(&cfg.ToolsImage, "tools-image", "alpine:3.20", "image with dd, sha256sum, flock, stat")
 

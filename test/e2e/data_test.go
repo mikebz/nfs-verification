@@ -20,7 +20,7 @@ func TestCloseToOpen(t *testing.T) {
 	defer cancel()
 
 	nodeA, nodeB := f.TwoNodes(ctx)
-	pvc := f.MustBoundRWXPVC(ctx, "data03")
+	pvc := f.MustRWXPVC(ctx, "data03")
 	f.MustPod(ctx, toolsPod("writer", pvc.Name, nodeA))
 	f.MustPod(ctx, toolsPod("reader", pvc.Name, nodeB))
 
@@ -44,7 +44,7 @@ func TestLocksAcrossNodes(t *testing.T) {
 	defer cancel()
 
 	nodeA, nodeB := f.TwoNodes(ctx)
-	pvc := f.MustBoundRWXPVC(ctx, "data05")
+	pvc := f.MustRWXPVC(ctx, "data05")
 	f.MustPod(ctx, toolsPod("holder", pvc.Name, nodeA))
 	f.MustPod(ctx, toolsPod("contender", pvc.Name, nodeB))
 	path := fileIn("data05.lock")

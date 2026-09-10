@@ -20,8 +20,18 @@ const (
 // last error from fn is folded into the timeout message, because "timed out"
 // with no cause is the least useful failure a suite can produce.
 func Poll(ctx context.Context, interval, timeout time.Duration, fn func(context.Context) (bool, error)) error {
-	deadline := time.Now().Add(timeout)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+
 	var lastErr error
+	timedOut := func() error {
+		if lastErr != nil {
+			return fmt.Errorf("timed out after %s: last error: %w", timeout, lastErr)
+		}
+		return fmt.Errorf("timed out after %s", timeout)
+	}
 	for {
 		done, err := fn(ctx)
 		if err != nil {
@@ -30,16 +40,12 @@ func Poll(ctx context.Context, interval, timeout time.Duration, fn func(context.
 		if done {
 			return nil
 		}
-		if time.Now().After(deadline) {
-			if lastErr != nil {
-				return fmt.Errorf("timed out after %s: last error: %w", timeout, lastErr)
-			}
-			return fmt.Errorf("timed out after %s", timeout)
-		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(interval):
+		case <-deadline.C:
+			return timedOut()
+		case <-ticker.C:
 		}
 	}
 }

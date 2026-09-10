@@ -58,12 +58,28 @@ answer them:
 |---|---|---|
 | `-server-namespace`, `-server-selector` | identifying the NFS server pods | without it the suite falls back to a heuristic (port 2049, or a known server name) and records that it guessed |
 | `-lease-seconds`, `-grace-seconds` | every timing assertion | only discoverable when the server exposes them in its pod spec or a mounted ConfigMap |
-| `-storage-class` | pinning the class under test | optional: preflight otherwise probes each class by asking it for an RWX claim |
+| `-storage-class` | pinning the class under test | optional: preflight otherwise probes each class by asking it for an RWX volume and mounting it from two nodes |
+| `-pvc-size` | claim size | defaults to 1Gi: a backing volume that cannot satisfy the request fails every case, and no case here needs more |
 | `-tools-image` | client pods and the node agent | needs `dd`, `sha256sum`, `flock`, `stat` and `nsenter`; defaults to `alpine:3.20`, whose busybox carries all five |
 
 Lease and grace must match one of the two profiles in `pkg/slo`: tuned (20s/30s)
 or default (60s/90s). A third value fails preflight rather than silently
 invalidating every timing assertion.
+
+## Two details that bite on real clusters
+
+**StorageClasses that bind on first consumer.** GKE's Filestore classes, and
+plenty of others, set `volumeBindingMode: WaitForFirstConsumer`. Such a claim
+never binds until a pod referencing it is scheduled, so the suite creates the
+pod first and checks the bind afterwards. For the same reason a pinned pod
+carries a `kubernetes.io/hostname` node selector rather than `nodeName`:
+`nodeName` bypasses the scheduler, and the annotation that triggers binding is
+one the scheduler writes.
+
+**Lease and grace often are not discoverable.** A server that keeps them in a
+config file the pod spec does not reference will fail preflight, and the run
+needs `-lease-seconds` and `-grace-seconds`. That is deliberate: a default value
+here would silently invalidate every timing assertion.
 
 ## State of this code
 

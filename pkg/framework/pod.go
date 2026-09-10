@@ -10,7 +10,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// MountSpec attaches a claim into a pod at a path.
+// MountSpec attaches a claim into a pod at a path. Claim is a logical name,
+// resolved the same way pod names are, so a case names its claim once and never
+// has to think about the prefix again.
 type MountSpec struct {
 	Claim    string
 	Path     string
@@ -74,10 +76,12 @@ func (f *Framework) PodBuilder(spec PodSpec) (*corev1.Pod, error) {
 	for i, m := range spec.Mounts {
 		data.Mounts = append(data.Mounts, podMountData{
 			VolumeName: fmt.Sprintf("vol%d", i),
-			Claim:      m.Claim,
-			Path:       m.Path,
-			ReadOnly:   m.ReadOnly,
-			SubPath:    m.SubPath,
+			// Claims are logical names too. Name is idempotent, so a caller
+			// that already holds the real name loses nothing by passing it.
+			Claim:    f.Name(m.Claim),
+			Path:     m.Path,
+			ReadOnly: m.ReadOnly,
+			SubPath:  m.SubPath,
 		})
 	}
 	var pod corev1.Pod
