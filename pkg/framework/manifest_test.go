@@ -150,6 +150,64 @@ func TestNameIsIdempotent(t *testing.T) {
 	}
 }
 
+// TestNameLowercases covers the normalization. Kubernetes object names are
+// RFC 1123, so a capital letter is rejected at creation, minutes into a run,
+// with a message naming the rendered object rather than the logical name the
+// case wrote. A case named a pod "rootA" and found out on a cluster.
+//
+// The normalization has a consequence this pins down as well: two logical
+// names differing only in case are one object. A case comparing two clients
+// that names them "rootA" and "roota" would compare a client with itself.
+//
+// Steps:
+//  1. Prefix a name holding capitals, and assert the result is lowercase.
+//  2. Assert prefixing the normalized name again still changes nothing.
+//  3. Assert two names differing only in case land on the same object, which
+//     is the trap a case has to avoid.
+func TestNameLowercases(t *testing.T) {
+	f := &Framework{CaseID: "SEC-02"}
+	upper := f.Name("RootA")
+	if !strings.HasSuffix(upper, "-roota") {
+		t.Errorf("name %q was not normalized to lowercase", upper)
+	}
+	if upper != strings.ToLower(upper) {
+		t.Errorf("name %q still holds a capital, so Kubernetes would reject it", upper)
+	}
+	if twice := f.Name(upper); twice != upper {
+		t.Errorf("prefixing a normalized name twice changed it: %q then %q", upper, twice)
+	}
+	if f.Name("rootA") != f.Name("roota") {
+		t.Error("two names differing only in case resolved to different objects, " +
+			"which would mean the normalization is not what this test documents")
+	}
+}
+
+// TestObjectNamesAreCheckedBeforeCreation covers what lowercasing cannot fix.
+// An underscore, a trailing dash or an over-long run id all produce a name
+// Kubernetes refuses, and the refusal arrives minutes into a run against a
+// cluster. Rendering is cheap and testable, so it is caught here instead.
+//
+// Steps:
+//  1. Render a pod whose logical name holds an underscore, and assert the
+//     builder refuses it rather than sending it to the API.
+//  2. Assert the message says the case has to change the name, since nothing
+//     downstream can repair it.
+//  3. Assert an ordinary name still renders.
+func TestObjectNamesAreCheckedBeforeCreation(t *testing.T) {
+	f := &Framework{CaseID: "PROV-01"}
+	if _, err := f.PodBuilder(PodSpec{Name: "writer_one"}); err == nil {
+		t.Error("a pod name holding an underscore was rendered; the API would refuse it on a cluster")
+	} else if !strings.Contains(err.Error(), "lowercase letters") {
+		t.Errorf("the refusal does not say what a valid name is: %v", err)
+	}
+	if _, err := f.PodBuilder(PodSpec{Name: "writer", Mounts: []MountSpec{{Claim: "a_claim", Path: "/mnt"}}}); err == nil {
+		t.Error("a claim name holding an underscore was rendered")
+	}
+	if _, err := f.PodBuilder(PodSpec{Name: "writer"}); err != nil {
+		t.Errorf("an ordinary name was refused: %v", err)
+	}
+}
+
 // TestClientPodManifestIdentity checks that a pinned uid and gid reach the pod
 // spec. Without them SEC-01 would silently run as root and assert nothing.
 //
@@ -206,5 +264,51 @@ func TestClientPodManifestIdentityIsOptional(t *testing.T) {
 	if plain.Spec.SecurityContext != nil && (plain.Spec.SecurityContext.RunAsUser != nil ||
 		plain.Spec.SecurityContext.RunAsGroup != nil) {
 		t.Errorf("a pod that pinned no identity got one: %+v", plain.Spec.SecurityContext)
+	}
+}
+
+// TestBrokenNFSVolumeManifestRenders covers the volume OBS-04 manufactures a
+// mount failure with. Every property here is what keeps the case from touching
+// anything real: an address that cannot route, a class no provisioner adopts,
+// and a reclaim policy for a volume nothing provisioned.
+//
+// Steps:
+//  1. Render the PV.
+//  2. Assert the server address stays inside the range RFC 5737 reserves for
+//     documentation.
+//  3. Assert the reclaim policy is Retain and the storage class is empty.
+//  4. Assert the mount options and capacity survived decoding.
+func TestBrokenNFSVolumeManifestRenders(t *testing.T) {
+	f := &Framework{CaseID: "OBS-04"}
+	var pv corev1.PersistentVolume
+	err := render("static-nfs-pv.yaml", map[string]any{
+		"Name": f.Name("obs04"), "Labels": f.Labels(), "Size": "1Gi",
+		"Server": UnroutableServer, "Path": "/export/does-not-exist",
+		"Options": []string{"vers=4.1", "soft", "retry=1"},
+	}, &pv)
+	if err != nil {
+		t.Fatalf("rendering the broken PV: %v", err)
+	}
+	if pv.Spec.NFS == nil || pv.Spec.NFS.Server != UnroutableServer {
+		t.Fatalf("the volume does not point where the case intends: %+v", pv.Spec)
+	}
+	// RFC 5737 reserves this range for documentation. If this ever renders as a
+	// routable address, the case stops manufacturing a failure and starts
+	// mounting something real.
+	if !strings.HasPrefix(pv.Spec.NFS.Server, "192.0.2.") {
+		t.Errorf("server %q is outside the range reserved for documentation", pv.Spec.NFS.Server)
+	}
+	if pv.Spec.PersistentVolumeReclaimPolicy != corev1.PersistentVolumeReclaimRetain {
+		t.Errorf("reclaim policy is %s: nothing provisioned this volume, so nothing can delete it",
+			pv.Spec.PersistentVolumeReclaimPolicy)
+	}
+	if pv.Spec.StorageClassName != "" {
+		t.Errorf("storage class is %q, want empty so no provisioner adopts the volume", pv.Spec.StorageClassName)
+	}
+	if got := pv.Spec.MountOptions; len(got) != 3 || got[0] != "vers=4.1" {
+		t.Errorf("mount options did not survive decoding: %v", got)
+	}
+	if q := pv.Spec.Capacity[corev1.ResourceStorage]; q.String() != "1Gi" {
+		t.Errorf("capacity is %s, want 1Gi", q.String())
 	}
 }

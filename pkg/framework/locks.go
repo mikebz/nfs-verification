@@ -33,27 +33,10 @@ func (f *Framework) HoldFlock(ctx context.Context, pod, path, id string) (*LockH
 	// drift from the pod the lock was taken in.
 	l := &LockHolder{f: f, Pod: f.Name(pod), Path: path, ID: id,
 		state: "/tmp/lock-" + id + ".state", run: "/tmp/lock-" + id + ".run"}
-	// The derived script path is quoted like every other value that reaches the
-	// shell; CheckScriptID above is what keeps it inside /tmp.
-	script := fmt.Sprintf(`
-set -u
-: > %[1]s
-touch %[2]s
-cat > %[3]s <<'HOLDEOF'
-exec 9>>"$1"
-# Blocking acquire with no -w: busybox flock has no timeout flag, so the bound
-# lives in the caller, which polls the state file.
-if flock -x 9; then
-  echo held > "$2"
-  while [ -f "$3" ]; do sleep 0.2 2>/dev/null || sleep 1; done
-  echo released > "$2"
-else
-  echo failed > "$2"
-fi
-HOLDEOF
-setsid sh %[3]s %[4]s %[1]s %[2]s >/dev/null 2>&1 </dev/null &
-echo launched
-`, shellQuote(l.state), shellQuote(l.run), shellQuote("/tmp/hold-"+id+".sh"), shellQuote(path))
+	script, err := RunScript("hold-flock.sh", id, path, l.run, l.state)
+	if err != nil {
+		return nil, err
+	}
 	if _, err := f.C.MustSh(ctx, Namespace, l.Pod, "main", script); err != nil {
 		return nil, err
 	}

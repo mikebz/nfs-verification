@@ -116,6 +116,14 @@ func (f *Framework) PodBuilder(spec PodSpec) (*corev1.Pod, error) {
 			SubPath:  m.SubPath,
 		})
 	}
+	if err := CheckObjectName("pod", data.Name); err != nil {
+		return nil, err
+	}
+	for _, m := range data.Mounts {
+		if err := CheckObjectName("claim", m.Claim); err != nil {
+			return nil, err
+		}
+	}
 	var pod corev1.Pod
 	if err := render("client-pod.yaml", data, &pod); err != nil {
 		return nil, err

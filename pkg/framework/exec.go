@@ -103,3 +103,30 @@ func CheckScriptID(id string) error {
 	}
 	return nil
 }
+
+// rfc1123Subdomain matches a Kubernetes object name: lowercase alphanumerics,
+// dashes and dots, starting and ending alphanumeric.
+var rfc1123Subdomain = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`)
+
+// CheckObjectName rejects a name Kubernetes will not accept, at the point the
+// name becomes an object rather than at the point the API says no.
+//
+// It exists because the alternative is finding out on a cluster. A case that
+// names a pod something RFC 1123 forbids fails at creation, minutes into a run,
+// with an API message that names the rendered object rather than the logical
+// name the case actually wrote. Rendering a name is cheap and testable, so this
+// belongs in a unit test's reach.
+func CheckObjectName(kind, name string) error {
+	switch {
+	case name == "":
+		return fmt.Errorf("%s name is empty", kind)
+	case len(name) > 253:
+		return fmt.Errorf("%s name %q is %d characters, over the 253 Kubernetes allows; "+
+			"shorten -run-id, which is carried whole so that two runs cannot collide", kind, name, len(name))
+	case !rfc1123Subdomain.MatchString(name):
+		return fmt.Errorf("%s name %q is not a valid Kubernetes name: it must hold only lowercase letters, "+
+			"digits, dashes and dots, and start and end with a letter or digit. Names are lowercased for you; "+
+			"anything else has to change in the case that chose the name", kind, name)
+	}
+	return nil
+}

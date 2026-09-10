@@ -39,6 +39,9 @@ func (f *Framework) CreatePVC(ctx context.Context, spec PVCSpec) (*corev1.Persis
 		return nil, fmt.Errorf("parsing size %q: %w", spec.Size, err)
 	}
 	sc := spec.StorageClass
+	if err := CheckObjectName("claim", f.Name(spec.Name)); err != nil {
+		return nil, err
+	}
 	pvc := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{Name: f.Name(spec.Name), Namespace: Namespace, Labels: f.Labels()},
 		Spec: corev1.PersistentVolumeClaimSpec{
@@ -254,4 +257,83 @@ func (f *Framework) GetPVC(ctx context.Context, name string) (*corev1.Persistent
 func (f *Framework) DeletePVC(ctx context.Context, name string) error {
 	return IgnoreNotFound(f.C.Kube.CoreV1().PersistentVolumeClaims(Namespace).
 		Delete(ctx, f.Name(name), metav1.DeleteOptions{}))
+}
+
+// UnroutableServer is an address from the range RFC 5737 reserves for
+// documentation. Nothing routes to it on any network, which is what makes it
+// safe to point a deliberately broken mount at.
+const UnroutableServer = "192.0.2.1"
+
+// BrokenNFSSpec describes a volume whose export does not exist.
+type BrokenNFSSpec struct {
+	Name    string
+	Server  string
+	Path    string
+	Size    string
+	Options []string
+}
+
+// CreateBrokenNFSVolume creates a PV pointing at an export that is not there,
+// and a claim bound to it by name. It is how the mount-failure case produces a
+// failure on the client without touching the real export or the real server.
+//
+// The PV is cluster-scoped, so teardown by namespace label cannot reach it. The
+// caller gets a cleanup registered on the fixture rather than being trusted to
+// remember.
+func (f *Framework) CreateBrokenNFSVolume(ctx context.Context, spec BrokenNFSSpec) (*corev1.PersistentVolume, *corev1.PersistentVolumeClaim, error) {
+	if spec.Server == "" {
+		spec.Server = UnroutableServer
+	}
+	if spec.Path == "" {
+		spec.Path = "/export/does-not-exist"
+	}
+	if spec.Size == "" {
+		spec.Size = "1Gi"
+	}
+	if len(spec.Options) == 0 {
+		// Bounded retries so mount.nfs gives up and reports, rather than
+		// retrying quietly past the case's budget. This is the one mount in the
+		// suite that is allowed to be soft: it is meant to fail, and a hard
+		// mount here would hang the kubelet volume manager instead of
+		// producing the Event the case is looking for.
+		spec.Options = []string{"vers=4.1", "soft", "timeo=30", "retrans=2", "retry=1"}
+	}
+	var pv corev1.PersistentVolume
+	if err := render("static-nfs-pv.yaml", map[string]any{
+		"Name": f.Name(spec.Name), "Labels": f.Labels(), "Size": spec.Size,
+		"Server": spec.Server, "Path": spec.Path, "Options": spec.Options,
+	}, &pv); err != nil {
+		return nil, nil, err
+	}
+	created, err := f.C.Kube.CoreV1().PersistentVolumes().Create(ctx, &pv, metav1.CreateOptions{})
+	if err != nil {
+		return nil, nil, fmt.Errorf("creating the broken PV: %w", err)
+	}
+	f.Defer(func(ctx context.Context) {
+		_ = IgnoreNotFound(f.C.Kube.CoreV1().PersistentVolumes().Delete(ctx, created.Name, metav1.DeleteOptions{}))
+	})
+
+	qty, err := resource.ParseQuantity(spec.Size)
+	if err != nil {
+		return nil, nil, fmt.Errorf("parsing size %q: %w", spec.Size, err)
+	}
+	empty := ""
+	claim := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: f.Name(spec.Name), Namespace: Namespace, Labels: f.Labels()},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany},
+			// By name and with an empty class: this claim must bind to the
+			// broken volume and to nothing else, least of all to a real one.
+			VolumeName:       created.Name,
+			StorageClassName: &empty,
+			Resources: corev1.VolumeResourceRequirements{
+				Requests: corev1.ResourceList{corev1.ResourceStorage: qty},
+			},
+		},
+	}
+	boundClaim, err := f.C.Kube.CoreV1().PersistentVolumeClaims(Namespace).Create(ctx, claim, metav1.CreateOptions{})
+	if err != nil {
+		return nil, nil, fmt.Errorf("creating the claim for the broken PV: %w", err)
+	}
+	return created, boundClaim, nil
 }

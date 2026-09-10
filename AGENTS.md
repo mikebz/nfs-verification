@@ -240,6 +240,11 @@ The rules below are the ones tooling cannot check:
   constructors. Do not create an interface before something uses it.
 - Avoid package-level globals. The suite-wide client, environment and
   capabilities set in `TestMain` are the deliberate exception.
+- Shell that runs in a pod is a file under `pkg/framework/scripts`, shipped by
+  `framework.RunScript` and given its values as positional arguments. A script
+  in a Go format string is unreadable in both languages at once, and cannot be
+  run by hand. Nothing is interpolated into a script body: the file on disk is
+  the file that runs.
 - Shell strings built for exec go through `framework.Quote`. Never concatenate a
   path into a script unquoted, the paths a helper derives for itself included.
   Validate any identifier that becomes a filename with `framework.CheckScriptID`:
