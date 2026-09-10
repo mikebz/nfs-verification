@@ -30,3 +30,6 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# Run artifacts: environment.json, logs, dmesg, fault timelines.
+artifacts/
