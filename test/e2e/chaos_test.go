@@ -502,7 +502,7 @@ type lockUnderTest struct {
 // as a lock over the whole byte range, so reclaim and exclusivity travel the
 // same protocol path a sub-file range would. What is not covered yet is two
 // clients holding disjoint ranges of one file, which needs the locktool binary
-// arriving with DATA-06 in step 7.
+// arriving with DATA-06 in step 6.
 //
 // Steps:
 //  1. Start a workload, and take locks on several files: three held by the

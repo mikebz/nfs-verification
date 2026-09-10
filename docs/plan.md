@@ -145,19 +145,43 @@ Each step is one pull request. Later steps depend only on earlier ones.
 | 2 | Presubmit cases that need nothing the harness does not already have: PROV-03, PROV-04, DATA-01, DATA-04, SEC-01 | done, [PR #3](https://github.com/mikebz/nfs-verification/pull/3) |
 | 2b | The three presubmit cases held back from step 2: DATA-02, OBS-04, SEC-02 | done, [PR #4](https://github.com/mikebz/nfs-verification/pull/4) |
 | 3 | Chaos operations package plus CHAOS-01 and CHAOS-02, the SLO measurement path, fault timelines | done, [PR #4](https://github.com/mikebz/nfs-verification/pull/4) |
-| 4 | Grace and lock reclaim: CHAOS-05, CHAOS-06, CHAOS-07, OBS-02, OBS-03, designed in [`03-grace-and-lock-reclaim-design.md`](03-grace-and-lock-reclaim-design.md) | **this change** |
-| 5 | Node and infrastructure faults: CHAOS-03, CHAOS-08 to CHAOS-13, node power implementations | |
-| 6 | Remaining provisioning: PROV-02, PROV-05 to PROV-08, PROV-10, PROV-11 | |
-| 7 | Remaining data cases: DATA-06 to DATA-13, the locktool image for fcntl byte ranges, and the sub-file half of CHAOS-06 it makes possible | |
-| 8 | Scale: SCALE-01, SCALE-02, SCALE-03, SCALE-05, SCALE-06 | |
-| 9 | Security and observability: SEC-03 to SEC-09, OBS-01, OBS-05, OBS-06, OBS-07 | |
-| 10 | Soak gate: PROV-09, DATA-14, CHAOS-14 to CHAOS-16, SCALE-04, SCALE-07 | |
+| 4 | Grace and lock reclaim: CHAOS-05, CHAOS-06, CHAOS-07, OBS-02, OBS-03, designed in [`03-grace-and-lock-reclaim-design.md`](03-grace-and-lock-reclaim-design.md) | in review, [PR #8](https://github.com/mikebz/nfs-verification/pull/8) |
+| 5 | Close out Provisioning (PROV): PROV-02, PROV-05 to PROV-11 | |
+| 6 | Close out Concurrency and Data Integrity (DATA): DATA-06 to DATA-14, locktool helper | |
+| 7 | Close out Observability (OBS): OBS-01, OBS-05, OBS-06, OBS-07 | |
+| 8 | Close out Security and Identity (SEC): SEC-03 to SEC-09 | |
+| 9 | Close out Scale and Performance (SCALE): SCALE-01 to SCALE-07 | |
+| 10 | Close out Resiliency and Chaos (CHAOS): CHAOS-03, CHAOS-04, CHAOS-08 to CHAOS-18 | |
 | 11 | Version skew, conditional on preflight finding independent versioning: SKEW-01 to SKEW-03 | |
 
-Order rationale: the heaviest weight in the plan is on the singleton in the data
-path, so chaos comes early, right after there are enough presubmit cases to
-prove the harness itself works. Scale and soak come last because they are the
-cases most likely to be blocked by cluster capacity rather than by defects.
+Order rationale: Steps 1 through 4 established the harness foundation, all 11
+presubmit cases, the core fault-injection package, and the grace and lock
+reclaim observability path.
+
+Following PR #8, the strategy shifts to systematically closing out each section
+of the test plan one by one before proceeding to the next, rather than
+interleaving fault injection across different domains:
+
+1. **PROV first**: complete all storage lifecycle behaviors (concurrent claims,
+   snapshots, Retain reclaim, creation/deletion under server downtime, volume
+   expansion under active I/O, and churn).
+2. **DATA next**: complete all data path semantics and protocol edge cases
+   (lease-expiry lock release, direct I/O, noac visibility, silly renames, large
+   directory readdir, sparse files, and fsync durability guarantees).
+3. **OBS & SEC next**: close out production observability (alerts for outage,
+   memory ceiling, volume capacity, and metrics persistence) and security/identity
+   (fsGroup, service-proxy export rules, rejected clients, identity normalization,
+   and network confidentiality).
+4. **SCALE next**: verify the cluster and server under volume fan-out, high mount
+   counts, metadata churn, noisy neighbors, and throughput soak.
+5. **CHAOS last**: close out the most invasive, platform-dependent infrastructure
+   faults (node power-off, out-of-service taint, network partitions, CNI/kubelet
+   restarts, colocation memory deadlocks, state store corruption, and the 24h
+   chaos soak). Running these after the rest of the suite is closed out ensures
+   that any failures reflect true resiliency defects rather than unverified
+   data-path or lifecycle edge cases.
+6. **SKEW**: conditional version skew tests for independently versioned server
+   and CSI driver deployments.
 
 Steps 2b and 3 land together because the three cases held back from step 2 were
 held back for reasons the chaos work settles: OBS-04 needs a fault, and SEC-02
@@ -333,7 +357,7 @@ it reported and the third question in the triage runbook.
 - OBS-02: a failover is visible to whoever runs the cluster, with a timestamp
   and a duration, through the server's log stream or the Kubernetes API. A
   failover only the client noticed is an observability defect.
-- OBS-03: grace entry and exit are both observable and the window is
+- OBS-03: grace period entry and exit are both observable and the window is
   measurable, against the two-lease bound in Section 3.8. This is the case the
   plan says CHAOS-05 needs to be diagnosable at all.
 
@@ -349,14 +373,204 @@ locks, and nothing on a busybox image can take one. A whole-file lock travels
 to an NFSv4 server as a lock over the whole range and is reclaimed by the same
 mechanism, so reclaim, exclusivity and the grace bar on new state are all
 asserted now. The sub-file dimension, two clients holding disjoint ranges of one
-file, arrives with `locktool` in step 7.
+file, arrives with `locktool` in step 6.
 
 **Gates.** The chaos name prefix now marks a case that injures the server,
 whatever section of the plan it comes from: OBS-02 and OBS-03 inject a fault,
 and the fast path holds no fault injection.
 
-**Still not here**: node power operations, network faults, the locktool image,
-metrics scraping, and any assertion that an alert fired.
+---
+
+## 3d. What step 5 contains (Close out PROV)
+
+Closes out Section 3.1 entirely. Eight cases covering dynamic volume provisioning
+at scale, snapshotting, retain reclaim, server-down lifecycle resilience, churn,
+and volume expansion under active I/O:
+
+- PROV-02: provision 20 RWX PVCs concurrently. All bind, no duplicate export
+  IDs are assigned, and the server does not restart.
+- PROV-05: snapshot and restore, if advertised by a VolumeSnapshotClass. The
+  restored volume mounts RWX and content matches the original; if snapshots are
+  unsupported, asserts clean API rejection.
+- PROV-06: `persistentVolumeReclaimPolicy: Retain`. The PV persists after PVC
+  deletion, and existing data remains readable when rebound to a new claim.
+- PROV-07: provision while the server pod is down (using `pkg/chaos`). The PVC
+  stays Pending during the outage, binds cleanly after server recovery, and
+  leaves no orphaned export.
+- PROV-08: delete PVC while the server pod is down. Deletion completes without
+  orphaned exports or leaked backing block volumes once the server returns.
+- PROV-09: rapid create/delete churn (100 cycles). Asserts no export ID
+  exhaustion, no file descriptor leaks, and server RSS remains bounded under
+  the ceiling. Gated in weekly soak (`Gate: W`).
+- PROV-10: provision with a 1000-character volume name or unusual characters.
+  Asserts clean rejection or correct handling without malformed export configuration.
+- PROV-11: two-stage expansion under active I/O. Grows the backing block volume,
+  then grows the share, while `pkg/framework/load.go` runs. Client `df` reflects
+  the new capacity with no unmount, no server restart, and zero I/O errors.
+
+**Harness added**: `VolumeSnapshot` and `VolumeSnapshotClass` manifest templates
+and capability probing (`Caps.VolumeSnapshot`), PV retention and re-binding
+fixtures, and a high-churn lifecycle runner.
+
+---
+
+## 3e. What step 6 contains (Close out DATA)
+
+Closes out Section 3.2 entirely. Nine cases verifying protocol edge cases,
+byte-range lock expiry, direct I/O, silly renames, large directory chunk reuse,
+sparse file hole punches, and fsync/COMMIT durability:
+
+- DATA-06: lock held by a pod that is force-deleted. Asserts the lock is
+  released within one lease period and a new acquirer on another node succeeds.
+- DATA-07: same file opened `O_DIRECT` concurrently by two pods. Writes land
+  without corruption and reads reflect committed data.
+- DATA-08: `noac` mount variant. Asserts immediate cross-pod visibility without
+  close, confirming the explicit contrast with DATA-04.
+- DATA-09: rename, unlink, and re-create while another pod holds the file open.
+  The open descriptor remains valid and silly-rename behavior is verified.
+- DATA-10: large directory (100k entries) readdir concurrent with deletes.
+  Listing completes without server crash or use-after-free, catching directory
+  chunk reuse defects under cache pressure.
+- DATA-11: sparse file write, hole punching via `fallocate -p`, and read-back.
+  Asserts correct zeroed regions and consistent reported file size.
+- DATA-12: fsync and COMMIT durability. Pod writes, fsyncs, and the server is
+  killed via `pkg/chaos`. Committed data must be present post-recovery.
+- DATA-13: negative durability. Pod writes without fsync and the server is
+  killed. Asserts that missing uncommitted data is acceptable and documented,
+  not failed.
+- DATA-14: mixed 70/30 read/write workload across 20 pods with file sizes from
+  4KiB to 1GiB for 1 hour. Asserts zero checksum mismatches. Gated in weekly
+  soak (`Gate: W`).
+
+**Harness added**: `locktool`, a small static Go binary for `fcntl` byte-range
+locks and lease-period observation; `noac` mount option injection in PVC/PV
+specifications; directory population and hole-punching exec helpers; and `fio`
+orchestration (`-fio-image`) for DATA-14.
+
+---
+
+## 3f. What step 7 contains (Close out OBS)
+
+Closes out Section 3.5 entirely. Four cases asserting operational observability,
+health alerting, memory ceiling warnings, capacity alerts, and metrics continuity:
+
+- OBS-01: server unavailable. An alert fires within the SLO bound with the
+  expected severity and alert target.
+- OBS-05: server memory approaching ceiling. An alert fires before the server
+  pod hits OOMKill.
+- OBS-06: volume near capacity. An alert fires when usage exceeds threshold,
+  and `df` inside the pod agrees with the control-plane metric.
+- OBS-07: metrics survive server restart. Post-recovery metrics counters either
+  reset cleanly or persist continuously, leaving no gaps that obscure an outage.
+
+**Harness added**: a metrics and alert querying client (Prometheus API or
+Kubernetes metrics endpoints), threshold-fill workload helpers, and server
+memory pressure simulation.
+
+---
+
+## 3g. What step 8 contains (Close out SEC)
+
+Closes out Section 3.6 entirely. Seven cases verifying security boundaries,
+service proxy access rules, denied clients, client identity persistence, and pod
+admission compliance:
+
+- SEC-03: pod `securityContext.fsGroup` interaction. Group access is correct
+  without triggering unexpected chown storms on volume mounts.
+- SEC-04: export access rules evaluated through the cluster Service path.
+  Verifies that per-client rules apply even when client connections pass through
+  Kubernetes Service proxies.
+- SEC-05: denied client attempts mount. Asserts explicit rejection rather than
+  silent access grant.
+- SEC-06: dual-stack client identity. Normalization between IPv4 and IPv4-mapped
+  IPv6 is consistent across nodes. Skipped unless dual-stack networking is present.
+- SEC-07: two pods with identical client identity after restart. Asserts no
+  state collision and no lost locks.
+- SEC-08: data path confidentiality. Inspects and records whether NFS traffic
+  on the pod network is cleartext or encrypted. Stated as an informational
+  finding, not a pass/fail.
+- SEC-09: server pod under platform admission policy. Verifies the server runs
+  with only required capabilities (`CAP_DAC_READ_SEARCH` where file handles are
+  used) and functions under restricted pod security standards.
+
+**Harness added**: `fsGroup` pod manifest configurations, Service-backed client
+access rule fixtures, dual-stack network probes, and network confidentiality
+inspection.
+
+---
+
+## 3h. What step 9 contains (Close out SCALE)
+
+Closes out Section 3.4 entirely. Seven cases pushing client fan-out, mount
+density, metadata volume, noisy-neighbor contention, and sustained throughput:
+
+- SCALE-01: max RWX mounts per node, ramping to failure. Identifies and documents
+  the mount ceiling; asserts failures are clean rather than kernel hangs.
+- SCALE-02: 50 RWX volumes per cluster. All volumes mount simultaneously; server
+  RSS remains below ceiling.
+- SCALE-03: pod fan-out (1, 10, 50, 100 pods on one volume). Records the
+  throughput degradation curve and asserts no timeout or connection cliff.
+- SCALE-04: small-file write storm (1M files, 1–64KiB). Server RSS remains
+  bounded without OOMKill. Gated in weekly soak (`Gate: W`).
+- SCALE-05: metadata-heavy workload (100k stat/create/unlink per minute). Asserts
+  no server restart and records operation latencies.
+- SCALE-06: noisy neighbor across exports on a shared server (enabled only if
+  fan-out > 1). Load on one export does not starve another beyond stated bounds.
+- SCALE-07: sustained 8h throughput soak. Asserts no degradation trend exceeding
+  10% and no resource leak. Gated in weekly soak (`Gate: W`).
+
+**Harness added**: batch volume and pod generator, metadata stress scripts,
+fio distributed benchmark orchestrator, and noisy neighbor test fixtures.
+
+---
+
+## 3i. What step 10 contains (Close out CHAOS)
+
+Closes out Section 3.3 entirely. Thirteen cases delivering the most disruptive
+infrastructure, node, network, and endurance fault injection:
+
+- CHAOS-03: hard-stop the node hosting the server. Asserts volume re-attachment
+  and I/O recovery within node-loss SLO using the `out-of-service` taint.
+- CHAOS-04: network partition between server and clients, then healed. Clients
+  block during the partition and recover without data loss.
+- CHAOS-08: server restarts with new state. Client handles stale filehandles
+  without permanent EIO or requiring manual remounts.
+- CHAOS-09: kubelet restart on a client node with active mounts. Mounts survive
+  and I/O resumes cleanly.
+- CHAOS-10: CSI node plugin pod eviction with active mounts. Existing mounts are
+  unaffected; new mounts queue and succeed after plugin recovery.
+- CHAOS-11: CNI restart on a client node. I/O blocks and resumes without unmount.
+- CHAOS-12: NetworkPolicy applied that blocks the NFS data path, then removed.
+  Clients block and recover cleanly without unmount.
+- CHAOS-13: backing block volume disconnect during active write. Errors surface
+  as retryable with no silent corruption.
+- CHAOS-14: colocation deadlock. Server pod scheduled on same node as clients
+  under heavy memory pressure; asserts no page-reclaim deadlock.
+- CHAOS-15: client node OOM with dirty pages on NFS mount. Asserts bounded
+  failure without node kernel hang. Gated in weekly soak (`Gate: W`).
+- CHAOS-16: 24h chaos soak with randomized kills, network partitions, and pod
+  evictions. Asserts zero data corruption, zero unrecovered mounts, and zero core dumps.
+- CHAOS-17: recovery state store lost or corrupted, then server restarted. Asserts
+  honest failure: clients fail to reclaim and lose locks, but no silent conflicting
+  lock grant and no file corruption.
+- CHAOS-18: delegation held by client A, client B opens same file conflicting.
+  Delegation recalled within timeout; skipped if delegations are disabled.
+
+**Harness added**: node power operations via platform provider, out-of-service
+taint management, NetworkPolicy fault injector, memory stress daemon, and
+long-running 24h chaos orchestrator.
+
+---
+
+## 3j. What step 11 contains (Version skew)
+
+Three conditional cases (Section 3.7) evaluating skew when preflight determines
+the server and CSI driver are independently versioned:
+
+- SKEW-01: CSI driver N with server N-1. Provision, mount, and I/O work cleanly
+  or fail with an explicit compatibility error.
+- SKEW-02: CSI driver N-1 with server N.
+- SKEW-03: server restarted into a different minor version while clients are mounted.
 
 ---
 

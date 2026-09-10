@@ -309,7 +309,7 @@ across the failover and is not released until the case ends.
 
 CHAOS-06 in the plan says byte-range locks. Nothing on a busybox image can take
 one: `flock` is whole-file, and the tool that can is the static Go binary the
-plan schedules with DATA-06 in step 7, which needs an image this repository
+plan schedules with DATA-06 in step 6, which needs an image this repository
 does not build yet.
 
 What a whole-file lock does exercise is the same protocol path. A Linux NFSv4
@@ -319,9 +319,9 @@ exclusivity and the grace bar on new state are all asserted now. What is not
 asserted now is the sub-file dimension: two clients holding disjoint ranges of
 one file, and both reclaiming. That arrives with `locktool`.
 
-The case comment says which half it covers, and step 7 in `plan.md` carries the
-extension, so the gap is recorded in both places rather than in a commit
-message.
+The case comment says which half it covers, and the tools list in `plan.md`
+records that `locktool` extends this case when it arrives with DATA-06, so the
+gap is written down in both places rather than in a commit message.
 
 Alt: bring `locktool` forward into this phase. Rejected: it needs a build and a
 registry the repository does not have, and it would double the size of a phase
@@ -395,7 +395,7 @@ finding.
 
 Later phases, intent only:
 
-- `locktool` and the sub-file dimension of CHAOS-06, with DATA-06 in step 7.
+- `locktool` and the sub-file dimension of CHAOS-06, with DATA-06 in step 6.
 - CHAOS-17, which loses the recovery state deliberately and needs exactly the
   observations this phase produces to tell a bounded failure from a silent one.
 - SEC-07, two clients with the same identity after a restart, which is the
@@ -478,7 +478,7 @@ already in it, which is where the grace lines are.
 |---|---|
 | Metrics are the other channel the plan allows and this phase does not read. A server that reports grace only through metrics fails OBS-03 for a reason that is half harness gap. | Whether such a deployment shows up. If it does, the answer is a metrics URL flag and a metric name flag, and the failure message for OBS-03 should name them before that. |
 | The wording rule is the implementation-specific part of an otherwise portable observer. | The first run against a server nobody here has read the logs of. The flag is the escape hatch; if it is needed on every deployment, the rule is wrong and the flag should become the documented path. |
-| Whole-file locks stand in for byte ranges until step 7. | Whether reclaim behaves differently for a sub-file range on any server met in practice. There is no protocol reason it should; if it does, that is a finding. |
+| Whole-file locks stand in for byte ranges until step 6. | Whether reclaim behaves differently for a sub-file range on any server met in practice. There is no protocol reason it should; if it does, that is a finding. |
 | A grant near a window boundary is reported as a note rather than a failure. | Whether real clusters put grants near boundaries at all. If they do, the guard band is hiding something and the offset should be measured instead. |
 | Five failovers in a row may leave the cluster in a state the next case inherits, since the suite shares one namespace and one server. | Whether the repeated case can be run without disturbing what follows it. It waits for recovery after the last cycle; if that proves insufficient, the case owns waiting longer, not the cases after it. |
 | None of the five has been run against a real cluster. | The first run. Expect it to change the wording rule and the probe's per-attempt bound. |
