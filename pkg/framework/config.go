@@ -45,6 +45,7 @@ type Config struct {
 	Verbose     bool
 
 	Delegations      string
+	RootSquash       string
 	EnvFile          string
 	RefreshPreflight bool
 	PreflightMaxAge  time.Duration
@@ -82,6 +83,7 @@ func init() {
 	flag.BoolVar(&cfg.Verbose, "v-harness", false, "log every harness action")
 
 	flag.StringVar(&cfg.Delegations, "delegations", "auto", "whether delegations are enabled: auto, on, off")
+	flag.StringVar(&cfg.RootSquash, "root-squash", "auto", "what the export is configured to do with root: on, off, or auto to record what it does without asserting it")
 	flag.StringVar(&cfg.EnvFile, "env-file", "", "reuse a specific environment.json instead of rediscovering")
 	flag.BoolVar(&cfg.RefreshPreflight, "refresh-preflight", false, "rerun preflight even when a fresh cached result exists for this context")
 	flag.DurationVar(&cfg.PreflightMaxAge, "preflight-max-age", 8*time.Hour, "how long a cached preflight result stays usable")

@@ -40,11 +40,26 @@ unit:
 preflight:
 	go run ./cmd/preflight -timeout=3m $(COMMON)
 
-# The end-to-end cases. Budget: under 15 minutes on 2 nodes. Select a subset
-# with go test -run when there is more than one category of case to select.
+# Section 4.2 gates. Categories live in a go test pattern, not in harness
+# machinery: chaos cases are named TestChaos..., everything else is presubmit.
+#
+# Presubmit deliberately holds no chaos. Chaos is slow and its failures need
+# human triage; putting it in the fast gate trains people to ignore red.
+
+# All P cases. Budget: under 15 minutes on 2 nodes.
+.PHONY: test-presubmit
+test-presubmit:
+	go test $(PKG) -v -timeout=30m -skip '^TestChaos' $(COMMON)
+
+# The chaos vector. Budget: hours, and every case injures the server.
+.PHONY: test-chaos
+test-chaos:
+	go test $(PKG) -v -timeout=90m -run '^TestChaos' $(COMMON)
+
+# Everything. Same budget as chaos, since chaos dominates it.
 .PHONY: test-e2e
 test-e2e:
-	go test $(PKG) -v -timeout=30m $(COMMON)
+	go test $(PKG) -v -timeout=120m $(COMMON)
 
 .PHONY: clean
 clean:

@@ -139,9 +139,9 @@ Each step is one pull request. Later steps depend only on earlier ones.
 | Step | Scope | Status |
 |---|---|---|
 | 1 | Approach, harness skeleton, preflight (Section 0), PROV-01, DATA-03, DATA-05 flock | done, [PR #1](https://github.com/mikebz/nfs-verification/pull/1) |
-| 2 | Presubmit cases that need nothing the harness does not already have: PROV-03, PROV-04, DATA-01, DATA-04, SEC-01 | **this change** |
-| 2b | The three presubmit cases held back from step 2: DATA-02, OBS-04, SEC-02 | next |
-| 3 | Chaos operations package plus CHAOS-01 and CHAOS-02, the SLO measurement path, fault timelines | |
+| 2 | Presubmit cases that need nothing the harness does not already have: PROV-03, PROV-04, DATA-01, DATA-04, SEC-01 | done, [PR #3](https://github.com/mikebz/nfs-verification/pull/3) |
+| 2b | The three presubmit cases held back from step 2: DATA-02, OBS-04, SEC-02 | **this change** |
+| 3 | Chaos operations package plus CHAOS-01 and CHAOS-02, the SLO measurement path, fault timelines | **this change** |
 | 4 | Grace and lock reclaim: CHAOS-05, CHAOS-06, CHAOS-07, OBS-02, OBS-03 | |
 | 5 | Node and infrastructure faults: CHAOS-03, CHAOS-08 to CHAOS-13, node power implementations | |
 | 6 | Remaining provisioning: PROV-02, PROV-05 to PROV-08, PROV-10, PROV-11 | |
@@ -156,22 +156,28 @@ path, so chaos comes early, right after there are enough presubmit cases to
 prove the harness itself works. Scale and soak come last because they are the
 cases most likely to be blocked by cluster capacity rather than by defects.
 
-Step 2 was split because three of its eight cases cannot yet be written so that
-a failure means what it says, and a presubmit case that fails for its own
-reasons is worse than no case at all:
+Steps 2b and 3 land together because the three cases held back from step 2 were
+held back for reasons the chaos work settles: OBS-04 needs a fault, and SEC-02
+needs a way to state what the export is configured to do. Step 2 was split
+because those three cases could not yet be written so that a failure means what
+it says, and a presubmit case that fails for its own reasons is worse than no
+case at all:
 
 - **DATA-02** carries the caveat in gap 1 below. It asserts an exact record
   count under concurrent `O_APPEND` writes, which is an implementation property
-  and not something NFSv4.1 promises. It lands with the failure message that
-  routes it to the boundary discussion rather than to the server owner.
+  and not something NFSv4.1 promises. It landed with a failure message that
+  routes it to the boundary discussion rather than to the server owner, and
+  with the record-integrity half of the case separated out, because a torn
+  record is corruption under any reading of the protocol.
 - **OBS-04** needs a mount that fails on purpose, which means a PV pointing at
-  an export that is not there. That is fault injection, so it lands with the
-  chaos operations package in step 3 rather than being hand-rolled here.
-- **SEC-02** asserts that root is squashed *as configured*. Preflight does not
-  discover the export's squash setting yet, and a case that asserts "as
-  configured" without reading the configuration asserts nothing. SEC-01 already
-  records, in passing, whether root can chown on the share, which is the
-  observation SEC-02 will be built on.
+  an export that is not there. It landed here rather than being hand-rolled in
+  step 2.
+- **SEC-02** asserts that root is squashed *as configured*. Nothing in the
+  Kubernetes API states the export's squash setting, so the case takes it from
+  `-root-squash` when the operator states it, and otherwise records what the
+  export does without asserting a value it was never told. What it asserts
+  either way is coherence: whatever the export does to root, it must do the
+  same thing on every client.
 
 ---
 
@@ -247,6 +253,58 @@ image, fio, snapshots.
 
 ---
 
+## 3b. What steps 2b and 3 contain
+
+Five more cases, and the first fault injection in the suite:
+
+- DATA-02: four pods append to one file through one descriptor each, held open
+  across the whole loop, which is the shape of a real log appender and the
+  harder case. Record integrity is asserted outright; the exact count fails
+  with the caveat that routes it.
+- SEC-02: what the export does to a root-owned write, on two clients. The
+  squash setting comes from `-root-squash` or is recorded rather than asserted;
+  the coherence between clients is asserted either way.
+- OBS-04: a volume pointing at an export that is not there, on an address
+  RFC 5737 reserves for documentation, so the case manufactures a mount failure
+  without touching the real export. It asserts the failure reaches the operator
+  as a Kubernetes Event that names what could not be mounted. A pod stuck in
+  ContainerCreating with nothing in its events is a silent failure.
+- CHAOS-01: SIGKILL the server process during an active write.
+- CHAOS-02: delete the server pod during an active write, with a lock held
+  across the failover.
+
+**The measurement path.** Both chaos cases run a workload that writes one 4KiB
+record per second with `conv=fsync` and logs the outcome and time of every
+attempt on the pod's own filesystem, never on the share. That log gives all
+three assertions at once: time to first committed write after the fault
+(against `pkg/slo`), the count of I/O errors (which must be zero, because a
+hard mount blocks rather than failing), and the set of writes the server had
+already acknowledged, every one of which must still be there afterwards when
+read from a pod on another node. The fault time and the recovery time are both
+read from the writer pod's clock, so the measurement never depends on the
+workstation and a node agreeing.
+
+**`pkg/chaos`.** Two operations, both expressed as Kubernetes operations or a
+signal through the node agent, so the same case runs on GKE and on bare metal.
+Both record what they did on the fault timeline, and both refuse to act on a
+target they cannot identify: the process pattern is rejected when it would
+match a shell wrapper, the pod delete is refused when no controller owns the
+pod, and a kill that matched nothing is an error rather than a fault. A case
+that measures recovery from a fault that never happened passes for the wrong
+reason, which is worse than a case that does not run.
+
+**Gates.** There are now slow cases to keep out of the fast path, so the
+Section 4.2 split exists: `make test-presubmit` skips `TestChaos...` and
+`make test-chaos` runs only those. The category lives in the test name and a
+`go test` pattern, not in harness machinery.
+
+**Still not here**: node power operations, the locktool image, fio, snapshots.
+Grace and reclaim (CHAOS-05 to CHAOS-07) are step 4, and they are where lock
+behaviour gets pinned down properly; CHAOS-02 asserts only that a lock held
+across a failover is still exclusive afterwards.
+
+---
+
 ## 4. Known gaps to settle as we go
 
 0. **Read [`findings.md`](findings.md) before touching teardown.** F-001
@@ -257,8 +315,12 @@ image, fio, snapshots.
    operation; a client implements `O_APPEND` by writing at the offset it
    believes to be end-of-file. Exact record counts under concurrent appends from
    several clients are an implementation property, not a protocol guarantee. The
-   case will carry that caveat in its failure message so a failure is routed to
-   the boundary discussion before it is filed as a server defect.
+   case carries that caveat in its failure message so a failure is routed to
+   the boundary discussion before it is filed as a server defect, and it
+   separates the two halves: a lost record is the flagged assertion, a torn
+   record is corruption under any reading and is failed without a caveat. Still
+   open: whether the count belongs in the presubmit gate at all, which is a
+   question for the boundary discussion and not for this file.
 2. **Lease and grace are not discoverable on every implementation.** Confirmed
    on the first real run: the in-cluster NFS provisioner exposes neither, so the
    run needs `-lease-seconds` and `-grace-seconds`. Preflight
@@ -273,7 +335,17 @@ image, fio, snapshots.
 4. **CHAOS-03 is blocked on stock cluster settings**, per the floor note in the
    plan. Preflight records both required settings; the case reports blocked, not
    failed, when either is missing.
-5. **Server discovery is a heuristic** when `-server-selector` is not passed:
+5. **The export's squash setting is not discoverable.** Nothing in the
+   Kubernetes API states it, so SEC-02 takes `-root-squash=on|off` and, without
+   it, records what the export does rather than asserting a value nobody stated.
+   The alternative would be a probe that infers the setting from the behaviour
+   and then asserts the behaviour matches, which proves nothing.
+6. **The server process name is not always discoverable.** CHAOS-01 derives it
+   from the container command and refuses a shell wrapper, because killing
+   everything matching `sh` on a node takes the node out. A server whose command
+   lives in the image entrypoint needs `-server-process`, and the case reports
+   blocked without it rather than killing something else.
+7. **Server discovery is a heuristic** when `-server-selector` is not passed:
    pods exposing port 2049, or named for a known userspace server, excluding
    anything the suite itself created. Passing the selector is the supported
    path, and preflight says so in `environment.json` when it had to guess. The

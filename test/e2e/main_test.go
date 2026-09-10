@@ -17,6 +17,19 @@ import (
 	"github.com/mikebz/nfs-verification/pkg/preflight"
 )
 
+// TestMain is the suite entry point rather than a test. Nothing runs until
+// preflight has passed, because cases run against an environment that failed
+// discovery produce failures that cost days to route and prove nothing.
+//
+// Steps:
+//  1. Parse and finalize the flags.
+//  2. Use an environment record named with -env-file, if there is one.
+//  3. Otherwise reuse a recent preflight result cached for this kubeconfig
+//     context, since preflight answers the same way against an unchanged
+//     cluster.
+//  4. Otherwise run preflight, and exit non-zero with the specific reason if
+//     it fails.
+//  5. Publish the result to the fixtures and run the cases.
 func TestMain(m *testing.M) {
 	flag.Parse()
 	if err := framework.FinalizeFlags(); err != nil {

@@ -115,3 +115,108 @@ func nobodyNote(o framework.Owner) string {
 	}
 	return ""
 }
+
+// SEC-02: what the export does to a root-owned write. Squash is an export
+// setting the Kubernetes API cannot see, so the case reads it from
+// `-root-squash` when the operator states it and otherwise records what the
+// export does without asserting a value it was never told.
+//
+// What it asserts either way is coherence, which is where the real defects
+// live: whatever the export does to root, it must do the same thing on every
+// client, and the identity it settles on must not be root's on one node and
+// anonymous on another.
+//
+// Steps:
+//  1. Put a root pod on each of two nodes, on one claim.
+//  2. Write a file as root from each. If the first cannot write, report
+//     blocked; if only the second cannot, the export treats identical clients
+//     differently, which is a failure.
+//  3. Read the ownership each client's write landed with, and require the two
+//     to agree.
+//  4. Read the first file from the second client, and require that to agree
+//     too.
+//  5. Compare against -root-squash when it was passed; otherwise record what
+//     the export does rather than asserting a value nobody stated.
+func TestRootSquashBehaviour(t *testing.T) {
+	f := framework.New(t, "SEC-02")
+	requireCap(t, f.Caps.MultiNode, "checking squash on two clients needs two schedulable workers")
+	ctx, cancel := caseCtx(t, 15*time.Minute)
+	defer cancel()
+
+	nodeA, nodeB := f.TwoNodes(ctx)
+	pvc := f.MustRWXPVC(ctx, "sec02")
+	// Both pods are root. That is the point: the question is what the export
+	// does with a uid 0 write, and it has to answer the same way twice.
+	f.MustPod(ctx, toolsPod("roota", pvc.Name, nodeA))
+	f.MustPod(ctx, toolsPod("rootb", pvc.Name, nodeB))
+
+	dir := fileIn("sec02")
+	if r := f.Sh(ctx, "roota", "mkdir -p "+framework.Quote(dir)); r.Err != nil {
+		t.Skipf("blocked on export configuration: root on %s cannot create a directory on the share (%s). "+
+			"That is itself a squash outcome, but with no writable path the case cannot compare two clients",
+			nodeA, r.Combined())
+	}
+	pathA, pathB := dir+"/from-root-a.dat", dir+"/from-root-b.dat"
+	if r := f.Sh(ctx, "roota", "echo sec02 > "+framework.Quote(pathA)); r.Err != nil {
+		t.Skipf("blocked on export configuration: root on %s cannot write to the share (%s)", nodeA, r.Combined())
+	}
+	if r := f.Sh(ctx, "rootb", "echo sec02 > "+framework.Quote(pathB)); r.Err != nil {
+		t.Errorf("root on %s wrote to the share but root on %s could not (%s): "+
+			"the export treats two identical clients differently", nodeA, nodeB, r.Combined())
+		return
+	}
+
+	ownerA, err := f.StatOwner(ctx, "roota", pathA)
+	if err != nil {
+		t.Fatalf("reading ownership of the file root wrote on %s: %v", nodeA, err)
+	}
+	ownerB, err := f.StatOwner(ctx, "rootb", pathB)
+	if err != nil {
+		t.Fatalf("reading ownership of the file root wrote on %s: %v", nodeB, err)
+	}
+
+	// Coherence first: same operation, two clients, one answer.
+	if ownerA.UID != ownerB.UID || ownerA.GID != ownerB.GID {
+		t.Errorf("root's write landed as %s on %s and as %s on %s: the export squashes inconsistently "+
+			"between clients, which is worse than either setting on its own",
+			ownerA, nodeA, ownerB, nodeB)
+	}
+	// And across clients: the file root wrote on A must read the same from B.
+	crossed, err := f.StatOwner(ctx, "rootb", pathA)
+	if err != nil {
+		t.Fatalf("reading on %s the ownership of what root wrote on %s: %v", nodeB, nodeA, err)
+	}
+	if crossed.UID != ownerA.UID || crossed.GID != ownerA.GID {
+		t.Errorf("the file root wrote on %s reads as %s there and as %s on %s%s",
+			nodeA, ownerA, crossed, nodeB, nobodyNote(crossed))
+	}
+
+	squashed := ownerA.UID != 0
+	switch want := framework.Cfg().RootSquash; want {
+	case "on":
+		if !squashed {
+			t.Errorf("-root-squash=on, but root's write is owned by %s: root is not being squashed", ownerA)
+		} else {
+			t.Logf("root_squash is on as configured: root's write landed as %s", ownerA)
+		}
+	case "off":
+		if squashed {
+			t.Errorf("-root-squash=off, but root's write landed as %s rather than uid 0: "+
+				"the export is squashing root when it was configured not to", ownerA)
+		} else {
+			t.Logf("root is preserved as configured: root's write landed as %s", ownerA)
+		}
+	default:
+		// Recorded, not asserted. Nobody told this run what the export is
+		// configured to do, and inventing an expectation would turn a
+		// deployment choice into a test failure.
+		if squashed {
+			t.Logf("recorded: this export squashes root, whose write landed as %s on both %s and %s. "+
+				"Pass -root-squash=on to make that an assertion", ownerA, nodeA, nodeB)
+		} else {
+			t.Logf("recorded: this export preserves root, whose write landed as %s on both %s and %s. "+
+				"On a shared cluster that is worth knowing: any pod that can run as root owns the share. "+
+				"Pass -root-squash=off to make that an assertion", ownerA, nodeA, nodeB)
+		}
+	}
+}

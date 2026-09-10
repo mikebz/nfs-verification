@@ -1,0 +1,32 @@
+# A PersistentVolume pointing at an NFS export that is not there, for the
+# observability case that asserts a mount failure reaches the operator as a
+# Kubernetes Event. The server address belongs to a range reserved for
+# documentation (RFC 5737), so it cannot route to anything real anywhere, on any
+# cluster, and the case cannot accidentally mount a live export.
+#
+# The reclaim policy is Retain because nothing provisioned this volume and there
+# is nothing to delete; the case removes the object itself.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: {{ .Name | q }}
+  labels:
+    {{- range $key, $value := .Labels }}
+    {{ $key | q }}: {{ $value | q }}
+    {{- end }}
+spec:
+  capacity:
+    storage: {{ .Size | q }}
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  # Empty, not absent: an empty class stops any provisioner from adopting this
+  # volume, and lets the claim bind to it by name alone.
+  storageClassName: ""
+  mountOptions:
+    {{- range .Options }}
+    - {{ . | q }}
+    {{- end }}
+  nfs:
+    server: {{ .Server | q }}
+    path: {{ .Path | q }}

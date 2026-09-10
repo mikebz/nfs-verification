@@ -226,3 +226,22 @@ func (m MountLine) OptionValue(key string) (string, bool) {
 func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
 
 func isAlreadyExists(err error) bool { return apierrors.IsAlreadyExists(err) }
+
+// ListProcesses returns the command lines on a node matching a fixed pattern.
+// The chaos cases look before they signal: a pattern that matches the wrong
+// process kills the wrong thing, and a pattern that matches nothing would let a
+// case measure a recovery from a fault that was never injected.
+func (a *Agent) ListProcesses(ctx context.Context, node, pattern string) ([]string, error) {
+	out, err := a.Run(ctx, node, fmt.Sprintf(
+		`ps -eo pid=,args= | grep -F %s | grep -v grep || true`, shellQuote(pattern)))
+	if err != nil {
+		return nil, err
+	}
+	var procs []string
+	for _, line := range strings.Split(out, "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			procs = append(procs, line)
+		}
+	}
+	return procs, nil
+}
