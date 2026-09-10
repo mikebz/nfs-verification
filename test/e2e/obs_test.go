@@ -270,11 +270,11 @@ func TestChaosGracePeriodIsObservable(t *testing.T) {
 	bound := slo.GraceExitBound(profile(t))
 	window, obs, ok := waitGraceWindow(ctx, t, f, since, bound+s.budget)
 	if !ok {
-		if enters := obs.Enters(); len(enters) > 0 {
+		if entries := obs.Entries(); len(entries) > 0 {
 			t.Fatalf("the server entered grace at %s and was never observed to leave it within %s. "+
 				"Grace entered and never left is what a stuck server and a re-entry loop both look like, "+
 				"and on this deployment an operator has no way to tell them apart either",
-				enters[0].At.UTC().Format(time.RFC3339), bound+s.budget)
+				entries[0].At.UTC().Format(time.RFC3339), bound+s.budget)
 		}
 		t.Fatalf("the server's log stream says nothing about grace across a failover, so grace entry and "+
 			"exit are not observable on this deployment: %s. An operator here cannot answer the third "+
@@ -295,7 +295,7 @@ func TestChaosGracePeriodIsObservable(t *testing.T) {
 			"the recovery numbers the other cases report",
 			window.Duration().Round(time.Second), bound, profile(t).Name)
 	}
-	if n := len(obs.Enters()); n > 1 {
+	if n := len(obs.Entries()); n > 1 {
 		t.Errorf("the server entered grace %d times for one failover, which is a grace re-entry loop: %s. "+
 			"It presents as a hung client in front of a healthy server, which is why CHAOS-05 needs this "+
 			"case to be diagnosable", n, obs.Describe())

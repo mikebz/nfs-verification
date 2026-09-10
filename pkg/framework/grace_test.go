@@ -37,19 +37,19 @@ func TestClassifyGraceWording(t *testing.T) {
 		"server is no longer in grace",
 	}
 	for _, line := range enters {
-		if kind, ok := classifyGrace(line); !ok || kind != GraceEnter {
-			t.Errorf("%q classified as %q (matched=%v), want an entry", line, kind, ok)
+		if exit, ok := classifyGrace(line); !ok || exit {
+			t.Errorf("%q was read as exit=%v (matched=%v), want an entry", line, exit, ok)
 		}
 	}
 	for _, line := range exits {
-		if kind, ok := classifyGrace(line); !ok || kind != GraceExit {
-			t.Errorf("%q classified as %q (matched=%v), want an exit; an exit read as an entry "+
-				"reports a healthy server as looping through grace", line, kind, ok)
+		if exit, ok := classifyGrace(line); !ok || !exit {
+			t.Errorf("%q was read as exit=%v (matched=%v), want an exit; an exit read as an entry "+
+				"reports a healthy server as looping through grace", line, exit, ok)
 		}
 	}
 	for _, line := range []string{"connection reset by peer", "reclaim complete for client 0x1"} {
-		if kind, ok := classifyGrace(line); ok {
-			t.Errorf("%q was classified as %q, but it says nothing about grace", line, kind)
+		if _, ok := classifyGrace(line); ok {
+			t.Errorf("%q was classified as a grace transition, but it says nothing about grace", line)
 		}
 	}
 }
@@ -74,11 +74,11 @@ func TestGracePatternFlagsOverrideTheWordingRule(t *testing.T) {
 	if err := compileGracePatterns(); err != nil {
 		t.Fatalf("compiling the stated wordings: %v", err)
 	}
-	if kind, ok := classifyGrace("grace: GRACE_START now"); !ok || kind != GraceEnter {
-		t.Errorf("the stated entry wording classified as %q (matched=%v)", kind, ok)
+	if exit, ok := classifyGrace("grace: GRACE_START now"); !ok || exit {
+		t.Errorf("the stated entry wording was read as exit=%v (matched=%v)", exit, ok)
 	}
-	if kind, ok := classifyGrace("grace: GRACE_STOP now"); !ok || kind != GraceExit {
-		t.Errorf("the stated exit wording classified as %q (matched=%v)", kind, ok)
+	if exit, ok := classifyGrace("grace: GRACE_STOP now"); !ok || !exit {
+		t.Errorf("the stated exit wording was read as exit=%v (matched=%v)", exit, ok)
 	}
 	if _, ok := classifyGrace("NFS Server Now IN GRACE"); ok {
 		t.Error("the built-in rule still ran alongside a stated wording, so lines the operator " +
@@ -126,10 +126,10 @@ func TestParseGraceLogKeepsWhatItCannotRead(t *testing.T) {
 	if n := len(obs.Signals); n != 2 {
 		t.Fatalf("parsed %d signals, want 2: %+v", n, obs.Signals)
 	}
-	if obs.Signals[0].Kind != GraceEnter || !obs.Signals[0].At.Equal(time.Unix(1700000000, 0)) {
+	if obs.Signals[0].Exit || !obs.Signals[0].At.Equal(time.Unix(1700000000, 0)) {
 		t.Errorf("first signal is %+v, want an entry at the runtime's timestamp", obs.Signals[0])
 	}
-	if obs.Signals[1].Kind != GraceExit {
+	if !obs.Signals[1].Exit {
 		t.Errorf("second signal is %+v, want an exit", obs.Signals[1])
 	}
 	// The bare "grace" line matches neither list, and the untimestamped line
@@ -139,8 +139,8 @@ func TestParseGraceLogKeepsWhatItCannotRead(t *testing.T) {
 	}
 
 	// Anything before the window belongs to an earlier failover.
-	if obs := parseGraceLog(raw, time.Unix(1700000001, 0)); len(obs.Enters()) != 0 {
-		t.Errorf("an entry from before the window was counted: %+v", obs.Enters())
+	if obs := parseGraceLog(raw, time.Unix(1700000001, 0)); len(obs.Entries()) != 0 {
+		t.Errorf("an entry from before the window was counted: %+v", obs.Entries())
 	}
 }
 
@@ -155,13 +155,13 @@ func TestParseGraceLogKeepsWhatItCannotRead(t *testing.T) {
 //  2. Assert a moment inside the window counts and one outside does not.
 //  3. Assert a moment inside the window but within the guard band of a boundary
 //     does not count, because the two ends came from different clocks.
-//  4. Assert an entry with no exit yields no complete window.
-//  5. Assert entries are counted per failover rather than over the whole run.
+//  4. Assert an entry with no exit yields no complete window, since that is the
+//     re-entry symptom rather than a missing measurement.
 func TestGraceWindowAndClockGuard(t *testing.T) {
 	obs := GraceObservation{Signals: []GraceSignal{
-		{Kind: GraceEnter, At: time.Unix(1700000000, 0)},
-		{Kind: GraceExit, At: time.Unix(1700000090, 0)},
-		{Kind: GraceEnter, At: time.Unix(1700000300, 0)},
+		{At: time.Unix(1700000000, 0)},
+		{At: time.Unix(1700000090, 0), Exit: true},
+		{At: time.Unix(1700000300, 0)},
 	}}
 	w, ok := obs.Window()
 	if !ok {
@@ -190,8 +190,8 @@ func TestGraceWindowAndClockGuard(t *testing.T) {
 	if _, ok := tail.Window(); ok {
 		t.Error("an entry with no exit produced a complete window")
 	}
-	if n := obs.EntersBetween(time.Unix(1699999999, 0), time.Unix(1700000100, 0)); n != 1 {
-		t.Errorf("counted %d entries in the first failover's window, want 1: a count summed over the "+
-			"run cannot tell a re-entry loop from five ordinary failovers", n)
+	if n := len(obs.Entries()); n != 2 {
+		t.Errorf("counted %d entries, want 2: the count is what tells a re-entry loop from an "+
+			"ordinary grace period", n)
 	}
 }

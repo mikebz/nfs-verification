@@ -34,65 +34,44 @@ import (
 // allows; nothing in the Kubernetes API states which port serves them or what
 // the metric is called, so that stays open rather than being guessed at.
 
-// GraceKind is the transition a log line announces.
-type GraceKind string
-
-const (
-	// GraceEnter is the server entering grace.
-	GraceEnter GraceKind = "enter"
-	// GraceExit is the server leaving it.
-	GraceExit GraceKind = "exit"
-)
-
 // GraceSignal is one observed transition.
 type GraceSignal struct {
-	Kind GraceKind
 	// At is the timestamp the container runtime attached to the line, not a
 	// time parsed out of the server's own wording. Log formats differ per
 	// implementation and change between versions; runtime timestamps do not.
 	At time.Time
+	// Exit is false for a line announcing entry into grace and true for one
+	// announcing the end of it.
+	Exit bool
 	// Line is the line itself, kept for the failure message.
 	Line string
 }
 
 // GraceObservation is what the log stream said about grace over a window.
 type GraceObservation struct {
+	// Signals are the transitions, oldest first.
 	Signals []GraceSignal
-	// Unclassified holds lines that mention grace but match neither rule. A gap
-	// in the classifier that presented as "grace was never observed" would be
-	// triaged as a server defect, so it is reported instead.
+	// Unclassified holds lines that mention grace but could not be read as
+	// either transition. A gap in the classifier that presented as "grace was
+	// never observed" would be triaged as a server defect, so it is reported
+	// instead.
 	Unclassified []string
-	// Sources names the pod and container each stream came from.
+	// Sources names every stream that was read, including the ones that said
+	// nothing, so a failure message can say where the suite looked.
 	Sources []string
 }
 
-// Enters returns the entry signals, oldest first.
-func (o GraceObservation) Enters() []GraceSignal { return o.of(GraceEnter) }
-
-// Exits returns the exit signals, oldest first.
-func (o GraceObservation) Exits() []GraceSignal { return o.of(GraceExit) }
-
-func (o GraceObservation) of(k GraceKind) []GraceSignal {
+// Entries returns the signals announcing entry into grace, oldest first. Grace
+// entered more than once for one failover is a re-entry loop, so the count
+// matters as much as the first one's timestamp.
+func (o GraceObservation) Entries() []GraceSignal {
 	var out []GraceSignal
 	for _, s := range o.Signals {
-		if s.Kind == k {
+		if !s.Exit {
 			out = append(out, s)
 		}
 	}
 	return out
-}
-
-// EntersBetween counts entries in [from, to]. Grace entered more than once for
-// one failover is a re-entry loop, and the count only means anything when it is
-// attributed to one failover rather than summed over a run.
-func (o GraceObservation) EntersBetween(from, to time.Time) int {
-	n := 0
-	for _, s := range o.Enters() {
-		if !s.At.Before(from) && !s.At.After(to) {
-			n++
-		}
-	}
-	return n
 }
 
 // Describe renders an observation for a log line or a failure message.
@@ -103,7 +82,11 @@ func (o GraceObservation) Describe() string {
 	}
 	var parts []string
 	for _, s := range o.Signals {
-		parts = append(parts, fmt.Sprintf("%s at %s (%q)", s.Kind, s.At.UTC().Format(time.RFC3339), s.Line))
+		word := "entered"
+		if s.Exit {
+			word = "left"
+		}
+		parts = append(parts, fmt.Sprintf("%s at %s (%q)", word, s.At.UTC().Format(time.RFC3339), s.Line))
 	}
 	return strings.Join(parts, " | ")
 }
@@ -116,18 +99,18 @@ type GraceWindow struct {
 	Start, End time.Time
 }
 
-// Window returns the first entry and the first exit after it. Complete is false
-// when grace was entered and never observably left, which is a finding rather
-// than a missing measurement.
+// Window returns the first entry and the first exit after it. The second return
+// is false when grace was entered and never observably left, which is a finding
+// rather than a missing measurement.
 func (o GraceObservation) Window() (GraceWindow, bool) {
-	enters := o.Enters()
-	if len(enters) == 0 {
-		return GraceWindow{}, false
-	}
-	w := GraceWindow{Start: enters[0].At}
-	for _, e := range o.Exits() {
-		if e.At.After(w.Start) {
-			w.End = e.At
+	var w GraceWindow
+	started := false
+	for _, s := range o.Signals {
+		switch {
+		case !s.Exit && !started:
+			w.Start, started = s.At, true
+		case s.Exit && started && s.At.After(w.Start):
+			w.End = s.At
 			return w, true
 		}
 	}
@@ -150,17 +133,15 @@ func (w GraceWindow) String() string {
 		w.End.UTC().Format(time.RFC3339), w.Duration().Round(time.Second))
 }
 
-// LogLine is one line of a container log stream, with the timestamp the
-// container runtime attached to it.
+// LogLine is one line of a container log stream. At is zero for a line that
+// carried no runtime timestamp: nothing measures with such a line, since it
+// cannot be placed against a fault, but one mentioning grace is still reported
+// rather than dropped.
 type LogLine struct {
 	At   time.Time
 	Text string
 	// Source names the pod and container the line came from.
 	Source string
-	// Undated marks a line that carried no runtime timestamp. Such a line
-	// cannot be placed against a fault, so nothing measures with it, but a line
-	// mentioning grace is still reported rather than dropped.
-	Undated bool
 }
 
 // ServerLog reads the server pods' log streams from since onwards. The pods are
@@ -219,7 +200,7 @@ func FirstDated(lines []LogLine) (LogLine, bool) {
 	best := LogLine{}
 	found := false
 	for _, l := range lines {
-		if l.Undated {
+		if l.At.IsZero() {
 			continue
 		}
 		if !found || l.At.Before(best.At) {
@@ -292,35 +273,37 @@ var (
 	}
 )
 
-// classifyGrace decides what a line announces. It is the one part of the
-// observer that depends on how an implementation words things, which is why the
-// grace pattern flags exist for a server it does not cover.
-func classifyGrace(line string) (GraceKind, bool) {
+// classifyGrace decides what a line announces: exit is true for the end of
+// grace, false for entry into it, and the second return is false for a line
+// that announces neither. It is the one part of the observer that depends on
+// how an implementation words things, which is why the grace pattern flags
+// exist for a server it does not cover.
+func classifyGrace(line string) (exit, ok bool) {
 	if !graceLine.MatchString(line) {
-		return "", false
+		return false, false
 	}
 	if re := Cfg().graceExitRE; re != nil && re.MatchString(line) {
-		return GraceExit, true
+		return true, true
 	}
 	if re := Cfg().graceEnterRE; re != nil && re.MatchString(line) {
-		return GraceEnter, true
+		return false, true
 	}
 	if Cfg().graceExitRE != nil || Cfg().graceEnterRE != nil {
 		// An operator who states the wording owns it. Falling back to the
 		// built-in rule here would classify lines their pattern deliberately
 		// left out.
-		return "", false
+		return false, false
 	}
 	lower := strings.ToLower(line)
 	exitAt := earliest(lower, exitWords)
 	enterAt := earliest(lower, enterWords)
 	switch {
 	case exitAt < 0 && enterAt < 0:
-		return "", false
+		return false, false
 	case enterAt < 0 || (exitAt >= 0 && exitAt <= enterAt):
-		return GraceExit, true
+		return true, true
 	default:
-		return GraceEnter, true
+		return false, true
 	}
 }
 
@@ -349,7 +332,7 @@ func parseLogStream(raw, source string, since time.Time) []LogLine {
 		}
 		at, rest, ok := splitLogTimestamp(line)
 		if !ok {
-			out = append(out, LogLine{Text: line, Source: source, Undated: true})
+			out = append(out, LogLine{Text: line, Source: source})
 			continue
 		}
 		if !since.IsZero() && at.Before(since) {
@@ -367,20 +350,14 @@ func classifyGraceLines(lines []LogLine) GraceObservation {
 	for _, l := range lines {
 		// A line with no timestamp cannot be placed against a fault, and a
 		// grace signal that cannot be placed is worse than none.
-		if l.Undated {
+		exit, ok := classifyGrace(l.Text)
+		if !ok || l.At.IsZero() {
 			if graceLine.MatchString(l.Text) {
 				obs.Unclassified = append(obs.Unclassified, l.Text)
 			}
 			continue
 		}
-		kind, ok := classifyGrace(l.Text)
-		if !ok {
-			if graceLine.MatchString(l.Text) {
-				obs.Unclassified = append(obs.Unclassified, l.Text)
-			}
-			continue
-		}
-		obs.Signals = append(obs.Signals, GraceSignal{Kind: kind, At: l.At, Line: strings.TrimSpace(l.Text)})
+		obs.Signals = append(obs.Signals, GraceSignal{At: l.At, Exit: exit, Line: strings.TrimSpace(l.Text)})
 	}
 	sortSignals(obs.Signals)
 	return obs

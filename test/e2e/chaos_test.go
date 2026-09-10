@@ -463,7 +463,7 @@ func TestChaosRepeatedFailover(t *testing.T) {
 		// over five failovers cannot tell a re-entry loop from five ordinary
 		// grace periods.
 		obs := observeGrace(ctx, t, f, since)
-		enters := len(obs.Enters())
+		enters := len(obs.Entries())
 		if enters > 0 {
 			graceObserved = true
 		}

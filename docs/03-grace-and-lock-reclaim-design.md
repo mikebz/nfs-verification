@@ -136,8 +136,8 @@ entry per transition.
 
 | Field | Type | Meaning |
 |---|---|---|
-| kind | enum, `enter` or `exit` | which transition the line announces |
 | at | timestamp, from the log stream | when the server printed it |
+| exit | boolean | false for a line announcing entry into grace, true for one announcing its end |
 | line | text | the line itself, kept for the failure message |
 
 Correctness-affecting semantics:

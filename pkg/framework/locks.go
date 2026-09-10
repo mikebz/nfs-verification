@@ -87,11 +87,10 @@ const (
 // It answers the question grace exists to make interesting: whether a server
 // bars new state while it waits for old state to be reclaimed.
 type LockProbe struct {
-	f    *Framework
-	Pod  string
-	Path string
-	log  string
-	run  string
+	f   *Framework
+	Pod string
+	log string
+	run string
 }
 
 // StartLockProbe launches the probe and returns once it has made an attempt, so
@@ -108,7 +107,7 @@ func (f *Framework) StartLockProbe(ctx context.Context, pod, path, id string) (*
 	if err := CheckScriptID(id); err != nil {
 		return nil, err
 	}
-	p := &LockProbe{f: f, Pod: f.Name(pod), Path: path,
+	p := &LockProbe{f: f, Pod: f.Name(pod),
 		log: "/tmp/probe-" + id + ".log", run: "/tmp/probe-" + id + ".run"}
 	script, err := RunScript("lock-probe.sh", id, path, p.run, p.log,
 		strconv.Itoa(lockWaitSeconds), strconv.Itoa(lockBoundSeconds))
