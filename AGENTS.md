@@ -87,23 +87,6 @@ told it works stops trusting every later claim, including the true ones.
 - The function name says what the case does. The **plan ID goes in the comment
   above it**, along with what the case asserts and, where it matters, what it
   deliberately does not.
-- **Every case carries an outline**: the goal, then numbered steps, at the level
-  a reviewer can check against the plan without reading the body. A case that
-  fails at three in the morning has to explain itself to someone who has never
-  read it.
-
-  ```go
-  // PROV-03: delete a claim a pod still mounts. The claim must stay Terminating
-  // until the mount is gone, and the pod must keep working while it does.
-  //
-  // Steps:
-  //  1. Provision an RWX claim, mount it in a pod, write a file.
-  //  2. Delete the claim while the pod still has it mounted.
-  //  3. Watch for 20s: the claim must stay, with the pvc-protection finalizer.
-  //  4. Read and write through the mount while the claim is Terminating.
-  //  5. Delete the pod and wait for it to leave the API.
-  //  6. The claim must then finish deleting.
-  ```
 - **Skip by capability, never by platform name.** `requireCap(t, f.Caps.MultiNode,
   ...)`, never `if platform == "gke"`. Every case that schedules on two nodes,
   reads a node, stops a node, snapshots or expands needs its guard. A missing
@@ -165,16 +148,6 @@ the claim-retention rule in teardown.
 - Say why the test exists when that is not obvious. "Getting this wrong means
   the chaos cases kill the harness instead of the server" is worth more than a
   restatement of the assertions.
-- Unit tests carry the same outline as a case: the goal, then numbered steps.
-  The goal is the half that ages well; a reader who knows why the test exists
-  can tell a real failure from a stale assertion.
-- **Prefer the real tool over a fixture.** A golden string only proves the
-  parser matches what someone typed into it. Where the tool a case drives in a
-  pod also exists on a workstation, run it and parse what it actually prints;
-  keep fixtures for the shapes a healthy system will not produce, such as error
-  text or a `stat` built without `-f` echoing its format string back.
-- **Run generated shell under a real shell.** A heredoc or quoting slip should
-  fail on a workstation, not inside a case that was testing something else.
 - Render every manifest in a unit test and assert on the decoded object, so an
   indentation slip fails on a workstation rather than against a cluster.
 - **Test the failure that has no symptom.** The preflight cache path bug
