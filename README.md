@@ -24,6 +24,9 @@ three cases. The remaining cases land in the steps listed in `plan.md`.
 | `test/e2e` | The cases, named for their plan ID |
 | `cmd/preflight` | `make preflight` |
 
+[`AGENTS.md`](AGENTS.md) is the guide for working in this repository: how to
+approach a change, how to write a case, what to claim when you are done.
+
 ## Running
 
 ```sh
