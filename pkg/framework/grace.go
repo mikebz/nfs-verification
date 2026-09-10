@@ -1,7 +1,6 @@
 package framework
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"io"
@@ -321,12 +320,17 @@ func earliest(lower string, words []string) int {
 // parseLogStream splits a timestamped stream into lines. Lines older than since
 // are dropped here, where the comparison is between two timestamps the node
 // itself produced rather than between a node and the workstation.
+//
+// Split rather than scanned. The whole stream is already in memory by the time
+// it arrives here, so a scanner buys nothing and brings a failure mode with it:
+// it stops at a line longer than its buffer, and the lines after that one are
+// dropped with no error anyone sees. A server that printed one enormous line
+// would then look like a server that never announced grace, which is the
+// reading this whole observer exists to prevent.
 func parseLogStream(raw, source string, since time.Time) []LogLine {
 	var out []LogLine
-	sc := bufio.NewScanner(strings.NewReader(raw))
-	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for sc.Scan() {
-		line := strings.TrimRight(sc.Text(), "\r")
+	for _, line := range strings.Split(raw, "\n") {
+		line = strings.TrimRight(line, "\r")
 		if line == "" {
 			continue
 		}

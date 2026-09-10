@@ -1,6 +1,7 @@
 package framework
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -193,5 +194,39 @@ func TestGraceWindowAndClockGuard(t *testing.T) {
 	if n := len(obs.Entries()); n != 2 {
 		t.Errorf("counted %d entries, want 2: the count is what tells a re-entry loop from an "+
 			"ordinary grace period", n)
+	}
+}
+
+// TestParseGraceLogSurvivesAnEnormousLine covers a stream holding one line too
+// long for a buffered scanner. This is the failure that has no symptom: a
+// scanner stops at such a line and the lines after it vanish with an error
+// nobody reads, so a server that announced grace and then printed a stack dump
+// would be reported as a server that never announced grace at all. That reading
+// is the one this observer exists to prevent.
+//
+// Steps:
+//  1. Build a stream with a grace entry, a line of two megabytes, then a grace
+//     exit.
+//  2. Parse it.
+//  3. Assert both signals are there, so nothing after the long line was lost.
+func TestParseGraceLogSurvivesAnEnormousLine(t *testing.T) {
+	restore := *Cfg()
+	t.Cleanup(func() { *Cfg() = restore })
+	Cfg().GraceEnterPattern, Cfg().GraceExitPattern = "", ""
+	if err := compileGracePatterns(); err != nil {
+		t.Fatalf("resetting the wording flags: %v", err)
+	}
+
+	raw := stamp(1700000000) + " nfsd: starting 90-second grace period\n" +
+		stamp(1700000001) + " " + strings.Repeat("x", 2*1024*1024) + "\n" +
+		stamp(1700000090) + " nfsd: end of grace period\n"
+
+	obs := parseGraceLog(raw, time.Time{})
+	if n := len(obs.Signals); n != 2 {
+		t.Fatalf("parsed %d signals across a two megabyte line, want 2: everything after that line "+
+			"was dropped, which reads as a server that never announced grace", n)
+	}
+	if obs.Signals[0].Exit || !obs.Signals[1].Exit {
+		t.Errorf("signals are %+v, want an entry then an exit", obs.Signals)
 	}
 }
