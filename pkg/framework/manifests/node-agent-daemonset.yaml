@@ -1,0 +1,51 @@
+# The only privileged component in the suite. It exists so that node-level
+# assertions are possible at all: /proc/mounts as the driver actually set it,
+# dmesg, and signals to the server process. Its absence is a preflight failure
+# rather than a silent skip.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ .Name | q }}
+  namespace: {{ .Namespace | q }}
+  labels:
+    app: {{ .Name | q }}
+spec:
+  selector:
+    matchLabels:
+      app: {{ .Name | q }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Name | q }}
+    spec:
+      # Host namespaces are the whole point: without them /proc/mounts shows the
+      # container's mounts and a signal reaches nothing.
+      hostPID: true
+      hostIPC: true
+      hostNetwork: true
+      # Run everywhere, including control plane and cordoned or tainted nodes,
+      # so that a drained node can still be inspected.
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: agent
+          image: {{ .Image | q }}
+          command: ["sh", "-c", "sleep infinity"]
+          securityContext:
+            privileged: true
+          # Requests only, no limits: the agent must not be the first thing
+          # evicted under memory pressure, and it must not be OOM killed while
+          # a case is reading the node it is inspecting.
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+          volumeMounts:
+            - name: host
+              mountPath: /host
+              readOnly: true
+      volumes:
+        - name: host
+          hostPath:
+            path: /
+            type: Directory
