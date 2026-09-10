@@ -45,6 +45,9 @@ type OpenWriter struct {
 // Close. It returns once the write has been issued, so a reader started
 // afterwards is racing the protocol rather than racing the harness.
 func (f *Framework) HoldOpenWrite(ctx context.Context, pod, path, payload, id string) (*OpenWriter, error) {
+	if err := CheckScriptID(id); err != nil {
+		return nil, err
+	}
 	// The pod name is resolved once, here, so State and Close cannot address a
 	// different pod from the one holding the descriptor.
 	w := &OpenWriter{f: f, Pod: f.Name(pod), Path: path,
@@ -71,11 +74,15 @@ func (f *Framework) HoldOpenWrite(ctx context.Context, pod, path, payload, id st
 // storage stall. The writer is detached with setsid so that it outlives the
 // exec that launched it, which is the whole point of the helper.
 func openWriteScript(state, run, id, path, payload string) string {
+	// Every value reaching the shell is quoted, the derived script path
+	// included. Ids are written by cases rather than by users, but a helper
+	// that is safe only because of who calls it is one refactor away from not
+	// being safe at all.
 	return fmt.Sprintf(`
 set -u
 : > %[1]s
 touch %[2]s
-cat > /tmp/openw-%[3]s.sh <<'OPENEOF'
+cat > %[3]s <<'OPENEOF'
 exec 8> "$1"
 printf '%%s' "$2" >&8
 echo open > "$4"
@@ -83,9 +90,9 @@ while [ -f "$3" ]; do sleep 1; done
 exec 8>&-
 echo closed > "$4"
 OPENEOF
-setsid sh /tmp/openw-%[3]s.sh %[4]s %[5]s %[2]s %[1]s >/dev/null 2>&1 </dev/null &
+setsid sh %[3]s %[4]s %[5]s %[2]s %[1]s >/dev/null 2>&1 </dev/null &
 echo launched
-`, shellQuote(state), shellQuote(run), id, shellQuote(path), shellQuote(payload))
+`, shellQuote(state), shellQuote(run), shellQuote("/tmp/openw-"+id+".sh"), shellQuote(path), shellQuote(payload))
 }
 
 // State returns open, closed, or empty while the write is still in flight.
@@ -156,13 +163,50 @@ type Capacity struct{ TotalBytes, AvailBytes int64 }
 // MountCapacity reports capacity as the workload sees it, which is the only
 // view that matters to the expansion and capacity cases: the control plane's
 // number is a claim, and this is whether the claim reached the application.
+//
+// It asks statfs, through `stat -f`, and falls back to df. statfs is preferred
+// because its output is three integers and nothing else: no header, no device
+// column, no server address, nothing that moves when an export is renamed or a
+// tool changes its layout. df is kept as a fallback for an image whose stat was
+// built without -f, which is the one thing statfs cannot survive.
 func (f *Framework) MountCapacity(ctx context.Context, pod, path string) (Capacity, error) {
+	if r := f.Sh(ctx, pod, fmt.Sprintf("stat -f -c '%%b %%a %%S' %s", shellQuote(path))); r.Err == nil {
+		c, err := parseStatFS(r.Stdout)
+		if err == nil {
+			return c, nil
+		}
+	}
 	out, err := f.C.MustSh(ctx, Namespace, f.Name(pod), "main",
 		fmt.Sprintf("df -P -k %s", shellQuote(path)))
 	if err != nil {
-		return Capacity{}, err
+		return Capacity{}, fmt.Errorf("neither stat -f nor df could read the capacity of %s: %w", path, err)
 	}
 	return parseDF(out)
+}
+
+// parseStatFS reads `stat -f -c '%b %a %S'`: total data blocks, blocks
+// available to an ordinary user, and the fundamental block size.
+func parseStatFS(out string) (Capacity, error) {
+	fields := strings.Fields(out)
+	if len(fields) != 3 {
+		return Capacity{}, fmt.Errorf("unexpected statfs output %q", out)
+	}
+	nums := make([]int64, 3)
+	for i, f := range fields {
+		n, err := strconv.ParseInt(f, 10, 64)
+		if err != nil {
+			return Capacity{}, fmt.Errorf("unexpected statfs output %q: %w", out, err)
+		}
+		nums[i] = n
+	}
+	blocks, avail, size := nums[0], nums[1], nums[2]
+	// A zero block size means stat printed something that is not a block size,
+	// which on an image without -f is the literal format string. Reporting a
+	// capacity of zero would read as a full volume.
+	if size <= 0 {
+		return Capacity{}, fmt.Errorf("statfs reported a block size of %d in %q", size, out)
+	}
+	return Capacity{TotalBytes: blocks * size, AvailBytes: avail * size}, nil
 }
 
 // parseDF reads the POSIX df format: header, then one line per filesystem with

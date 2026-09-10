@@ -17,6 +17,12 @@ import (
 
 // DATA-03: close-to-open across nodes. This is the guarantee the architecture
 // actually makes, so it is asserted directly and nothing stronger is.
+//
+// Steps:
+//  1. Pin a writer to one node and a reader to another, on one claim.
+//  2. Write and close a file on the writer, using a redirect, since the close
+//     is what makes the content visible.
+//  3. Read it on the reader and compare.
 func TestCloseToOpen(t *testing.T) {
 	f := framework.New(t, "DATA-03")
 	requireCap(t, f.Caps.MultiNode, "cross-node close-to-open needs two schedulable workers")
@@ -41,6 +47,14 @@ func TestCloseToOpen(t *testing.T) {
 // DATA-05: mutual exclusion across nodes. Locks are advisory, and they are
 // visible across clients only because every client serializes through the one
 // server. The byte-range half of this case lands with the locktool image.
+//
+// Steps:
+//  1. Pin a holder to one node and a contender to another, on one claim.
+//  2. Take an exclusive whole-file lock in the holder and confirm it is held.
+//  3. Probe from the contender: it must be refused.
+//  4. Release the lock in the holder.
+//  5. The contender must then be granted it, inside a bound that has nothing
+//     to do with lease expiry, since this was a clean release.
 func TestLocksAcrossNodes(t *testing.T) {
 	f := framework.New(t, "DATA-05")
 	requireCap(t, f.Caps.MultiNode, "cross-node locking needs two schedulable workers")
@@ -84,6 +98,16 @@ func TestLocksAcrossNodes(t *testing.T) {
 // no writer's content may appear in another writer's file. Partitioned by file
 // on purpose: this case is about the server keeping concurrent writers apart,
 // not about coordination between them, which is DATA-02 and DATA-05.
+//
+// Steps:
+//  1. Put four pods on the available worker nodes, round robin, on one claim.
+//  2. Have all four write a megabyte each, at the same time, to their own file
+//     with their own seed.
+//  3. Verify each file from a pod that did not write it, so the read crosses
+//     the server rather than the writer's page cache.
+//  4. Assert the four checksums are distinct, so two writers landing on one
+//     content cannot read as a pass.
+//  5. Assert the directory holds exactly four entries.
 func TestConcurrentWritersDistinctFiles(t *testing.T) {
 	f := framework.New(t, "DATA-01")
 	ctx, cancel := caseCtx(t, 20*time.Minute)
@@ -168,6 +192,14 @@ func TestConcurrentWritersDistinctFiles(t *testing.T) {
 // specified, so this case asserts it is **not** a failure and records which of
 // the two the deployment does. What it does assert is that the reader never
 // sees bytes nobody wrote, and that the data is there once the writer closes.
+//
+// Steps:
+//  1. Pin a writer to one node and a reader to another, on one claim.
+//  2. Write a short payload through a descriptor the writer holds open.
+//  3. Read from the reader: empty, a prefix, or the whole payload are all
+//     recorded as the documented boundary. Anything else is corruption.
+//  4. Close the descriptor.
+//  5. The reader must then see the whole payload, and the delay is logged.
 func TestNoVisibilityBeforeClose(t *testing.T) {
 	f := framework.New(t, "DATA-04")
 	requireCap(t, f.Caps.MultiNode, "the cross-node visibility boundary needs two schedulable workers")

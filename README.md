@@ -10,7 +10,8 @@ End-to-end verification of NFS RWX persistent volumes on Kubernetes.
   real cluster taught us.
 
 This repository currently holds the harness skeleton, preflight, and the first
-eight cases. The remaining cases land in the steps listed in `plan.md`.
+eight cases. The remaining cases land in the steps listed in
+[`docs/plan.md`](docs/plan.md).
 
 ## Layout
 
@@ -23,6 +24,9 @@ eight cases. The remaining cases land in the steps listed in `plan.md`.
 | `pkg/preflight` | Section 0 checks and all discovery |
 | `test/e2e` | The cases; each names its plan ID in the comment above it |
 | `cmd/preflight` | `make preflight` |
+
+[`AGENTS.md`](AGENTS.md) holds the conventions this repository is written to,
+including what every test has to say about itself.
 
 ## Running
 

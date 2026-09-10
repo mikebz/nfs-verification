@@ -14,6 +14,15 @@ import (
 // PROV-01: dynamic provision, bind, mount, write, delete. The PV must be
 // removed, not merely unbound: an unreclaimed backing volume is a leak that
 // surfaces weeks later as a quota failure with no obvious cause.
+//
+// Steps:
+//  1. Create an RWX claim and a pod that mounts it, in that order, and confirm
+//     the claim bound once a pod consumed it.
+//  2. Write a megabyte and read the checksum back.
+//  3. Delete the pod gracefully and wait for it to leave the API.
+//  4. Delete the claim and wait for it to go.
+//  5. On a Delete reclaim policy, the PV must go too. On Retain, skip: that is
+//     PROV-06's case, not a leak.
 func TestProvisionMountWriteDelete(t *testing.T) {
 	f := framework.New(t, "PROV-01")
 	ctx, cancel := caseCtx(t, 15*time.Minute)
@@ -72,6 +81,16 @@ func TestProvisionMountWriteDelete(t *testing.T) {
 // This is the case that stands between an ordinary `kubectl delete pvc` and
 // F-001 in docs/findings.md: without the protection, the export is destroyed
 // under a live hard NFSv4.1 mount and the client node retries forever.
+//
+// Steps:
+//  1. Provision an RWX claim, mount it in a pod, write a file.
+//  2. Delete the claim while the pod still has it mounted.
+//  3. Watch for 20s: the claim must stay, carrying the pvc-protection
+//     finalizer, rather than disappearing a moment after the delete.
+//  4. Read and write through the mount while the claim is Terminating, since
+//     the protection is only worth having if the mount still works.
+//  5. Delete the pod gracefully and wait for it to leave the API.
+//  6. The claim must then finish deleting.
 func TestDeleteClaimUnderLiveMount(t *testing.T) {
 	f := framework.New(t, "PROV-03")
 	ctx, cancel := caseCtx(t, 15*time.Minute)
@@ -150,6 +169,18 @@ func hasFinalizer(finalizers []string, want string) bool {
 // workload keeps its mount throughout. A class that does not advertise
 // expansion must reject the request rather than accept a resize it will never
 // perform, which leaves the claim wedged in Resizing with nothing to fix it.
+//
+// Steps:
+//  1. Provision an RWX claim, mount it, and read the requested size.
+//  2. Without expansion support: request one gibibyte more, require the API to
+//     reject it, confirm the request is unchanged, and stop there.
+//  3. With expansion support: write a megabyte, record the checksum, what df
+//     reports and the client's restart count.
+//  4. Request one gibibyte more and wait for status.capacity to reach it.
+//  5. Assert the data survived, the share is still writable, and the client
+//     never restarted.
+//  6. Compare df before and after: a rise is logged, no change is recorded
+//     with its explanation, and a fall is a failure.
 func TestVolumeExpansion(t *testing.T) {
 	f := framework.New(t, "PROV-04")
 	ctx, cancel := caseCtx(t, 20*time.Minute)

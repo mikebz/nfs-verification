@@ -27,6 +27,17 @@ const (
 
 // SEC-01: uid and gid preservation across pods. A pod running as an ordinary
 // user writes a file; another pod on another node reads the ownership back.
+//
+// Steps:
+//  1. Pin a writer running as uid 1234 to one node, and a root reader to
+//     another, on one claim.
+//  2. From the reader, make a directory the ordinary user can write to. If
+//     root cannot, report blocked: that is export configuration.
+//  3. Write a file there as uid 1234. If that is refused, report blocked.
+//  4. Read ownership on the writer's own client: a wrong id here means the
+//     mapping broke on the way in, and no reader will fix it.
+//  5. Read it again on the second client, and separate the two failures: wrong
+//     on both is the server, wrong only on the reader is that node's idmapper.
 func TestOwnershipPreservedAcrossPods(t *testing.T) {
 	f := framework.New(t, "SEC-01")
 	requireCap(t, f.Caps.MultiNode, "reading ownership from a second client needs two schedulable workers")
