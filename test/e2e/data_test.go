@@ -16,6 +16,7 @@ import (
 // actually makes, so it is asserted directly and nothing stronger is.
 func TestCloseToOpen(t *testing.T) {
 	f := framework.New(t, "DATA-03")
+	requireCap(t, f.Caps.MultiNode, "cross-node close-to-open needs two schedulable workers")
 	ctx, cancel := caseCtx(t, 10*time.Minute)
 	defer cancel()
 

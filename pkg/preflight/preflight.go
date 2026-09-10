@@ -140,10 +140,33 @@ func Run(ctx context.Context) (*Result, error) {
 	caps.CanStopNode = nodeStopConfigured()
 
 	e.Capabilities = caps.AsMap()
+	e.Context = c.Context
 	if _, err := e.Write(framework.RunDir()); err != nil {
 		return nil, fmt.Errorf("writing environment.json: %w", err)
 	}
+	// Remember it for the next run against this cluster.
+	if err := e.WriteTo(framework.PreflightCache(c.Context)); err != nil {
+		return nil, fmt.Errorf("caching the preflight result: %w", err)
+	}
 	return &Result{Env: e, Caps: caps}, nil
+}
+
+// Cached returns a usable cached result for this context, or nil when there is
+// none. A cached preflight is only as good as the cluster still matching it, so
+// it expires, and -refresh-preflight bypasses it.
+func Cached(c *framework.Client) (*Result, string) {
+	if framework.Cfg().RefreshPreflight {
+		return nil, ""
+	}
+	path := framework.PreflightCache(c.Context)
+	e, err := env.Load(path)
+	if err != nil {
+		return nil, ""
+	}
+	if age := time.Since(e.Timestamp); age > framework.Cfg().PreflightMaxAge {
+		return nil, ""
+	}
+	return &Result{Env: e, Caps: framework.CapabilitiesFromMap(e.Capabilities)}, path
 }
 
 func describeNodes(ctx context.Context, c *framework.Client, e *env.Environment) error {

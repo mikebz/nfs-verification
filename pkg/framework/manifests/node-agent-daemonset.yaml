@@ -33,6 +33,13 @@ spec:
           command: ["sh", "-c", "sleep infinity"]
           securityContext:
             privileged: true
+          # Requests only, no limits: the agent must not be the first thing
+          # evicted under memory pressure, and it must not be OOM killed while
+          # a case is reading the node it is inspecting.
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
           volumeMounts:
             - name: host
               mountPath: /host

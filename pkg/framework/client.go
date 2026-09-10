@@ -12,11 +12,14 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
-// Client bundles the typed and dynamic clients plus the rest config, which the
-// exec helper needs to open a SPDY stream to a pod.
+// Client bundles the typed client and the rest config, which the exec helper
+// needs to open a SPDY stream to a pod.
 type Client struct {
 	Kube kubernetes.Interface
 	Rest *rest.Config
+	// Context is the kubeconfig context in use. It names the cluster a cached
+	// preflight belongs to.
+	Context string
 }
 
 var (
@@ -37,10 +40,17 @@ func NewClient() (*Client, error) {
 		if cfg.Context != "" {
 			overrides.CurrentContext = cfg.Context
 		}
-		restCfg, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, overrides).ClientConfig()
+		clientCfg := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, overrides)
+		restCfg, err := clientCfg.ClientConfig()
 		if err != nil {
 			clientErr = fmt.Errorf("building rest config: %w", err)
 			return
+		}
+		contextName := cfg.Context
+		if contextName == "" {
+			if raw, err := clientCfg.RawConfig(); err == nil {
+				contextName = raw.CurrentContext
+			}
 		}
 		// The harness drives dozens of pods at once; the client-go defaults
 		// throttle hard enough to distort timing measurements.
@@ -51,7 +61,7 @@ func NewClient() (*Client, error) {
 			clientErr = fmt.Errorf("building kube client: %w", err)
 			return
 		}
-		client = &Client{Kube: kube, Rest: restCfg}
+		client = &Client{Kube: kube, Rest: restCfg, Context: contextName}
 	})
 	return client, clientErr
 }

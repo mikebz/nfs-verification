@@ -6,6 +6,8 @@ End-to-end verification of NFS RWX persistent volumes on Kubernetes.
   verified and why.
 - [`plan.md`](plan.md) is the implementation plan: the test approach, and the
   order the plan gets built in.
+- [`doc/findings.md`](doc/findings.md) records what running the suite against a
+  real cluster taught us.
 
 This repository currently holds the harness skeleton, preflight, and the first
 three cases. The remaining cases land in the steps listed in `plan.md`.
@@ -35,6 +37,11 @@ labelled per case so that teardown deletes exactly what the case made. The node
 agent is privileged by design, so a cluster enforcing a restricted Pod Security
 level on `default` cannot run the suite as it stands.
 
+Preflight runs once per cluster. A passing result is cached at
+`artifacts/preflight-<context>.json`, keyed by kubeconfig context, and reused by
+later runs for `-preflight-max-age` (8h by default). Pass `-refresh-preflight`
+to redo it, or `-env-file` to point at a specific record.
+
 Nothing runs until preflight passes. Preflight writes
 `artifacts/<run-id>/environment.json`; a failed case writes its own bundle under
 `artifacts/<run-id>/<CASE-ID>/` with pod logs, Kubernetes Events, `/proc/mounts`
@@ -62,6 +69,7 @@ answer them:
 | `-lease-seconds`, `-grace-seconds` | every timing assertion | only discoverable when the server exposes them in its pod spec or a mounted ConfigMap |
 | `-storage-class` | pinning the class under test | optional: preflight otherwise probes each class by asking it for an RWX volume and mounting it from two nodes |
 | `-pvc-size` | claim size | defaults to 1Gi: a backing volume that cannot satisfy the request fails every case, and no case here needs more |
+| `-refresh-preflight` | forcing rediscovery | the cached result is reused until it ages out |
 | `-tools-image` | client pods and the node agent | needs `dd`, `sha256sum`, `flock`, `stat` and `nsenter`; defaults to `alpine:3.20`, whose busybox carries all five |
 
 Lease and grace must match one of the two profiles in `pkg/slo`: tuned (20s/30s)
@@ -77,6 +85,12 @@ pod first and checks the bind afterwards. For the same reason a pinned pod
 carries a `kubernetes.io/hostname` node selector rather than `nodeName`:
 `nodeName` bypasses the scheduler, and the annotation that triggers binding is
 one the scheduler writes.
+
+**Teardown deletes pods gracefully, on purpose.** Force-deleting a pod that
+still has the share mounted removes it from the API before kubelet unmounts; the
+claim then goes, the export is destroyed, and the node retries RPCs against it
+forever on a hard mount. That takes the node out of service. See F-001 in
+[`doc/findings.md`](doc/findings.md).
 
 **Lease and grace often are not discoverable.** A server that keeps them in a
 config file the pod spec does not reference will fail preflight, and the run

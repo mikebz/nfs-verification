@@ -68,6 +68,7 @@ type Environment struct {
 	RunID     string    `json:"runId"`
 	Timestamp time.Time `json:"timestamp"`
 
+	Context           string     `json:"context"`
 	KubernetesVersion string     `json:"kubernetesVersion"`
 	Platform          string     `json:"platform"`
 	Nodes             []NodeInfo `json:"nodes"`
@@ -112,18 +113,20 @@ func (e *Environment) AddNote(format string, args ...any) {
 
 // Write serializes the environment into dir/environment.json.
 func (e *Environment) Write(dir string) (string, error) {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", err
-	}
 	path := filepath.Join(dir, "environment.json")
+	return path, e.WriteTo(path)
+}
+
+// WriteTo serializes the environment to an exact path.
+func (e *Environment) WriteTo(path string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
 	b, err := json.MarshalIndent(e, "", "  ")
 	if err != nil {
-		return "", err
+		return err
 	}
-	if err := os.WriteFile(path, append(b, '\n'), 0o644); err != nil {
-		return "", err
-	}
-	return path, nil
+	return os.WriteFile(path, append(b, '\n'), 0o644)
 }
 
 // Load reads an environment record back, for reruns that skip discovery.

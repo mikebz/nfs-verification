@@ -25,3 +25,19 @@ proc /proc proc rw,nosuid,nodev,noexec,relatime 0 0
 		t.Error("soft option falsely detected")
 	}
 }
+
+// The preflight cache is keyed by kubeconfig context, and context names are not
+// constrained to anything a filename likes.
+func TestPreflightCachePath(t *testing.T) {
+	cases := map[string]string{
+		"gke-w1":                            "artifacts/preflight-gke-w1.json",
+		"gke_my-project_us-central1-a_w1":   "artifacts/preflight-gke_my-project_us-central1-a_w1.json",
+		"arn:aws:eks:us-east-1:1234:x/prod": "artifacts/preflight-arn-aws-eks-us-east-1-1234-x-prod.json",
+		"":                                  "artifacts/preflight-default.json",
+	}
+	for context, want := range cases {
+		if got := PreflightCache(context); got != want {
+			t.Errorf("PreflightCache(%q) = %q, want %q", context, got, want)
+		}
+	}
+}

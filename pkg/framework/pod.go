@@ -152,8 +152,18 @@ func (f *Framework) WaitPodGone(ctx context.Context, name string, timeout time.D
 	})
 }
 
-// DeletePodNow force-deletes a pod, which is how the lock-release cases model a
-// client that vanished without unlocking.
+// DeletePod deletes a pod gracefully, giving kubelet time to unmount before the
+// object leaves the API. This is what teardown wants; see DeletePodNow for why.
+func (f *Framework) DeletePod(ctx context.Context, name string) error {
+	return IgnoreNotFound(f.C.Kube.CoreV1().Pods(Namespace).Delete(ctx, f.Name(name), metav1.DeleteOptions{}))
+}
+
+// DeletePodNow force-deletes a pod, which is how the lock cases model a client
+// that vanished without unlocking.
+//
+// Never use it for teardown. The pod leaves the API before kubelet unmounts, so
+// anything that then deletes the claim destroys an export a node is still
+// mounting, and a hard NFSv4.1 mount retries that forever. See doc/findings.md.
 func (f *Framework) DeletePodNow(ctx context.Context, name string) error {
 	return IgnoreNotFound(f.C.Kube.CoreV1().Pods(Namespace).Delete(ctx, f.Name(name), DeleteNow()))
 }

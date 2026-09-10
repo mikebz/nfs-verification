@@ -42,8 +42,10 @@ type Config struct {
 	KeepObjects bool
 	Verbose     bool
 
-	Delegations string
-	EnvFile     string
+	Delegations      string
+	EnvFile          string
+	RefreshPreflight bool
+	PreflightMaxAge  time.Duration
 }
 
 var cfg Config
@@ -78,7 +80,9 @@ func init() {
 	flag.BoolVar(&cfg.Verbose, "v-harness", false, "log every harness action")
 
 	flag.StringVar(&cfg.Delegations, "delegations", "auto", "whether delegations are enabled: auto, on, off")
-	flag.StringVar(&cfg.EnvFile, "env-file", "", "reuse a previously written environment.json instead of rediscovering")
+	flag.StringVar(&cfg.EnvFile, "env-file", "", "reuse a specific environment.json instead of rediscovering")
+	flag.BoolVar(&cfg.RefreshPreflight, "refresh-preflight", false, "rerun preflight even when a fresh cached result exists for this context")
+	flag.DurationVar(&cfg.PreflightMaxAge, "preflight-max-age", 8*time.Hour, "how long a cached preflight result stays usable")
 
 }
 

@@ -103,12 +103,18 @@ func (f *Framework) Selector() string {
 		Cfg().RunID, strings.ToLower(f.CaseID))
 }
 
-// DeleteCaseObjects removes what the case made. Pods go first and are waited
-// out: deleting a claim while a pod still mounts it is PROV-03's assertion, not
-// a teardown strategy.
+// DeleteCaseObjects removes what the case made. Pods go first, gracefully, and
+// are waited out before any claim is touched.
+//
+// Graceful is not a nicety here. A force delete removes the pod from the API
+// before kubelet has unmounted, the claim then goes, the provisioner destroys
+// the export, and the node is left retrying RPCs against an export that no
+// longer exists. On a hard NFSv4.1 mount that retry loop is uninterruptible: it
+// wedges kubelet's volume manager and takes the node out of service. See
+// doc/findings.md.
 func (f *Framework) DeleteCaseObjects(ctx context.Context) error {
 	pods := f.C.Kube.CoreV1().Pods(Namespace)
-	if err := pods.DeleteCollection(ctx, DeleteNow(), ListOptions(f.Selector())); err != nil {
+	if err := pods.DeleteCollection(ctx, metav1.DeleteOptions{}, ListOptions(f.Selector())); err != nil {
 		return fmt.Errorf("deleting pods: %w", err)
 	}
 	if err := Poll(ctx, PollInterval, DeleteTimeout, func(ctx context.Context) (bool, error) {

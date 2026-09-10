@@ -113,6 +113,15 @@ lease/grace profile that preflight pins to `tuned` (20s/30s) or `default`
 (60s/90s). A third value fails preflight rather than silently invalidating every
 timing assertion.
 
+### Preflight runs once per cluster
+
+Preflight is a probe, not an assertion about this run: against an unchanged
+cluster it answers the same way every time. A passing result is cached per
+kubeconfig context under `artifacts/preflight-<context>.json` and reused until
+it ages out, so a normal edit-and-rerun loop costs one probe, not one per run.
+`-refresh-preflight` forces it, and it reruns automatically once the cache is
+older than `-preflight-max-age`.
+
 ### Artifacts
 
 A failed case writes `artifacts/<run-id>/<CASE-ID>/`: `environment.json`, client
@@ -183,6 +192,10 @@ image, fio, snapshots, expansion. Those arrive with the cases that use them.
 ---
 
 ## 4. Known gaps to settle as we go
+
+0. **Read [`doc/findings.md`](doc/findings.md) before touching teardown.** F-001
+   is a way to take a node out of service with two ordinary API calls in the
+   wrong order, and it will be tempting to reintroduce.
 
 1. **DATA-02 asserts more than NFSv4.1 guarantees.** The protocol has no append
    operation; a client implements `O_APPEND` by writing at the offset it

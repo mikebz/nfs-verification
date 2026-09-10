@@ -7,6 +7,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"log"
 	"os"
 	"testing"
 	"time"
@@ -37,12 +38,21 @@ func setup() error {
 	if err != nil {
 		return fmt.Errorf("connecting to cluster: %w", err)
 	}
+	// An explicit file wins over everything.
 	if path := framework.Cfg().EnvFile; path != "" {
 		e, err := env.Load(path)
 		if err != nil {
 			return fmt.Errorf("loading %s: %w", path, err)
 		}
 		framework.SetSuite(c, e, framework.CapabilitiesFromMap(e.Capabilities))
+		return nil
+	}
+	// Preflight against an unchanged cluster answers the same way every time,
+	// so a recent result for this context is reused rather than repeated.
+	if res, path := preflight.Cached(c); res != nil {
+		log.Printf("reusing the preflight result from %s (discovered %s ago; -refresh-preflight to redo it)",
+			path, time.Since(res.Env.Timestamp).Round(time.Second))
+		framework.SetSuite(c, res.Env, res.Caps)
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)

@@ -42,7 +42,8 @@ func TestProvisionMountWriteDelete(t *testing.T) {
 		t.Fatalf("checksum mismatch on read back: got %s want %s", got, want)
 	}
 
-	if err := f.DeletePodNow(ctx, pod.Name); err != nil {
+	// Graceful, and waited out: the claim below must not outlive the mount.
+	if err := f.DeletePod(ctx, pod.Name); err != nil {
 		t.Fatalf("deleting the pod: %v", err)
 	}
 	if err := f.WaitPodGone(ctx, pod.Name, framework.DeleteTimeout); err != nil {

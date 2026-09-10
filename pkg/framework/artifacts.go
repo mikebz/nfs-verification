@@ -8,10 +8,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
+
+// nodeInspectTimeout bounds one node's share of the artifact bundle.
+const nodeInspectTimeout = 10 * time.Second
 
 // CollectArtifacts writes the triage bundle for a failed case: the environment
 // record, pod logs, Kubernetes Events, server logs, /proc/mounts and dmesg from
@@ -130,12 +134,20 @@ func (f *Framework) dumpNodeState(ctx context.Context, dir string) error {
 		return err
 	}
 	for _, n := range nodes {
-		if mounts, err := agent.ReadFile(ctx, n, "/proc/mounts"); err == nil {
+		// One node at a time, each on its own short clock. A node with a wedged
+		// mount blocks on cat /proc/mounts, and the whole point of the bundle is
+		// that it still contains the other nodes when that happens.
+		nodeCtx, cancel := context.WithTimeout(ctx, nodeInspectTimeout)
+		if mounts, err := agent.ReadFile(nodeCtx, n, "/proc/mounts"); err == nil {
 			_ = os.WriteFile(filepath.Join(dir, "proc-mounts-"+n+".txt"), []byte(mounts), 0o644)
+		} else {
+			_ = os.WriteFile(filepath.Join(dir, "proc-mounts-"+n+".txt"),
+				[]byte(fmt.Sprintf("unreadable within %s: %v\n", nodeInspectTimeout, err)), 0o644)
 		}
-		if dmesg, err := agent.Dmesg(ctx, n); err == nil {
+		if dmesg, err := agent.Dmesg(nodeCtx, n); err == nil {
 			_ = os.WriteFile(filepath.Join(dir, "dmesg-"+n+".txt"), []byte(dmesg), 0o644)
 		}
+		cancel()
 	}
 	return nil
 }

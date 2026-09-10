@@ -34,6 +34,8 @@ func main() {
 		res.Env.StorageClass, res.Env.CSIDriver, res.Env.FanOut,
 		res.Env.Timing.Profile, res.Env.Timing.LeaseSeconds, res.Env.Timing.GraceSeconds)
 	fmt.Fprintf(os.Stderr, "environment written to %s/environment.json\n", framework.RunDir())
+	fmt.Fprintf(os.Stderr, "cached for context %q at %s; test runs reuse it for %s\n",
+		res.Env.Context, framework.PreflightCache(res.Env.Context), framework.Cfg().PreflightMaxAge)
 	for _, n := range res.Env.Notes {
 		fmt.Fprintf(os.Stderr, "note: %s\n", n)
 	}
