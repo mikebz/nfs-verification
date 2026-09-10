@@ -8,6 +8,58 @@ New entries go at the top.
 
 ---
 
+## F-002: 2GB worker nodes cannot host the suite
+
+**Found:** 2026-09-10, cluster `gke-w1`, `e2-small` node pool (2GB RAM).
+
+**Severity:** medium. It does not produce a wrong result, it produces node
+reboots that look like storage failures and cost a day to attribute.
+
+### What happened
+
+On `e2-small` workers, the GKE system daemons alone (fluentbit, gmp-collector,
+gke-metrics-agent, filestore-node, pdcsi-node) account for roughly 87% of
+requested memory and well over 100% of limits. Adding test pods, their image
+pulls and the page cache from a 1MiB write pushed nodes into kernel memory
+pressure:
+
+```
+virtio_balloon: Out of puff! Can't get 1 pages
+systemd-journald: Under memory pressure
+```
+
+Kubelet heartbeats then dropped, MIG health checks fired, and nodes rebooted
+mid-run.
+
+### Why it matters to the results, not just the runtime
+
+A rebooting node is indistinguishable, from inside a case, from the failure
+modes the plan is actually hunting: I/O that stalls, a mount that does not come
+back, a lock that is not reclaimed. A suite that cannot tell an undersized node
+from a storage defect produces findings nobody can act on.
+
+This is the same class of problem as Appendix C item 4 in the test plan, which
+already requires node auto-repair and auto-upgrade to be off: if the platform is
+restarting nodes underneath the run, chaos results are invalid.
+
+### What changed
+
+- The node agent now sets resource requests (10m CPU, 32Mi) so it is not
+  BestEffort and not the first thing evicted. No limits: it must not be OOM
+  killed while a case is reading the node it is inspecting.
+- Minimum node size is stated in the README: at least 4GB per worker
+  (`e2-medium`), and 8GB (`e2-standard-2`) for anything beyond the presubmit
+  cases.
+
+### Open
+
+The node pool requirement belongs alongside the other cluster preconditions in
+Section 0 of the test plan, as something preflight could check rather than
+something a person has to remember. Allocatable memory per node is readable from
+the node status, so a preflight warning is cheap. Not done yet.
+
+---
+
 ## F-001: Force-deleting a mounted pod can take a node out of service
 
 **Found:** 2026-09-10, cluster `gke-w1` (GKE v1.37.0, Container-Optimized OS,
@@ -82,3 +134,12 @@ Worth carrying into later work:
   the state is observable, not about recovery.
 - Node recovery after this state is a reboot in practice. Any run that hits it
   should treat the node as spent.
+
+### Follow-up, 2026-09-10
+
+Teardown has a second path through the same hazard: if a pod does not leave the
+API within `PodTerminateTimeout`, the node has stopped answering, and deleting
+the claim then is exactly the dangerous act. Teardown now deletes only the
+claims no surviving pod mounts, keeps the rest, and fails with the pods, their
+nodes and the kept claims named. Leaking a claim is recoverable; wedging a node
+is not.

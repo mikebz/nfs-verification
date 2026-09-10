@@ -14,6 +14,13 @@ const (
 	BindTimeout     = 120 * time.Second
 	PodReadyTimeout = 5 * time.Minute
 	DeleteTimeout   = 5 * time.Minute
+	// PodTerminateTimeout bounds teardown's wait for pods to leave the API. It
+	// is deliberately short: test pods have a 5 second grace period, so a pod
+	// still present after this is a node that has stopped answering, and every
+	// case paying five minutes for that exhausts the go test timeout.
+	PodTerminateTimeout = 90 * time.Second
+	// ArtifactTimeout bounds one case's artifact collection.
+	ArtifactTimeout = 60 * time.Second
 )
 
 // Poll calls fn until it returns done, an error, or the deadline passes. The

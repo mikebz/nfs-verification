@@ -7,7 +7,9 @@ package framework
 
 import (
 	"flag"
+	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 )
 
@@ -89,6 +91,17 @@ func init() {
 // FinalizeFlags applies post-parse defaults. Call once from TestMain after
 // flag.Parse.
 func FinalizeFlags() error {
+	// go test runs with the working directory set to the test package, while
+	// cmd/preflight runs from wherever the operator is. A relative artifacts
+	// path would therefore name two different directories, and the preflight
+	// cache would never be found. Anchor it to the repository root.
+	if !filepath.IsAbs(cfg.ArtifactsDir) {
+		if root, err := repoRoot(); err == nil {
+			cfg.ArtifactsDir = filepath.Join(root, cfg.ArtifactsDir)
+		} else if abs, err := filepath.Abs(cfg.ArtifactsDir); err == nil {
+			cfg.ArtifactsDir = abs
+		}
+	}
 	if cfg.RunID == "" {
 		cfg.RunID = time.Now().UTC().Format("20060102-150405")
 	}
@@ -101,6 +114,24 @@ func FinalizeFlags() error {
 		}
 	}
 	return nil
+}
+
+// repoRoot walks up from the working directory looking for the module file.
+func repoRoot() (string, error) {
+	dir, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir, nil
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", fmt.Errorf("no go.mod above %s", dir)
+		}
+		dir = parent
+	}
 }
 
 // Cfg returns the parsed configuration.

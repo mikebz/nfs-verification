@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/mikebz/nfs-verification/pkg/env"
@@ -48,10 +49,14 @@ func New(t *testing.T, caseID string) *Framework {
 		ctx, cancel := context.WithTimeout(context.Background(), DeleteTimeout)
 		defer cancel()
 		if t.Failed() {
-			// Artifacts before teardown: deleted pods tell no stories.
-			if err := f.CollectArtifacts(ctx); err != nil {
+			// Artifacts before teardown: deleted pods tell no stories. On its
+			// own clock, so that a sick node cannot spend the whole budget here
+			// and leave nothing for cleanup.
+			artifactCtx, artifactCancel := context.WithTimeout(ctx, ArtifactTimeout)
+			if err := f.CollectArtifacts(artifactCtx); err != nil {
 				t.Logf("collecting artifacts: %v", err)
 			}
+			artifactCancel()
 		}
 		for i := len(f.cleanups) - 1; i >= 0; i-- {
 			f.cleanups[i](ctx)
@@ -117,20 +122,80 @@ func (f *Framework) DeleteCaseObjects(ctx context.Context) error {
 	if err := pods.DeleteCollection(ctx, metav1.DeleteOptions{}, ListOptions(f.Selector())); err != nil {
 		return fmt.Errorf("deleting pods: %w", err)
 	}
-	if err := Poll(ctx, PollInterval, DeleteTimeout, func(ctx context.Context) (bool, error) {
+	var stuck []corev1.Pod
+	waitErr := Poll(ctx, PollInterval, PodTerminateTimeout, func(ctx context.Context) (bool, error) {
 		list, err := pods.List(ctx, ListOptions(f.Selector()))
 		if err != nil {
 			return false, err
 		}
-		return len(list.Items) == 0, fmt.Errorf("%d pods still terminating", len(list.Items))
-	}); err != nil {
-		return fmt.Errorf("waiting for pods to go away: %w", err)
+		stuck = list.Items
+		return len(stuck) == 0, fmt.Errorf("%d pods still terminating", len(stuck))
+	})
+	if waitErr == nil {
+		if err := f.C.Kube.CoreV1().PersistentVolumeClaims(Namespace).
+			DeleteCollection(ctx, metav1.DeleteOptions{}, ListOptions(f.Selector())); err != nil {
+			return fmt.Errorf("deleting claims: %w", err)
+		}
+		return nil
 	}
-	if err := f.C.Kube.CoreV1().PersistentVolumeClaims(Namespace).
-		DeleteCollection(ctx, metav1.DeleteOptions{}, ListOptions(f.Selector())); err != nil {
-		return fmt.Errorf("deleting claims: %w", err)
+
+	// A pod that outlives the wait means a node stopped answering. Claims it
+	// still mounts must stay: deleting one destroys an export under a live
+	// mount, which is how a sick node becomes an unusable node (docs/findings.md
+	// F-001). Everything it does not mount is safe to remove, so the run leaks
+	// as little as it can and says exactly what it left and why.
+	held := f.claimsHeldBy(stuck)
+	kept, deleted, delErr := f.deleteUnheldClaims(ctx, held)
+	msg := fmt.Sprintf("%d pods did not terminate within %s (%s); deleted %d claims, kept %d still mounted (%s)",
+		len(stuck), PodTerminateTimeout, describePods(stuck), deleted, len(kept), strings.Join(kept, ", "))
+	if delErr != nil {
+		return fmt.Errorf("%s: %w", msg, delErr)
 	}
-	return nil
+	return fmt.Errorf("%s: clean these up by hand once the node recovers", msg)
+}
+
+// claimsHeldBy returns the claims the given pods still mount.
+func (f *Framework) claimsHeldBy(pods []corev1.Pod) map[string]bool {
+	held := map[string]bool{}
+	for i := range pods {
+		for _, v := range pods[i].Spec.Volumes {
+			if v.PersistentVolumeClaim != nil {
+				held[v.PersistentVolumeClaim.ClaimName] = true
+			}
+		}
+	}
+	return held
+}
+
+// deleteUnheldClaims removes this case's claims except the ones named in held.
+func (f *Framework) deleteUnheldClaims(ctx context.Context, held map[string]bool) (kept []string, deleted int, err error) {
+	claims := f.C.Kube.CoreV1().PersistentVolumeClaims(Namespace)
+	list, err := claims.List(ctx, ListOptions(f.Selector()))
+	if err != nil {
+		return nil, 0, fmt.Errorf("listing claims: %w", err)
+	}
+	for i := range list.Items {
+		name := list.Items[i].Name
+		if held[name] {
+			kept = append(kept, name)
+			continue
+		}
+		if err := IgnoreNotFound(claims.Delete(ctx, name, metav1.DeleteOptions{})); err != nil {
+			return kept, deleted, fmt.Errorf("deleting claim %s: %w", name, err)
+		}
+		deleted++
+	}
+	return kept, deleted, nil
+}
+
+// describePods names pods and the nodes holding them, which is what an operator
+// needs to know to go and look.
+func describePods(pods []corev1.Pod) string {
+	var parts []string
+	for i := range pods {
+		parts = append(parts, pods[i].Name+" on "+pods[i].Spec.NodeName)
+	}
+	return strings.Join(parts, ", ")
 }
 
 // NewSystem builds a fixture with no test attached, for preflight and for

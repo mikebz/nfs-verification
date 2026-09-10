@@ -38,8 +38,11 @@ agent is privileged by design, so a cluster enforcing a restricted Pod Security
 level on `default` cannot run the suite as it stands.
 
 Preflight runs once per cluster. A passing result is cached at
-`artifacts/preflight-<context>.json`, keyed by kubeconfig context, and reused by
-later runs for `-preflight-max-age` (8h by default). Pass `-refresh-preflight`
+`<repo>/artifacts/preflight-<context>.json`, keyed by kubeconfig context, and
+reused by later runs for `-preflight-max-age` (8h by default). A relative
+`-artifacts-dir` is anchored to the repository root, so `make preflight` and
+`go test ./test/e2e` agree on where the cache lives even though `go test` runs
+from the package directory. Pass `-refresh-preflight`
 to redo it, or `-env-file` to point at a specific record.
 
 Nothing runs until preflight passes. Preflight writes
