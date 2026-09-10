@@ -36,6 +36,25 @@ description of what gets tested, and it must not become one. Read these first:
   commit message.
 - **One vector per change.** A case lands with the harness pieces it needs and
   nothing more. A change that adds a helper no case calls yet does not land.
+- **A large change is two PRs.** Anything you estimate at 1000 lines or more
+  lands as a design doc first, approved before implementation code is written.
+  Code written ahead of an approved design gets thrown away.
+  - The doc is a numbered file in `docs/`, for example
+    `docs/02-chaos-operations-design.md`, and it links the cases in the test
+    plan it serves so the requirement traces back to one place.
+  - The design PR contains only the doc. **No code inside the doc either.**
+    State object shapes, exec flows and interfaces in prose and tables, not Go
+    or YAML: code in a design doc goes stale the moment implementation starts,
+    and reviewers end up reviewing a sketch instead of the decision.
+  - Mark what is unresolved as open rather than inventing a constraint to fill
+    the gap.
+  - If the estimate was wrong and the change grows past that mark mid-flight,
+    stop and write the doc rather than finishing.
+- **Run things through `make`.** The targets are the interface: they carry the
+  flags, the timeouts and the run ID, and they are what a reviewer will run
+  when they check your claim. If you need something `make` does not do, add the
+  target instead of running a one-off command, so that what you ran is what
+  anyone else can run. `README.md` lists the targets.
 - **Settle the open question before implementing, not in the PR.** Where the
   plan marks something unresolved, resolve it first. Implementing against a
   guess and explaining the guess in the PR description is the expensive order.
@@ -48,14 +67,16 @@ description of what gets tested, and it must not become one. Read these first:
 
 State plainly, per change, which of these happened:
 
-- The unit tests and vet passed. Say so; it is the minimum, not a result.
+- `make all` passed. Say so; it is the minimum, not a result.
 - The cases were not run, because no cluster was available. Say this outright
   rather than leaving it to be inferred from silence.
-- The cases were run: name the cluster, the Kubernetes version, the node shape,
-  the storage class, and the profile in force.
+- The cases were run: name the target, the cluster, the Kubernetes version, the
+  node shape, the storage class, and the profile in force. Report the flags you
+  passed, since a run with different flags is a different run.
 
-Never describe an unrun case as passing, working, or verified. "Compiles, vet is
-clean, unit tests pass" is the honest claim when that is what happened. A
+Never describe an unrun case as passing, working, or verified. "`make all` is
+clean, the cases have not been run" is the honest claim when that is what
+happened. A
 reviewer who runs the suite on real hardware and finds it broken after being
 told it works stops trusting every later claim, including the true ones.
 
@@ -198,8 +219,9 @@ The rules below are the ones tooling cannot check:
 ## PRs and review
 
 - Keep PRs small and single-purpose. Never mix a rename or a move with a
-  behavior change.
-- Commit only when the build, vet and unit tests are clean.
+  behavior change. A change large enough to need a design doc is two PRs, not
+  one large one; see *Approach to a change*.
+- Commit only when `make all` is clean.
 - Address every review comment with a real change or a reasoned reply. Where you
   deliberately do not take a suggestion, say which part you took, which you did
   not, and why. The second half of a suggestion is sometimes the dangerous half.
