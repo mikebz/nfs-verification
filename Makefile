@@ -22,6 +22,10 @@ build:
 fmt:
 	go fmt ./...
 
+.PHONY: check-fmt
+check-fmt:
+	@unformatted="$$(gofmt -l .)"; test -z "$$unformatted" || { echo "Unformatted files found:"; printf '%s\n' "$$unformatted"; exit 1; }
+
 .PHONY: vet
 vet:
 	go vet ./...

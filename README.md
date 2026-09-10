@@ -34,6 +34,7 @@ approach a change, how to write a case, what to claim when you are done.
 
 ```sh
 make all                                                  # fmt, vet, unit, build
+make check-fmt                                            # verify formatting without modifying
 make unit                                                 # harness unit tests, no cluster
 make preflight      FLAGS="-storage-class=nfs -lease-seconds=60 -grace-seconds=90"
 make test-presubmit FLAGS="-storage-class=nfs -lease-seconds=60 -grace-seconds=90"
