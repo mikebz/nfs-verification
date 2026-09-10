@@ -148,6 +148,14 @@ func TestNameIsIdempotent(t *testing.T) {
 	if twice := f.Name(once); twice != once {
 		t.Errorf("prefixing twice changed the name: %q then %q", once, twice)
 	}
+	// Normalizes to lowercase for Kubernetes RFC 1123 compliance.
+	upper := f.Name("RootA")
+	if !strings.HasSuffix(upper, "-roota") {
+		t.Errorf("name %q was not normalized to lowercase", upper)
+	}
+	if twice := f.Name(upper); twice != upper {
+		t.Errorf("prefixing a normalized name twice changed it: %q then %q", upper, twice)
+	}
 }
 
 // TestClientPodManifestIdentity checks that a pinned uid and gid reach the pod

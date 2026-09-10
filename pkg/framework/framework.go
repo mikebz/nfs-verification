@@ -88,6 +88,7 @@ func (f *Framework) Labels() map[string]string {
 // in one namespace cannot collide and a leftover object says where it came
 // from. It is idempotent, so passing an already-prefixed name is harmless.
 func (f *Framework) Name(logical string) string {
+	logical = strings.ToLower(logical)
 	prefix := f.prefix()
 	if strings.HasPrefix(logical, prefix) {
 		return logical

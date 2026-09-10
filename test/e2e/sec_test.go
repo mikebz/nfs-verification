@@ -147,30 +147,30 @@ func TestRootSquashBehaviour(t *testing.T) {
 	pvc := f.MustRWXPVC(ctx, "sec02")
 	// Both pods are root. That is the point: the question is what the export
 	// does with a uid 0 write, and it has to answer the same way twice.
-	f.MustPod(ctx, toolsPod("rootA", pvc.Name, nodeA))
-	f.MustPod(ctx, toolsPod("rootB", pvc.Name, nodeB))
+	f.MustPod(ctx, toolsPod("roota", pvc.Name, nodeA))
+	f.MustPod(ctx, toolsPod("rootb", pvc.Name, nodeB))
 
 	dir := fileIn("sec02")
-	if r := f.Sh(ctx, "rootA", "mkdir -p "+framework.Quote(dir)); r.Err != nil {
+	if r := f.Sh(ctx, "roota", "mkdir -p "+framework.Quote(dir)); r.Err != nil {
 		t.Skipf("blocked on export configuration: root on %s cannot create a directory on the share (%s). "+
 			"That is itself a squash outcome, but with no writable path the case cannot compare two clients",
 			nodeA, r.Combined())
 	}
 	pathA, pathB := dir+"/from-root-a.dat", dir+"/from-root-b.dat"
-	if r := f.Sh(ctx, "rootA", "echo sec02 > "+framework.Quote(pathA)); r.Err != nil {
+	if r := f.Sh(ctx, "roota", "echo sec02 > "+framework.Quote(pathA)); r.Err != nil {
 		t.Skipf("blocked on export configuration: root on %s cannot write to the share (%s)", nodeA, r.Combined())
 	}
-	if r := f.Sh(ctx, "rootB", "echo sec02 > "+framework.Quote(pathB)); r.Err != nil {
+	if r := f.Sh(ctx, "rootb", "echo sec02 > "+framework.Quote(pathB)); r.Err != nil {
 		t.Errorf("root on %s wrote to the share but root on %s could not (%s): "+
 			"the export treats two identical clients differently", nodeA, nodeB, r.Combined())
 		return
 	}
 
-	ownerA, err := f.StatOwner(ctx, "rootA", pathA)
+	ownerA, err := f.StatOwner(ctx, "roota", pathA)
 	if err != nil {
 		t.Fatalf("reading ownership of the file root wrote on %s: %v", nodeA, err)
 	}
-	ownerB, err := f.StatOwner(ctx, "rootB", pathB)
+	ownerB, err := f.StatOwner(ctx, "rootb", pathB)
 	if err != nil {
 		t.Fatalf("reading ownership of the file root wrote on %s: %v", nodeB, err)
 	}
@@ -182,7 +182,7 @@ func TestRootSquashBehaviour(t *testing.T) {
 			ownerA, nodeA, ownerB, nodeB)
 	}
 	// And across clients: the file root wrote on A must read the same from B.
-	crossed, err := f.StatOwner(ctx, "rootB", pathA)
+	crossed, err := f.StatOwner(ctx, "rootb", pathA)
 	if err != nil {
 		t.Fatalf("reading on %s the ownership of what root wrote on %s: %v", nodeB, nodeA, err)
 	}
