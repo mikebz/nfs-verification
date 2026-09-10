@@ -3,7 +3,6 @@ package framework
 import (
 	"context"
 	"fmt"
-	"log"
 	"strings"
 	"testing"
 
@@ -12,32 +11,23 @@ import (
 	"github.com/mikebz/nfs-verification/pkg/env"
 )
 
-// TestingT is the part of *testing.T the fixture uses. Preflight builds a
-// fixture with no test attached, so the dependency is an interface rather than
-// the concrete type.
-type TestingT interface {
-	Helper()
-	Logf(format string, args ...any)
-	Errorf(format string, args ...any)
-	Fatalf(format string, args ...any)
-	Skipf(format string, args ...any)
-	Failed() bool
-	Cleanup(func())
-	Name() string
-}
+// Namespace is where the suite puts everything it creates. Fixed for now: the
+// cases need one namespace, not a namespace each, and the node agent is
+// privileged, so a cluster that enforces a restricted Pod Security level on
+// this namespace cannot run the suite as it stands.
+const Namespace = "default"
 
 // Framework is the per-test fixture: the shared clients, the environment record
 // discovered at preflight, and a name prefix that keeps one case's objects
-// apart from another's. It creates no namespace: everything the suite makes
-// lands in the configured namespace, which defaults to default.
+// apart from another's. It creates no namespace; everything lands in Namespace.
 type Framework struct {
-	T    TestingT
+	// T is nil for the fixture preflight uses, which has no test attached.
+	T    *testing.T
 	C    *Client
 	Env  *env.Environment
 	Caps Capabilities
 
-	Namespace string
-	CaseID    string
+	CaseID string
 
 	cleanups []func(context.Context)
 	faults   []FaultEvent
@@ -47,22 +37,17 @@ type Framework struct {
 // "DATA-05"; it prefixes every object the case creates, lands in labels, and
 // names the artifact bundle, so a stray object can be traced back to the case
 // and the run that made it.
-func New(t *testing.T, caseID string, gate Gate) *Framework {
+func New(t *testing.T, caseID string) *Framework {
 	t.Helper()
-	RequireGate(t, gate)
 	if suiteErr != nil {
 		t.Fatalf("suite not initialized: %v", suiteErr)
 	}
-	f := &Framework{
-		T: t, C: suiteClient, Env: suiteEnv, Caps: suiteCaps,
-		CaseID:    caseID,
-		Namespace: Cfg().Namespace,
-	}
+	f := &Framework{T: t, C: suiteClient, Env: suiteEnv, Caps: suiteCaps, CaseID: caseID}
 
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), DeleteTimeout)
 		defer cancel()
-		if f.T != nil && f.T.Failed() {
+		if t.Failed() {
 			// Artifacts before teardown: deleted pods tell no stories.
 			if err := f.CollectArtifacts(ctx); err != nil {
 				t.Logf("collecting artifacts: %v", err)
@@ -73,7 +58,7 @@ func New(t *testing.T, caseID string, gate Gate) *Framework {
 		}
 		if Cfg().KeepObjects {
 			t.Logf("keeping the objects of %s in namespace %s for triage (selector %s)",
-				f.CaseID, f.Namespace, f.Selector())
+				f.CaseID, Namespace, f.Selector())
 			return
 		}
 		if err := f.DeleteCaseObjects(ctx); err != nil {
@@ -122,7 +107,7 @@ func (f *Framework) Selector() string {
 // out: deleting a claim while a pod still mounts it is PROV-03's assertion, not
 // a teardown strategy.
 func (f *Framework) DeleteCaseObjects(ctx context.Context) error {
-	pods := f.C.Kube.CoreV1().Pods(f.Namespace)
+	pods := f.C.Kube.CoreV1().Pods(Namespace)
 	if err := pods.DeleteCollection(ctx, DeleteNow(), ListOptions(f.Selector())); err != nil {
 		return fmt.Errorf("deleting pods: %w", err)
 	}
@@ -135,46 +120,17 @@ func (f *Framework) DeleteCaseObjects(ctx context.Context) error {
 	}); err != nil {
 		return fmt.Errorf("waiting for pods to go away: %w", err)
 	}
-	if err := f.C.Kube.CoreV1().PersistentVolumeClaims(f.Namespace).
+	if err := f.C.Kube.CoreV1().PersistentVolumeClaims(Namespace).
 		DeleteCollection(ctx, metav1.DeleteOptions{}, ListOptions(f.Selector())); err != nil {
 		return fmt.Errorf("deleting claims: %w", err)
 	}
 	return nil
 }
 
-// Logf logs through the test, prefixed with the case ID. Preflight fixtures
-// have no test attached and log to stderr instead.
-func (f *Framework) Logf(format string, args ...any) {
-	if f.T == nil {
-		log.Printf("[%s] "+format, append([]any{f.CaseID}, args...)...)
-		return
-	}
-	f.T.Helper()
-	f.T.Logf("[%s] "+format, append([]any{f.CaseID}, args...)...)
-}
-
-// Skipf skips a case for a capability reason. Cases skip by capability, never
-// by platform name.
-func (f *Framework) Skipf(format string, args ...any) {
-	f.T.Helper()
-	f.T.Skipf("[%s] "+format, append([]any{f.CaseID}, args...)...)
-}
-
-// RequireGate skips a case that is not part of the selected gate.
-func RequireGate(t *testing.T, want Gate) {
-	t.Helper()
-	if !Cfg().Gate.Includes(want) {
-		t.Skipf("case gate %s not selected by -gate=%s", want, Cfg().Gate)
-	}
-}
-
-// faults is the injected-fault timeline for this case.
-func (f *Framework) Faults() []FaultEvent { return f.faults }
-
 // NewSystem builds a fixture with no test attached, for preflight and for
 // tooling. The caller owns teardown via the returned close function.
 func NewSystem(c *Client, e *env.Environment, caps Capabilities, caseID string) (*Framework, func(context.Context)) {
-	f := &Framework{C: c, Env: e, Caps: caps, CaseID: caseID, Namespace: Cfg().Namespace}
+	f := &Framework{C: c, Env: e, Caps: caps, CaseID: caseID}
 	closeFn := func(ctx context.Context) {
 		for i := len(f.cleanups) - 1; i >= 0; i-- {
 			f.cleanups[i](ctx)

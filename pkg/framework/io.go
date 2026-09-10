@@ -14,12 +14,12 @@ func (f *Framework) WriteFile(ctx context.Context, pod, path string, sizeBytes i
 			`yes %[3]s | head -c %[2]d > %[1]s; `+
 			`sync; sha256sum %[1]s | cut -d' ' -f1`,
 		shellQuote(path), sizeBytes, shellQuote(seed))
-	return f.C.MustSh(ctx, f.Namespace, f.Name(pod), "main", script)
+	return f.C.MustSh(ctx, Namespace, f.Name(pod), "main", script)
 }
 
 // Sha256 returns the checksum of a file as the pod sees it.
 func (f *Framework) Sha256(ctx context.Context, pod, path string) (string, error) {
-	return f.C.MustSh(ctx, f.Namespace, f.Name(pod), "main",
+	return f.C.MustSh(ctx, Namespace, f.Name(pod), "main",
 		fmt.Sprintf("sha256sum %s | cut -d' ' -f1", shellQuote(path)))
 }
 

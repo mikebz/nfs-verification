@@ -36,20 +36,20 @@ func fileIn(name string) string { return fmt.Sprintf("%s/%s", mountPath, name) }
 
 // profile returns the pinned lease/grace profile the run measures against.
 // Cases that assert timing read their bounds from here, never from a literal.
-func profile(f *framework.Framework) slo.Profile {
-	f.T.Helper()
+func profile(t *testing.T) slo.Profile {
+	t.Helper()
 	p, err := framework.Profile()
 	if err != nil {
-		f.T.Fatalf("%v", err)
+		t.Fatalf("%v", err)
 	}
 	return p
 }
 
 // requireCap skips a case whose capability is absent. Cases skip by capability,
 // never by platform name.
-func requireCap(f *framework.Framework, have bool, what string) {
-	f.T.Helper()
+func requireCap(t *testing.T, have bool, what string) {
+	t.Helper()
 	if !have {
-		f.Skipf("capability unavailable: %s", what)
+		t.Skipf("capability unavailable: %s", what)
 	}
 }

@@ -26,15 +26,14 @@ three cases. The remaining cases land in the steps listed in `plan.md`.
 
 ```sh
 make unit                                            # harness unit tests, no cluster
-make preflight   FLAGS="-server-namespace=nfs -server-selector=app=nfs-server"
-make test-presubmit FLAGS="-server-namespace=nfs -server-selector=app=nfs-server"
+make preflight FLAGS="-storage-class=nfs -lease-seconds=60 -grace-seconds=90"
+make test-e2e  FLAGS="-storage-class=nfs -lease-seconds=60 -grace-seconds=90"
 ```
 
-The suite creates no namespaces. Everything lands in `default`, or in
-`-namespace`, and is named and labelled per case so that teardown deletes
-exactly what the case made. The node agent is privileged by design, so a
-namespace enforcing a restricted Pod Security level will reject it; preflight
-says so and names the remedy.
+The suite creates no namespaces. Everything lands in `default`, named and
+labelled per case so that teardown deletes exactly what the case made. The node
+agent is privileged by design, so a cluster enforcing a restricted Pod Security
+level on `default` cannot run the suite as it stands.
 
 Nothing runs until preflight passes. Preflight writes
 `artifacts/<run-id>/environment.json`; a failed case writes its own bundle under
@@ -43,11 +42,14 @@ and dmesg from every involved node, and the injected-fault timeline.
 
 ## Cases in this repository so far
 
-| ID | Case | Gate |
-|---|---|---|
-| PROV-01 | Dynamic provision, bind, mount, write, delete, backing volume reclaimed | presubmit |
-| DATA-03 | Close-to-open across two nodes | presubmit |
-| DATA-05 | flock mutual exclusion across two nodes, clean handover on release | presubmit |
+| ID | Case |
+|---|---|
+| PROV-01 | Dynamic provision, bind, mount, write, delete, backing volume reclaimed |
+| DATA-03 | Close-to-open across two nodes |
+| DATA-05 | flock mutual exclusion across two nodes, clean handover on release |
+
+All three are fast enough for a presubmit. Categories become a `go test -run`
+pattern when there are slow cases to keep out of the fast path.
 
 ## Flags
 

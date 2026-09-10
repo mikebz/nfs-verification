@@ -282,13 +282,13 @@ func mountOnTwoNodes(ctx context.Context, fx *framework.Framework, pvc, nodeA, n
 			"simultaneous mounting from two nodes", podA.Spec.NodeName)
 	}
 	// Read-write on both, simultaneously, verified through the filesystem.
-	if _, err := fx.C.MustSh(ctx, fx.Namespace, podA.Name, "main", "echo from-a > /mnt/share/preflight-a.txt && sync"); err != nil {
+	if _, err := fx.C.MustSh(ctx, framework.Namespace, podA.Name, "main", "echo from-a > /mnt/share/preflight-a.txt && sync"); err != nil {
 		return nil, nil, fmt.Errorf("write from %s: %w", podA.Name, err)
 	}
-	if _, err := fx.C.MustSh(ctx, fx.Namespace, podB.Name, "main", "echo from-b > /mnt/share/preflight-b.txt && sync"); err != nil {
+	if _, err := fx.C.MustSh(ctx, framework.Namespace, podB.Name, "main", "echo from-b > /mnt/share/preflight-b.txt && sync"); err != nil {
 		return nil, nil, fmt.Errorf("write from %s: %w", podB.Name, err)
 	}
-	if out, err := fx.C.MustSh(ctx, fx.Namespace, podB.Name, "main", "cat /mnt/share/preflight-a.txt"); err != nil || out != "from-a" {
+	if out, err := fx.C.MustSh(ctx, framework.Namespace, podB.Name, "main", "cat /mnt/share/preflight-a.txt"); err != nil || out != "from-a" {
 		return nil, nil, fmt.Errorf("pod on %s cannot read what pod on %s wrote: out=%q err=%v", nodeB, nodeA, out, err)
 	}
 	return podA, podB, nil

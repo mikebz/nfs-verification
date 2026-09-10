@@ -49,7 +49,7 @@ HOLDEOF
 setsid sh /tmp/hold-%[3]s.sh %[4]s %[1]s %[2]s >/dev/null 2>&1 </dev/null &
 echo launched
 `, shellQuote(l.state), shellQuote(l.run), id, shellQuote(path))
-	if _, err := f.C.MustSh(ctx, f.Namespace, l.Pod, "main", script); err != nil {
+	if _, err := f.C.MustSh(ctx, Namespace, l.Pod, "main", script); err != nil {
 		return nil, err
 	}
 	if err := Poll(ctx, FastPoll, 2*time.Minute, func(ctx context.Context) (bool, error) {
@@ -70,7 +70,7 @@ echo launched
 // State returns the holder's state: held, released, failed, or empty while the
 // acquisition is still blocked.
 func (l *LockHolder) State(ctx context.Context) (string, error) {
-	r := l.f.C.Sh(ctx, l.f.Namespace, l.Pod, "main", "cat "+shellQuote(l.state)+" 2>/dev/null || true")
+	r := l.f.C.Sh(ctx, Namespace, l.Pod, "main", "cat "+shellQuote(l.state)+" 2>/dev/null || true")
 	if r.Err != nil {
 		return "", r.Err
 	}
@@ -79,7 +79,7 @@ func (l *LockHolder) State(ctx context.Context) (string, error) {
 
 // Release drops the lock.
 func (l *LockHolder) Release(ctx context.Context) error {
-	_, err := l.f.C.MustSh(ctx, l.f.Namespace, l.Pod, "main", "rm -f "+shellQuote(l.run))
+	_, err := l.f.C.MustSh(ctx, Namespace, l.Pod, "main", "rm -f "+shellQuote(l.run))
 	return err
 }
 

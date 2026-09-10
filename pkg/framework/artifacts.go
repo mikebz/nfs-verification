@@ -32,7 +32,7 @@ func (f *Framework) CollectArtifacts(ctx context.Context) error {
 	if err := f.dumpTimeline(dir); err != nil {
 		errs = append(errs, fmt.Sprintf("timeline: %v", err))
 	}
-	if err := f.dumpPods(ctx, dir, f.Namespace, f.Selector(), "client"); err != nil {
+	if err := f.dumpPods(ctx, dir, Namespace, f.Selector(), "client"); err != nil {
 		errs = append(errs, fmt.Sprintf("client pods: %v", err))
 	}
 	if ns := f.Env.ServerNamespace(); ns != "" {
@@ -51,7 +51,7 @@ func (f *Framework) CollectArtifacts(ctx context.Context) error {
 	if len(errs) > 0 {
 		return fmt.Errorf("artifact collection had gaps: %s", strings.Join(errs, "; "))
 	}
-	f.Logf("artifacts written to %s", dir)
+	f.T.Logf("artifacts written to %s", dir)
 	return nil
 }
 
@@ -98,8 +98,8 @@ func (f *Framework) writeLogs(ctx context.Context, dir, ns, pod, container strin
 }
 
 func (f *Framework) dumpEvents(ctx context.Context, dir string) error {
-	namespaces := []string{f.Namespace}
-	if ns := f.Env.ServerNamespace(); ns != "" && ns != f.Namespace {
+	namespaces := []string{Namespace}
+	if ns := f.Env.ServerNamespace(); ns != "" && ns != Namespace {
 		namespaces = append(namespaces, ns)
 	}
 	for _, ns := range namespaces {
@@ -152,7 +152,9 @@ type FaultEvent struct {
 // bundle says exactly what was done and when.
 func (f *Framework) RecordFault(e FaultEvent) {
 	f.faults = append(f.faults, e)
-	f.Logf("fault: %s %s %s", e.Action, e.Target, e.Detail)
+	if f.T != nil {
+		f.T.Logf("fault: %s %s %s", e.Action, e.Target, e.Detail)
+	}
 }
 
 func (f *Framework) dumpTimeline(dir string) error {

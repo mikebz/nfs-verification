@@ -13,7 +13,7 @@ import (
 // them without one.
 
 func TestClientPodManifestRenders(t *testing.T) {
-	f := &Framework{CaseID: "DATA-05", Namespace: "default"}
+	f := &Framework{CaseID: "DATA-05"}
 	pod, err := f.PodBuilder(PodSpec{
 		Name:  "holder",
 		Image: "alpine:3.20",
@@ -32,8 +32,8 @@ func TestClientPodManifestRenders(t *testing.T) {
 	if !strings.HasPrefix(pod.Name, "nfsv-data-05-") || !strings.HasSuffix(pod.Name, "-holder") {
 		t.Errorf("pod name %q does not carry the case prefix", pod.Name)
 	}
-	if pod.Namespace != "default" {
-		t.Errorf("namespace %q, want default: the suite creates no namespaces", pod.Namespace)
+	if pod.Namespace != Namespace {
+		t.Errorf("namespace %q, want %q: the suite creates no namespaces", pod.Namespace, Namespace)
 	}
 	// A selector, not nodeName: nodeName bypasses the scheduler, and a
 	// WaitForFirstConsumer class then never binds.
@@ -71,7 +71,7 @@ func TestClientPodManifestRenders(t *testing.T) {
 }
 
 func TestClientPodManifestWithNoMounts(t *testing.T) {
-	f := &Framework{CaseID: "PROV-01", Namespace: "default"}
+	f := &Framework{CaseID: "PROV-01"}
 	pod, err := f.PodBuilder(PodSpec{Name: "writer"})
 	if err != nil {
 		t.Fatalf("rendering a pod with no mounts: %v", err)
@@ -87,7 +87,7 @@ func TestClientPodManifestWithNoMounts(t *testing.T) {
 func TestNodeAgentManifestRenders(t *testing.T) {
 	var ds appsv1.DaemonSet
 	err := render("node-agent-daemonset.yaml", map[string]string{
-		"Name": "nfs-verification-node-agent", "Namespace": "default", "Image": "alpine:3.20",
+		"Name": "nfs-verification-node-agent", "Namespace": Namespace, "Image": "alpine:3.20",
 	}, &ds)
 	if err != nil {
 		t.Fatalf("rendering the node agent: %v", err)

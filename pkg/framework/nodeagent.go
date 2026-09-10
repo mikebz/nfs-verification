@@ -49,7 +49,7 @@ func NodeAgent(ctx context.Context, c *Client) (*Agent, error) {
 }
 
 func installAgent(ctx context.Context, c *Client) (*Agent, error) {
-	ns := Cfg().Namespace
+	ns := Namespace
 	var ds appsv1.DaemonSet
 	if err := render("node-agent-daemonset.yaml", map[string]string{
 		"Name":      agentDaemonSet,
@@ -87,7 +87,7 @@ func installAgent(ctx context.Context, c *Client) (*Agent, error) {
 }
 
 func (a *Agent) refresh(ctx context.Context) error {
-	pods, err := a.c.Kube.CoreV1().Pods(Cfg().Namespace).List(ctx, ListOptions("app="+agentDaemonSet))
+	pods, err := a.c.Kube.CoreV1().Pods(Namespace).List(ctx, ListOptions("app="+agentDaemonSet))
 	if err != nil {
 		return err
 	}
@@ -128,7 +128,7 @@ func (a *Agent) Run(ctx context.Context, node, script string) (string, error) {
 	// nsenter into PID 1 puts the command in the host mount, network, IPC, UTS
 	// and PID namespaces, which is what makes /proc/mounts and signals real.
 	wrapped := fmt.Sprintf("nsenter -t 1 -m -u -i -n -p -- sh -c %s", shellQuote(script))
-	r := a.c.Sh(ctx, Cfg().Namespace, pod, "agent", wrapped)
+	r := a.c.Sh(ctx, Namespace, pod, "agent", wrapped)
 	if r.Err != nil {
 		return r.Combined(), fmt.Errorf("node %s: %w: %s", node, r.Err, r.Combined())
 	}

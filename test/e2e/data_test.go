@@ -15,7 +15,7 @@ import (
 // DATA-03: close-to-open across nodes. This is the guarantee the architecture
 // actually makes, so it is asserted directly and nothing stronger is.
 func TestCloseToOpen(t *testing.T) {
-	f := framework.New(t, "DATA-03", framework.GatePresubmit)
+	f := framework.New(t, "DATA-03")
 	ctx, cancel := caseCtx(t, 10*time.Minute)
 	defer cancel()
 
@@ -38,8 +38,8 @@ func TestCloseToOpen(t *testing.T) {
 // visible across clients only because every client serializes through the one
 // server. The byte-range half of this case lands with the locktool image.
 func TestLocksAcrossNodes(t *testing.T) {
-	f := framework.New(t, "DATA-05", framework.GatePresubmit)
-	requireCap(f, f.Caps.MultiNode, "cross-node locking needs two schedulable workers")
+	f := framework.New(t, "DATA-05")
+	requireCap(t, f.Caps.MultiNode, "cross-node locking needs two schedulable workers")
 	ctx, cancel := caseCtx(t, 15*time.Minute)
 	defer cancel()
 
@@ -72,6 +72,6 @@ func TestLocksAcrossNodes(t *testing.T) {
 	}); err != nil {
 		t.Errorf("lock was never grantable after a clean release: %v", err)
 	}
-	f.Logf("lock changed hands across nodes %s and %s under the one server (profile %s)",
-		nodeA, nodeB, profile(f).Name)
+	t.Logf("lock changed hands across nodes %s and %s under the one server (profile %s)",
+		nodeA, nodeB, profile(t).Name)
 }

@@ -66,9 +66,8 @@ answer, and each one is listed in the README with why.
 
 ### Namespaces and object naming
 
-The suite creates no namespaces. Everything lands in one namespace, `default`
-unless `-namespace` says otherwise, including the privileged node agent. Cases
-are kept apart by name and by label instead: every object a case creates is
+The suite creates no namespaces. Everything lands in `default`, including the
+privileged node agent. Cases are kept apart by name and by label instead: every object a case creates is
 named `nfsv-<case>-<run>-<what>` and labelled with the run and the case, and
 teardown deletes exactly that label selector, pods first and then claims. The
 trade is deliberate: a namespace per case is tidier, but it hides ownership
@@ -84,12 +83,14 @@ was actually applied. Unit tests render every manifest and assert on the decoded
 object, so an indentation slip fails on a workstation rather than against a
 cluster.
 
-### Gating and skipping
+### Categories and skipping
 
-- Cases declare a gate (`presubmit`, `nightly`, `soak`, `manual`) and skip when
-  the selected gate does not include them. `make test-presubmit` holds no chaos:
-  chaos is slow and its failures need human triage, and red in the fast gate
-  trains people to ignore red.
+- The plan sorts cases into presubmit, nightly, soak and manual. Until there is
+  more than one category of case in the repository, that lives in the comment
+  above each test and in `go test -run`, not in harness machinery. The rule the
+  categories exist to enforce still holds: the fast path holds no chaos, because
+  chaos is slow, its failures need human triage, and red in the fast path trains
+  people to ignore red.
 - Cases skip **by capability, never by platform name**:
   `if !f.Caps.CanStopNode`, never `if platform == "gke"`. Capabilities are
   discovered at preflight and recorded in `environment.json`.

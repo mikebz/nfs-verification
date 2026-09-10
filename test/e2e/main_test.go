@@ -1,6 +1,6 @@
-// Package e2e implements the case table in Section 3 of the test plan. Every
-// test function carries its plan ID and gate; nothing runs until preflight has
-// passed, and nothing asserts more than the NFSv4.1 protocol guarantees.
+// Package e2e implements the case table in Section 3 of the test plan. Each
+// test names its plan case in the comment above it. Nothing runs until
+// preflight has passed, and nothing asserts more than NFSv4.1 guarantees.
 package e2e
 
 import (

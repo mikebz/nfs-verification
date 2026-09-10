@@ -14,7 +14,7 @@ import (
 // removed, not merely unbound: an unreclaimed backing volume is a leak that
 // surfaces weeks later as a quota failure with no obvious cause.
 func TestProvisionMountWriteDelete(t *testing.T) {
-	f := framework.New(t, "PROV-01", framework.GatePresubmit)
+	f := framework.New(t, "PROV-01")
 	ctx, cancel := caseCtx(t, 15*time.Minute)
 	defer cancel()
 
@@ -29,7 +29,7 @@ func TestProvisionMountWriteDelete(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolving the bound PV: %v", err)
 	}
-	f.Logf("claim %s bound to %s on StorageClass %s", pvc.Name, pv.Name, f.Env.StorageClass)
+	t.Logf("claim %s bound to %s on StorageClass %s", pvc.Name, pv.Name, f.Env.StorageClass)
 	want, err := f.WriteFile(ctx, pod.Name, fileIn("prov01.dat"), 1<<20, "prov01")
 	if err != nil {
 		t.Fatalf("writing to the share: %v", err)
@@ -48,7 +48,7 @@ func TestProvisionMountWriteDelete(t *testing.T) {
 	if err := f.WaitPodGone(ctx, pod.Name, framework.DeleteTimeout); err != nil {
 		t.Fatalf("pod did not go away: %v", err)
 	}
-	if err := f.C.Kube.CoreV1().PersistentVolumeClaims(f.Namespace).Delete(ctx, pvc.Name, metav1.DeleteOptions{}); err != nil {
+	if err := f.C.Kube.CoreV1().PersistentVolumeClaims(framework.Namespace).Delete(ctx, pvc.Name, metav1.DeleteOptions{}); err != nil {
 		t.Fatalf("deleting the claim: %v", err)
 	}
 	if err := f.WaitPVCGone(ctx, pvc.Name, framework.DeleteTimeout); err != nil {

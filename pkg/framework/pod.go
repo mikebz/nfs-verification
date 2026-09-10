@@ -58,7 +58,7 @@ type podMountData struct {
 func (f *Framework) PodBuilder(spec PodSpec) (*corev1.Pod, error) {
 	data := podTemplateData{
 		Name:      f.Name(spec.Name),
-		Namespace: f.Namespace,
+		Namespace: Namespace,
 		Image:     spec.Image,
 		Node:      spec.Node,
 		Command:   spec.Command,
@@ -97,7 +97,7 @@ func (f *Framework) CreatePod(ctx context.Context, spec PodSpec) (*corev1.Pod, e
 	if err != nil {
 		return nil, err
 	}
-	pod, err := f.C.Kube.CoreV1().Pods(f.Namespace).Create(ctx, obj, metav1.CreateOptions{})
+	pod, err := f.C.Kube.CoreV1().Pods(Namespace).Create(ctx, obj, metav1.CreateOptions{})
 	if err != nil {
 		return nil, err
 	}
@@ -119,7 +119,7 @@ func (f *Framework) WaitPodReady(ctx context.Context, name string, timeout time.
 	name = f.Name(name)
 	var ready *corev1.Pod
 	err := Poll(ctx, PollInterval, timeout, func(ctx context.Context) (bool, error) {
-		pod, err := f.C.Kube.CoreV1().Pods(f.Namespace).Get(ctx, name, metav1.GetOptions{})
+		pod, err := f.C.Kube.CoreV1().Pods(Namespace).Get(ctx, name, metav1.GetOptions{})
 		if err != nil {
 			return false, err
 		}
@@ -144,7 +144,7 @@ func (f *Framework) WaitPodReady(ctx context.Context, name string, timeout time.
 func (f *Framework) WaitPodGone(ctx context.Context, name string, timeout time.Duration) error {
 	name = f.Name(name)
 	return Poll(ctx, PollInterval, timeout, func(ctx context.Context) (bool, error) {
-		_, err := f.C.Kube.CoreV1().Pods(f.Namespace).Get(ctx, name, metav1.GetOptions{})
+		_, err := f.C.Kube.CoreV1().Pods(Namespace).Get(ctx, name, metav1.GetOptions{})
 		if err != nil {
 			return IgnoreNotFound(err) == nil, nil
 		}
@@ -155,19 +155,19 @@ func (f *Framework) WaitPodGone(ctx context.Context, name string, timeout time.D
 // DeletePodNow force-deletes a pod, which is how the lock-release cases model a
 // client that vanished without unlocking.
 func (f *Framework) DeletePodNow(ctx context.Context, name string) error {
-	return IgnoreNotFound(f.C.Kube.CoreV1().Pods(f.Namespace).Delete(ctx, f.Name(name), DeleteNow()))
+	return IgnoreNotFound(f.C.Kube.CoreV1().Pods(Namespace).Delete(ctx, f.Name(name), DeleteNow()))
 }
 
 // Sh runs a shell snippet in a pod of this namespace.
 func (f *Framework) Sh(ctx context.Context, pod, script string) ExecResult {
-	return f.C.Sh(ctx, f.Namespace, f.Name(pod), "main", script)
+	return f.C.Sh(ctx, Namespace, f.Name(pod), "main", script)
 }
 
 // MustShf runs a shell snippet in a pod and fails the test on error.
 func (f *Framework) MustShf(ctx context.Context, pod, format string, args ...any) string {
 	f.T.Helper()
 	script := fmt.Sprintf(format, args...)
-	out, err := f.C.MustSh(ctx, f.Namespace, f.Name(pod), "main", script)
+	out, err := f.C.MustSh(ctx, Namespace, f.Name(pod), "main", script)
 	if err != nil {
 		f.T.Fatalf("running %q in %s: %v", script, f.Name(pod), err)
 	}

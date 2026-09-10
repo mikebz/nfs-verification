@@ -38,7 +38,7 @@ func (f *Framework) CreatePVC(ctx context.Context, spec PVCSpec) (*corev1.Persis
 	}
 	sc := spec.StorageClass
 	pvc := &corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{Name: f.Name(spec.Name), Namespace: f.Namespace, Labels: f.Labels()},
+		ObjectMeta: metav1.ObjectMeta{Name: f.Name(spec.Name), Namespace: Namespace, Labels: f.Labels()},
 		Spec: corev1.PersistentVolumeClaimSpec{
 			AccessModes:      []corev1.PersistentVolumeAccessMode{spec.AccessMode},
 			StorageClassName: &sc,
@@ -48,7 +48,7 @@ func (f *Framework) CreatePVC(ctx context.Context, spec PVCSpec) (*corev1.Persis
 			DataSource: spec.DataSource,
 		},
 	}
-	return f.C.Kube.CoreV1().PersistentVolumeClaims(f.Namespace).Create(ctx, pvc, metav1.CreateOptions{})
+	return f.C.Kube.CoreV1().PersistentVolumeClaims(Namespace).Create(ctx, pvc, metav1.CreateOptions{})
 }
 
 // WaitPVCBound waits for a claim to reach Bound.
@@ -56,7 +56,7 @@ func (f *Framework) WaitPVCBound(ctx context.Context, name string, timeout time.
 	name = f.Name(name)
 	var bound *corev1.PersistentVolumeClaim
 	err := Poll(ctx, PollInterval, timeout, func(ctx context.Context) (bool, error) {
-		pvc, err := f.C.Kube.CoreV1().PersistentVolumeClaims(f.Namespace).Get(ctx, name, metav1.GetOptions{})
+		pvc, err := f.C.Kube.CoreV1().PersistentVolumeClaims(Namespace).Get(ctx, name, metav1.GetOptions{})
 		if err != nil {
 			return false, err
 		}
@@ -84,7 +84,7 @@ func (f *Framework) MustRWXPVC(ctx context.Context, name string) *corev1.Persist
 		f.T.Fatalf("reading the binding mode of StorageClass %s: %v", f.Env.StorageClass, err)
 	}
 	if mode == storagev1.VolumeBindingWaitForFirstConsumer {
-		f.Logf("StorageClass %s binds on first consumer; %s stays Pending until a pod is scheduled",
+		f.T.Logf("StorageClass %s binds on first consumer; %s stays Pending until a pod is scheduled",
 			f.Env.StorageClass, pvc.Name)
 		return pvc
 	}
@@ -130,7 +130,7 @@ func (c *Client) SupportsExpansion(ctx context.Context, name string) (bool, erro
 
 // PVForClaim returns the PersistentVolume bound to a claim.
 func (f *Framework) PVForClaim(ctx context.Context, name string) (*corev1.PersistentVolume, error) {
-	pvc, err := f.C.Kube.CoreV1().PersistentVolumeClaims(f.Namespace).Get(ctx, f.Name(name), metav1.GetOptions{})
+	pvc, err := f.C.Kube.CoreV1().PersistentVolumeClaims(Namespace).Get(ctx, f.Name(name), metav1.GetOptions{})
 	if err != nil {
 		return nil, err
 	}
@@ -157,7 +157,7 @@ func (f *Framework) WaitPVGone(ctx context.Context, name string, timeout time.Du
 func (f *Framework) WaitPVCGone(ctx context.Context, name string, timeout time.Duration) error {
 	name = f.Name(name)
 	return Poll(ctx, PollInterval, timeout, func(ctx context.Context) (bool, error) {
-		_, err := f.C.Kube.CoreV1().PersistentVolumeClaims(f.Namespace).Get(ctx, name, metav1.GetOptions{})
+		_, err := f.C.Kube.CoreV1().PersistentVolumeClaims(Namespace).Get(ctx, name, metav1.GetOptions{})
 		if err != nil {
 			return IgnoreNotFound(err) == nil, nil
 		}
