@@ -41,7 +41,9 @@ preflight:
 	go run ./cmd/preflight -timeout=3m $(COMMON)
 
 # Section 4.2 gates. Categories live in a go test pattern, not in harness
-# machinery: chaos cases are named TestChaos..., everything else is presubmit.
+# machinery: cases that injure the server are named TestChaos..., everything
+# else is presubmit. The prefix marks what a case does rather than where it sits
+# in the plan, so the OBS cases that inject a fault carry it too.
 #
 # Presubmit deliberately holds no chaos. Chaos is slow and its failures need
 # human triage; putting it in the fast gate trains people to ignore red.
@@ -51,15 +53,16 @@ preflight:
 test-presubmit:
 	go test $(PKG) -v -timeout=30m -skip '^TestChaos' $(COMMON)
 
-# The chaos vector. Budget: hours, and every case injures the server.
+# The chaos vector. Budget: under 4 hours per Section 4.2, and every case
+# injures the server. Repeated failover alone is five outages end to end.
 .PHONY: test-chaos
 test-chaos:
-	go test $(PKG) -v -timeout=90m -run '^TestChaos' $(COMMON)
+	go test $(PKG) -v -timeout=240m -run '^TestChaos' $(COMMON)
 
 # Everything. Same budget as chaos, since chaos dominates it.
 .PHONY: test-e2e
 test-e2e:
-	go test $(PKG) -v -timeout=120m $(COMMON)
+	go test $(PKG) -v -timeout=300m $(COMMON)
 
 .PHONY: clean
 clean:

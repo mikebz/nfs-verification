@@ -107,6 +107,18 @@ const (
 // Convention: grace runs about two lease periods.
 func GraceExitBound(p Profile) time.Duration { return 2 * p.Lease }
 
+// ClockSkewGuard narrows a window whose two ends were stamped by different
+// clocks. A grace window is stamped by the kubelet on the server's node; a lock
+// attempt is stamped by the client pod that made it, on another node. There is
+// no way to put both on one clock, because grace happens on the server and the
+// attempt has to come from a client.
+//
+// So the window is narrowed by this much at each end, and only an event
+// unambiguously inside the narrowed window is reported as a violation. The
+// direction is deliberate: a marginal violation missed costs one finding, and a
+// lawful lock grant reported as a protocol violation costs a week.
+const ClockSkewGuard = 5 * time.Second
+
 // AlertSLO is the deadline for an availability alert to fire (OBS-01).
 const AlertSLO = 5 * time.Minute
 

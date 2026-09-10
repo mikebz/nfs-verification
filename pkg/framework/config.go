@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"time"
 )
 
@@ -35,6 +36,15 @@ type Config struct {
 	ProfileName  string
 	LeaseSeconds int
 	GraceSeconds int
+
+	// GraceEnterPattern and GraceExitPattern name the wording a server uses to
+	// announce grace, for a server the built-in rule does not cover. Compiled
+	// once in FinalizeFlags: a pattern that does not compile is a startup
+	// failure, not a run that quietly observes nothing.
+	GraceEnterPattern string
+	GraceExitPattern  string
+	graceEnterRE      *regexp.Regexp
+	graceExitRE       *regexp.Regexp
 
 	Platform      string
 	GCloudProject string
@@ -73,6 +83,8 @@ func init() {
 	flag.StringVar(&cfg.ProfileName, "profile", "", "require this lease/grace profile: tuned or default; empty accepts either")
 	flag.IntVar(&cfg.LeaseSeconds, "lease-seconds", 0, "lease seconds, used only when discovery cannot read the live value")
 	flag.IntVar(&cfg.GraceSeconds, "grace-seconds", 0, "grace seconds, used only when discovery cannot read the live value")
+	flag.StringVar(&cfg.GraceEnterPattern, "grace-enter-pattern", "", "regexp matching the server log line announcing grace entry; the built-in wording rule is used when empty")
+	flag.StringVar(&cfg.GraceExitPattern, "grace-exit-pattern", "", "regexp matching the server log line announcing grace exit; set it with -grace-enter-pattern or not at all")
 
 	flag.StringVar(&cfg.Platform, "platform", "auto", "platform for chaos operations: auto, gke, baremetal")
 	flag.StringVar(&cfg.GCloudProject, "gcloud-project", "", "GCP project for node stop/start on GKE")
@@ -104,6 +116,9 @@ func FinalizeFlags() error {
 			cfg.ArtifactsDir = abs
 		}
 	}
+	if err := compileGracePatterns(); err != nil {
+		return err
+	}
 	if cfg.RunID == "" {
 		cfg.RunID = time.Now().UTC().Format("20060102-150405")
 	}
@@ -115,6 +130,32 @@ func FinalizeFlags() error {
 			}
 		}
 	}
+	return nil
+}
+
+// compileGracePatterns turns the grace wording flags into matchers. The two are
+// set together or not at all: a run that stated only how its server announces
+// entry would observe every failover entering grace and never leaving it, which
+// is the re-entry loop symptom the OBS cases exist to report honestly.
+func compileGracePatterns() error {
+	cfg.graceEnterRE, cfg.graceExitRE = nil, nil
+	if (cfg.GraceEnterPattern == "") != (cfg.GraceExitPattern == "") {
+		return fmt.Errorf("-grace-enter-pattern and -grace-exit-pattern are set together or not at all: " +
+			"stating one wording and leaving the other to a rule that does not cover this server " +
+			"would report every failover as a grace re-entry loop")
+	}
+	if cfg.GraceEnterPattern == "" {
+		return nil
+	}
+	enter, err := regexp.Compile(cfg.GraceEnterPattern)
+	if err != nil {
+		return fmt.Errorf("-grace-enter-pattern %q does not compile: %w", cfg.GraceEnterPattern, err)
+	}
+	exit, err := regexp.Compile(cfg.GraceExitPattern)
+	if err != nil {
+		return fmt.Errorf("-grace-exit-pattern %q does not compile: %w", cfg.GraceExitPattern, err)
+	}
+	cfg.graceEnterRE, cfg.graceExitRE = enter, exit
 	return nil
 }
 
