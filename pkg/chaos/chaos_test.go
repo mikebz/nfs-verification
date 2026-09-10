@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+
+	"github.com/mikebz/nfs-verification/pkg/framework"
 )
 
 // The pattern is what a SIGKILL is aimed at, on a node, in the host PID
@@ -85,5 +87,43 @@ func TestUsableAsPattern(t *testing.T) {
 		if usableAsPattern(name) {
 			t.Errorf("%q was accepted; killing everything matching it on a node takes the node out", name)
 		}
+	}
+}
+
+// TestProcessPatternValidatesTheFlag covers the override. A derived name is
+// checked, so a passed one has to be checked too: otherwise the guard that
+// stops a chaos case taking a node out of service is one flag away from being
+// bypassed, and the flag is the path a hurried operator reaches for.
+//
+// Steps:
+//  1. Pass a generic name through -server-process and assert it is refused.
+//  2. Assert the refusal explains the consequence rather than just saying no.
+//  3. Pass a real server name and assert it wins over the container command.
+func TestProcessPatternValidatesTheFlag(t *testing.T) {
+	target := Target{Pod: "nfs-server-0", Containers: []corev1.Container{
+		{Command: []string{"/usr/bin/ganesha.nfsd"}},
+	}}
+	original := framework.Cfg().ServerProcess
+	defer func() { framework.Cfg().ServerProcess = original }()
+
+	for _, generic := range []string{"sh", "bash", "env", "run"} {
+		framework.Cfg().ServerProcess = generic
+		got, err := ProcessPattern(target)
+		if err == nil {
+			t.Errorf("-server-process=%q was accepted and would be signalled as %q", generic, got)
+			continue
+		}
+		if !strings.Contains(err.Error(), "node") {
+			t.Errorf("the refusal of %q does not say what it would cost: %v", generic, err)
+		}
+	}
+
+	framework.Cfg().ServerProcess = "nfsd"
+	got, err := ProcessPattern(target)
+	if err != nil {
+		t.Fatalf("a real server name was refused: %v", err)
+	}
+	if got != "nfsd" {
+		t.Errorf("pattern is %q, want the flag to win over the container command", got)
 	}
 }

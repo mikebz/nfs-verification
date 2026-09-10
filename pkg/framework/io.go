@@ -44,16 +44,18 @@ type OpenWriter struct {
 // HoldOpenWrite writes payload at path and keeps the descriptor open until
 // Close. It returns once the write has been issued, so a reader started
 // afterwards is racing the protocol rather than racing the harness.
+//
+// The writer itself is scripts/hold-open-write.sh.
 func (f *Framework) HoldOpenWrite(ctx context.Context, pod, path, payload, id string) (*OpenWriter, error) {
-	if err := CheckScriptID(id); err != nil {
-		return nil, err
-	}
 	// The pod name is resolved once, here, so State and Close cannot address a
 	// different pod from the one holding the descriptor.
 	w := &OpenWriter{f: f, Pod: f.Name(pod), Path: path,
 		state: "/tmp/openw-" + id + ".state", run: "/tmp/openw-" + id + ".run"}
-	if _, err := f.C.MustSh(ctx, Namespace, w.Pod, "main",
-		openWriteScript(w.state, w.run, id, path, payload)); err != nil {
+	script, err := RunScript("hold-open-write.sh", id, path, payload, w.run, w.state)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := f.C.MustSh(ctx, Namespace, w.Pod, "main", script); err != nil {
 		return nil, err
 	}
 	if err := Poll(ctx, FastPoll, time.Minute, func(ctx context.Context) (bool, error) {
@@ -66,38 +68,6 @@ func (f *Framework) HoldOpenWrite(ctx context.Context, pod, path, payload, id st
 		return nil, fmt.Errorf("holding %s open in %s: %w", path, w.Pod, err)
 	}
 	return w, nil
-}
-
-// openWriteScript renders the background writer. State and run files live on
-// the pod's own filesystem, never on the share: a case that reads its own
-// progress through the filesystem under test cannot tell a harness stall from a
-// storage stall. The writer is detached with setsid so that it outlives the
-// exec that launched it, which is the whole point of the helper.
-func openWriteScript(state, run, id, path, payload string) string {
-	// Every value reaching the shell is quoted, the derived script path
-	// included. Ids are written by cases rather than by users, but a helper
-	// that is safe only because of who calls it is one refactor away from not
-	// being safe at all.
-	//
-	// The close poll asks for a fraction of a second and falls back to one, so
-	// that Close returns promptly where busybox was built with fractional
-	// sleep and still works where it was not. It cannot be shorter than the
-	// fallback on such an image, which is why Close waits rather than assuming.
-	return fmt.Sprintf(`
-set -u
-: > %[1]s
-touch %[2]s
-cat > %[3]s <<'OPENEOF'
-exec 8> "$1"
-printf '%%s' "$2" >&8
-echo open > "$4"
-while [ -f "$3" ]; do sleep 0.2 2>/dev/null || sleep 1; done
-exec 8>&-
-echo closed > "$4"
-OPENEOF
-setsid sh %[3]s %[4]s %[5]s %[2]s %[1]s >/dev/null 2>&1 </dev/null &
-echo launched
-`, shellQuote(state), shellQuote(run), shellQuote("/tmp/openw-"+id+".sh"), shellQuote(path), shellQuote(payload))
 }
 
 // State returns open, closed, or empty while the write is still in flight.

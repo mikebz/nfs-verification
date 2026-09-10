@@ -49,13 +49,16 @@ type LoadReport struct {
 // StartWriteLoad launches the workload and returns once its first write has
 // committed, so a fault injected afterwards lands on a workload that is
 // demonstrably running rather than one that may not have started.
+//
+// The workload itself is scripts/write-load.sh.
 func (f *Framework) StartWriteLoad(ctx context.Context, pod, dir, id string) (*WriteLoad, error) {
-	if err := CheckScriptID(id); err != nil {
-		return nil, err
-	}
 	w := &WriteLoad{f: f, Pod: f.Name(pod), Dir: dir,
 		log: "/tmp/load-" + id + ".log", run: "/tmp/load-" + id + ".run"}
-	if _, err := f.C.MustSh(ctx, Namespace, w.Pod, "main", writeLoadScript(w.log, w.run, id, dir)); err != nil {
+	script, err := RunScript("write-load.sh", id, dir, w.run, w.log)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := f.C.MustSh(ctx, Namespace, w.Pod, "main", script); err != nil {
 		return nil, err
 	}
 	if err := Poll(ctx, FastPoll, 2*time.Minute, func(ctx context.Context) (bool, error) {
@@ -68,42 +71,6 @@ func (f *Framework) StartWriteLoad(ctx context.Context, pod, dir, id string) (*W
 		return nil, fmt.Errorf("starting the workload in %s: %w", w.Pod, err)
 	}
 	return w, nil
-}
-
-// writeLoadScript renders the workload. Records go on the share and the log
-// goes on the pod's own filesystem: a workload that logged its own progress
-// through the filesystem under test would stall exactly when the case most
-// needs to know what happened.
-//
-// dd with conv=fsync is the portable way to insist the write is committed
-// before the attempt is called a success. Without it a logged success would
-// mean "the client accepted it", which is not what post-COMMIT durability
-// means and not what a failover case can assert on.
-func writeLoadScript(log, run, id, dir string) string {
-	// Every value reaching the shell is quoted, the derived script path
-	// included; CheckScriptID in the caller is what keeps that path inside
-	// /tmp, since quoting alone does not stop a path escape.
-	return fmt.Sprintf(`
-set -u
-: > %[1]s
-touch %[2]s
-mkdir -p %[4]s
-cat > %[3]s <<'LOADEOF'
-dir="$1"; log="$2"; run="$3"
-i=0
-while [ -f "$run" ]; do
-  i=$((i+1))
-  if dd if=/dev/zero of="$dir/rec-$i" bs=4096 count=1 conv=fsync >/dev/null 2>&1; then
-    echo "OK $i $(date +%%s)" >> "$log"
-  else
-    echo "ERR $i $(date +%%s)" >> "$log"
-  fi
-  sleep 1
-done
-LOADEOF
-setsid sh %[3]s %[4]s %[1]s %[2]s >/dev/null 2>&1 </dev/null &
-echo launched
-`, shellQuote(log), shellQuote(run), shellQuote("/tmp/load-"+id+".sh"), shellQuote(dir))
 }
 
 // Report reads the log as it stands. Safe to call while the workload runs,
@@ -215,25 +182,6 @@ func (r LoadReport) LongestGap() time.Duration {
 	return longest
 }
 
-// missingRecordsScript checks a whole set of records in one command. A
-// per-record round trip would take longer than the outage the case is
-// measuring, and would be running while the mount is still recovering.
-func missingRecordsScript(dir string, indices []int) string {
-	var list strings.Builder
-	for _, i := range indices {
-		fmt.Fprintf(&list, "%d\n", i)
-	}
-	return fmt.Sprintf(`
-set -u
-cat > /tmp/expect.txt <<'EXPECTEOF'
-%s
-EXPECTEOF
-while read -r i; do
-  [ -s %s/"rec-$i" ] || echo "$i"
-done < /tmp/expect.txt
-`, strings.TrimRight(list.String(), "\n"), shellQuote(dir))
-}
-
 // PodNow reads a pod's clock. Recovery is measured between a fault and a write
 // logged inside the pod, so both ends of the measurement are taken from the
 // same clock rather than trusting the workstation and the node to agree.
@@ -257,7 +205,16 @@ func (f *Framework) MissingRecords(ctx context.Context, pod, dir string, indices
 	if len(indices) == 0 {
 		return nil, nil
 	}
-	out, err := f.C.MustSh(ctx, Namespace, f.Name(pod), "main", missingRecordsScript(dir, indices))
+	args := make([]string, 0, len(indices)+1)
+	args = append(args, dir)
+	for _, i := range indices {
+		args = append(args, strconv.Itoa(i))
+	}
+	script, err := RunScript("missing-records.sh", "sweep", args...)
+	if err != nil {
+		return nil, err
+	}
+	out, err := f.C.MustSh(ctx, Namespace, f.Name(pod), "main", script)
 	if err != nil {
 		return nil, err
 	}

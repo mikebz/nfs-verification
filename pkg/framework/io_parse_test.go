@@ -175,23 +175,30 @@ func TestParseOwner(t *testing.T) {
 	}
 }
 
-// TestOpenWriteScriptHoldsAndCloses runs the rendered script under a real
-// shell. The script carries a heredoc, a detached background process and paths
-// that need quoting; a slip in any of them would otherwise surface only against
-// a cluster, inside a case that was testing something else entirely. The shell
-// here is the harness's, not a pod's, so this says the script is correct, not
-// that NFS behaves: what DATA-04 asserts still needs a cluster.
+// TestOpenWriteScriptHoldsAndCloses runs scripts/hold-open-write.sh under a
+// real shell, with the same arguments a pod would get. The script detaches
+// itself and holds a descriptor open, which is the whole of what DATA-04 needs
+// and is not something a Go test can fake. The shell here is the harness's, not
+// a pod's, so this says the script is correct, not that NFS behaves.
+//
+// Steps:
+//  1. Launch the writer against a path with a space in it, with a payload
+//     holding quotes and something that looks like a shell variable.
+//  2. Wait for it to report "open".
+//  3. Assert the payload is on disk whole, so nothing was expanded or cut.
+//  4. Remove the run file and wait for it to report "closed".
 func TestOpenWriteScriptHoldsAndCloses(t *testing.T) {
 	sh := lookOrSkip(t, "sh", "setsid")
 	dir := t.TempDir()
 	state := filepath.Join(dir, "openw.state")
 	run := filepath.Join(dir, "openw.run")
 	// A path with a space and a payload with a quote in it: both go through
-	// shellQuote, and both are what a careless format string gets wrong.
+	// shellQuote on the way to the pod, and both are what careless quoting
+	// mangles.
 	target := filepath.Join(dir, "a file.txt")
 	const payload = `payload with 'quotes' and $VARS`
 
-	cmd := exec.Command(sh, "-c", openWriteScript(state, run, "x", target, payload))
+	cmd := exec.Command(sh, materializeScript(t, "hold-open-write.sh"), target, payload, run, state)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("launching the writer: %v\n%s", err, out)
 	}
@@ -272,4 +279,15 @@ func TestCheckScriptID(t *testing.T) {
 			t.Errorf("%q was accepted, and it becomes a path inside the pod", id)
 		}
 	}
+}
+
+// materializeScript writes an embedded script to a temp file so a test can run
+// the same bytes the pod would run, with the same arguments.
+func materializeScript(t *testing.T, name string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(path, []byte(scriptBody(name)), 0o755); err != nil {
+		t.Fatalf("writing %s: %v", name, err)
+	}
+	return path
 }

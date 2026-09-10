@@ -39,6 +39,9 @@ func (f *Framework) CreatePVC(ctx context.Context, spec PVCSpec) (*corev1.Persis
 		return nil, fmt.Errorf("parsing size %q: %w", spec.Size, err)
 	}
 	sc := spec.StorageClass
+	if err := CheckObjectName("claim", f.Name(spec.Name)); err != nil {
+		return nil, err
+	}
 	pvc := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{Name: f.Name(spec.Name), Namespace: Namespace, Labels: f.Labels()},
 		Spec: corev1.PersistentVolumeClaimSpec{

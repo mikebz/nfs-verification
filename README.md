@@ -21,6 +21,7 @@ and the first fault injection. The remaining cases land in the steps listed in
 | `pkg/env` | The environment record written to `artifacts/<run-id>/environment.json` |
 | `pkg/framework` | Clients, per-case fixture, pods and PVCs from embedded manifests, exec, locks, the privileged node agent, artifact collection |
 | `pkg/framework/manifests` | The YAML the suite applies: the client pod and the node agent DaemonSet |
+| `pkg/framework/scripts` | The shell the suite runs inside pods, as scripts rather than as Go strings |
 | `pkg/chaos` | The fault operations the CHAOS cases inject |
 | `pkg/preflight` | Section 0 checks and all discovery |
 | `test/e2e` | The cases; each names its plan ID in the comment above it |

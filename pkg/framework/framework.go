@@ -87,6 +87,16 @@ func (f *Framework) Labels() map[string]string {
 // Name prefixes a logical object name with the case and run, so that two cases
 // in one namespace cannot collide and a leftover object says where it came
 // from. It is idempotent, so passing an already-prefixed name is harmless.
+//
+// The logical name is lowercased, because Kubernetes object names are RFC 1123
+// and a capital letter is rejected at creation. That normalization has a
+// consequence worth stating: two logical names differing only in case are the
+// same object. A case comparing two clients must not name them "rootA" and
+// "roota", or it will compare a client with itself and pass vacuously.
+//
+// Lowercasing is all this does. Anything else RFC 1123 forbids is caught by
+// CheckObjectName where the name becomes an object, rather than being silently
+// repaired into a name the caller did not ask for.
 func (f *Framework) Name(logical string) string {
 	logical = strings.ToLower(logical)
 	prefix := f.prefix()

@@ -278,7 +278,8 @@ const appendCaveat = "\n\nNote before filing: NFSv4.1 has no append operation. A
 //     and truncate the shared file.
 //  2. Have all four append fifty short records at the same time, each through
 //     one descriptor held open for its whole loop.
-//  3. Read the file from a pod that did not write it.
+//  3. Read the file from a pod that never wrote to it, on a node no appender
+//     used where the cluster has one to spare.
 //  4. Assert every line is a whole record, and that no record appears twice.
 //     A torn record is corruption under any reading of the protocol.
 //  5. Assert the line count is exactly what was written. This is the flagged
@@ -308,6 +309,17 @@ func TestConcurrentAppendToOneFile(t *testing.T) {
 		pods[i] = fmt.Sprintf("appender%d", i)
 		f.MustPod(ctx, toolsPod(pods[i], pvc.Name, nodes[i%len(nodes)]))
 	}
+	// A reader that never wrote, and where there is a spare node, one that no
+	// appender ran on. Reading the file back from a pod that just appended to
+	// it can be served out of that client's own cache without the server ever
+	// being asked, which would make the count below say nothing about what the
+	// server actually holds.
+	readerNode := nodes[len(nodes)-1]
+	if len(nodes) > appenders {
+		readerNode = nodes[appenders%len(nodes)]
+	}
+	const reader = "reader"
+	f.MustPod(ctx, toolsPod(reader, pvc.Name, readerNode))
 
 	path := fileIn("data02.log")
 	f.MustShf(ctx, pods[0], ": > %s", framework.Quote(path))
@@ -337,8 +349,7 @@ func TestConcurrentAppendToOneFile(t *testing.T) {
 		}
 	}
 
-	// Read from a pod that did not write, so the comparison crosses the server.
-	reader := pods[appenders-1]
+	// Read from the pod that never wrote, so the read crosses the server.
 	out := f.MustShf(ctx, reader, "cat %s", framework.Quote(path))
 	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
 	if out == "" {

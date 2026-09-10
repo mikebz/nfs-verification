@@ -65,7 +65,17 @@ func ServerTarget(ctx context.Context, f *framework.Framework) (Target, error) {
 // node. The flag wins; otherwise it comes from the container's own command,
 // which is the only place the cluster states it.
 func ProcessPattern(t Target) (string, error) {
+	// The flag is checked exactly as a derived name is. An operator who passes
+	// -server-process=sh means a server called sh, but what the node gets is a
+	// SIGKILL to every shell on it, and the guard below is the only thing
+	// standing between a chaos case and taking the node out of service. There
+	// is no NFS server this rejects, so nothing is lost by refusing.
 	if p := framework.Cfg().ServerProcess; p != "" {
+		if !usableAsPattern(p) {
+			return "", fmt.Errorf("-server-process=%q is too generic to signal on: it would match processes "+
+				"that have nothing to do with NFS, and killing those on a node takes the node out of service. "+
+				"Pass the name the server process actually runs under", p)
+		}
 		return p, nil
 	}
 	for _, c := range t.Containers {

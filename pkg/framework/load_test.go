@@ -103,7 +103,7 @@ func TestWriteLoadScriptRuns(t *testing.T) {
 	// goes through shell quoting on the way to the pod.
 	dir := filepath.Join(base, "records here")
 
-	cmd := exec.Command(sh, "-c", writeLoadScript(log, run, "unit", dir))
+	cmd := exec.Command(sh, materializeScript(t, "write-load.sh"), dir, run, log)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("launching the workload: %v\n%s", err, out)
 	}
@@ -168,7 +168,7 @@ func TestMissingRecordsScript(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "rec-3"), nil, 0o644); err != nil {
 		t.Fatalf("writing an empty record: %v", err)
 	}
-	cmd := exec.Command(sh, "-c", missingRecordsScript(dir, []int{1, 2, 3}))
+	cmd := exec.Command(sh, materializeScript(t, "missing-records.sh"), dir, "1", "2", "3")
 	out, err := cmd.Output()
 	if err != nil {
 		t.Fatalf("running the record sweep: %v", err)
