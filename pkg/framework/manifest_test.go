@@ -12,6 +12,17 @@ import (
 // quoting would only surface against a cluster. These tests render and decode
 // them without one.
 
+// TestClientPodManifestRenders covers the client pod template: the properties
+// that make a case's objects traceable, and the two that a cluster would
+// otherwise punish silently, the node selector and the grace period.
+//
+// Steps:
+//  1. Render a pinned pod with two mounts, one claim already prefixed.
+//  2. Check the name, namespace and labels carry the case.
+//  3. Check pinning went through nodeSelector, never nodeName.
+//  4. Check both claims resolved to the same object either way.
+//  5. Check the mounts, the default command and the grace period survived
+//     decoding.
 func TestClientPodManifestRenders(t *testing.T) {
 	f := &Framework{CaseID: "DATA-05"}
 	pod, err := f.PodBuilder(PodSpec{
@@ -70,6 +81,13 @@ func TestClientPodManifestRenders(t *testing.T) {
 	}
 }
 
+// TestClientPodManifestWithNoMounts checks that the optional parts of the
+// template render to nothing when they are absent, rather than to empty
+// structures a cluster would reject.
+//
+// Steps:
+//  1. Render a pod with no mounts and no node.
+//  2. Assert it has no volumes, no volume mounts and no node selector.
 func TestClientPodManifestWithNoMounts(t *testing.T) {
 	f := &Framework{CaseID: "PROV-01"}
 	pod, err := f.PodBuilder(PodSpec{Name: "writer"})
@@ -84,6 +102,15 @@ func TestClientPodManifestWithNoMounts(t *testing.T) {
 	}
 }
 
+// TestNodeAgentManifestRenders checks the one privileged component in the
+// suite. Every property here is what makes node-level assertions possible at
+// all: lose one and the agent starts up and sees nothing.
+//
+// Steps:
+//  1. Render the DaemonSet.
+//  2. Assert the host PID, IPC and network namespaces survived decoding.
+//  3. Assert it tolerates every taint, so it can inspect a drained node.
+//  4. Assert the container is privileged and mounts the host root.
 func TestNodeAgentManifestRenders(t *testing.T) {
 	var ds appsv1.DaemonSet
 	err := render("node-agent-daemonset.yaml", map[string]string{
@@ -108,10 +135,76 @@ func TestNodeAgentManifestRenders(t *testing.T) {
 	}
 }
 
+// TestNameIsIdempotent covers the naming rule every helper relies on: a caller
+// holding a real object name can pass it where a logical one is expected and
+// address the same object.
+//
+// Steps:
+//  1. Prefix a logical name, then prefix the result again.
+//  2. Assert the second pass changed nothing.
 func TestNameIsIdempotent(t *testing.T) {
 	f := &Framework{CaseID: "PROV-01"}
 	once := f.Name("prov01")
 	if twice := f.Name(once); twice != once {
 		t.Errorf("prefixing twice changed the name: %q then %q", once, twice)
+	}
+}
+
+// TestClientPodManifestIdentity checks that a pinned uid and gid reach the pod
+// spec. Without them SEC-01 would silently run as root and assert nothing.
+//
+// Steps:
+//  1. Render a pod with a uid and a gid.
+//  2. Assert both arrived in the pod's security context.
+func TestClientPodManifestIdentity(t *testing.T) {
+	f := &Framework{CaseID: "SEC-01"}
+	pod, err := f.PodBuilder(PodSpec{
+		Name:      "writer",
+		Mounts:    []MountSpec{{Claim: "share", Path: "/mnt/share"}},
+		RunAsUser: Int64(1234), RunAsGroup: Int64(5678),
+	})
+	if err != nil {
+		t.Fatalf("rendering a pod with an identity: %v", err)
+	}
+	sc := pod.Spec.SecurityContext
+	if sc == nil || sc.RunAsUser == nil || sc.RunAsGroup == nil {
+		t.Fatalf("identity did not survive decoding: %+v", sc)
+	}
+	if *sc.RunAsUser != 1234 || *sc.RunAsGroup != 5678 {
+		t.Errorf("pod runs as %d:%d, want 1234:5678", *sc.RunAsUser, *sc.RunAsGroup)
+	}
+}
+
+// TestClientPodManifestIdentityIsOptional covers the difference between an
+// identity of zero and no identity at all. uid 0 is a value: a case that pins
+// root must render a security context, and a case that pins nothing must not.
+//
+// Steps:
+//  1. Render a pod pinned to uid 0 and assert it was not dropped as unset.
+//  2. Assert the unset gid did not render anyway.
+//  3. Render a pod with no identity and assert it got none.
+func TestClientPodManifestIdentityIsOptional(t *testing.T) {
+	f := &Framework{CaseID: "DATA-01"}
+	// uid 0 is a value, not an absence: a case that pins root must render a
+	// security context, and a case that pins nothing must not.
+	pod, err := f.PodBuilder(PodSpec{Name: "writer", RunAsUser: Int64(0)})
+	if err != nil {
+		t.Fatalf("rendering a pod pinned to root: %v", err)
+	}
+	if pod.Spec.SecurityContext == nil || pod.Spec.SecurityContext.RunAsUser == nil ||
+		*pod.Spec.SecurityContext.RunAsUser != 0 {
+		t.Errorf("uid 0 was dropped as if it were unset: %+v", pod.Spec.SecurityContext)
+	}
+	if pod.Spec.SecurityContext.RunAsGroup != nil {
+		t.Errorf("an unset gid rendered anyway: %+v", pod.Spec.SecurityContext)
+	}
+
+	plain, err := f.PodBuilder(PodSpec{Name: "writer"})
+	if err != nil {
+		t.Fatalf("rendering a pod with no identity: %v", err)
+	}
+	if plain.Spec.SecurityContext != nil && (plain.Spec.SecurityContext.RunAsUser != nil ||
+		plain.Spec.SecurityContext.RunAsGroup != nil) {
+		t.Errorf("a pod that pinned no identity got one: %+v", plain.Spec.SecurityContext)
 	}
 }

@@ -15,6 +15,18 @@ spec:
   # Test pods are disposable; a long grace period only makes the cases that
   # delete them slower to observe.
   terminationGracePeriodSeconds: 5
+  {{- if .Security }}
+  # The identity cases pin a uid so that ownership written by one pod can be
+  # read back by another. A v4 client that maps local ids to nobody shows up
+  # here and nowhere else.
+  securityContext:
+    {{- if .Security.SetUser }}
+    runAsUser: {{ .Security.User }}
+    {{- end }}
+    {{- if .Security.SetGroup }}
+    runAsGroup: {{ .Security.Group }}
+    {{- end }}
+  {{- end }}
   {{- if .Node }}
   # Cross-node cases pin explicitly rather than hoping the scheduler spreads
   # them, so that a failure names the node it happened on. This is a selector

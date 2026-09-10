@@ -33,6 +33,17 @@ type PodSpec struct {
 	// scheduler spreads them.
 	Node   string
 	Labels map[string]string
+	// RunAsUser and RunAsGroup set the pod's identity. The identity cases need
+	// a pod that is not root, because the property under test is whether the
+	// uid a pod writes as is the uid another pod reads back.
+	//
+	// fsGroup and supplementary groups are deliberately absent. fsGroup makes
+	// kubelet walk the volume and chown every file in it on each mount, which
+	// on a share of any size is slow enough to dominate a case and destructive
+	// enough to erase the ownership the identity cases are asserting on. It
+	// arrives with SEC-03, which is the case that means to measure that.
+	RunAsUser  *int64
+	RunAsGroup *int64
 }
 
 // podTemplateData is what manifests/client-pod.yaml is rendered against.
@@ -44,6 +55,18 @@ type podTemplateData struct {
 	Command   []string
 	Labels    map[string]string
 	Mounts    []podMountData
+	// Security is nil unless the case pins an identity, so the ordinary pod
+	// renders exactly as it did before the identity cases existed.
+	Security *podSecurityData
+}
+
+// podSecurityData carries the identity fields as values rather than pointers,
+// because a template cannot dereference one.
+type podSecurityData struct {
+	SetUser  bool
+	User     int64
+	SetGroup bool
+	Group    int64
 }
 
 type podMountData struct {
@@ -72,6 +95,15 @@ func (f *Framework) PodBuilder(spec PodSpec) (*corev1.Pod, error) {
 	}
 	for k, v := range spec.Labels {
 		data.Labels[k] = v
+	}
+	if spec.RunAsUser != nil || spec.RunAsGroup != nil {
+		data.Security = &podSecurityData{}
+		if spec.RunAsUser != nil {
+			data.Security.SetUser, data.Security.User = true, *spec.RunAsUser
+		}
+		if spec.RunAsGroup != nil {
+			data.Security.SetGroup, data.Security.Group = true, *spec.RunAsGroup
+		}
 	}
 	for i, m := range spec.Mounts {
 		data.Mounts = append(data.Mounts, podMountData{
@@ -253,3 +285,21 @@ func containerStateString(s corev1.ContainerState) string {
 }
 
 func ptr[T any](v T) *T { return &v }
+
+// Int64 returns a pointer to v, for the optional identity fields on PodSpec.
+func Int64(v int64) *int64 { return &v }
+
+// PodRestarts returns how many times a pod's container has restarted. A case
+// that asserts "no unmount, no restart" needs the number before and after, not
+// just the pod still being Ready afterwards.
+func (f *Framework) PodRestarts(ctx context.Context, name string) (int32, error) {
+	pod, err := f.C.Kube.CoreV1().Pods(Namespace).Get(ctx, f.Name(name), metav1.GetOptions{})
+	if err != nil {
+		return 0, err
+	}
+	var n int32
+	for _, cs := range pod.Status.ContainerStatuses {
+		n += cs.RestartCount
+	}
+	return n, nil
+}

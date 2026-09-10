@@ -8,6 +8,13 @@ import (
 // The SLO table is the one place where a wrong number silently invalidates
 // every chaos result, so it carries its own tests.
 
+// TestRecoveryTargetsPerProfile covers the ratified targets for each event
+// under each profile. Every chaos case reads its bound from here, so an error
+// in this table is an error in every timing assertion in the suite.
+//
+// Steps:
+//  1. Look up each event under the tuned profile against the ratified values.
+//  2. Do the same under the default profile, where the target is grace + 30s.
 func TestRecoveryTargetsPerProfile(t *testing.T) {
 	cases := []struct {
 		profile Profile
@@ -33,6 +40,13 @@ func TestRecoveryTargetsPerProfile(t *testing.T) {
 	}
 }
 
+// TestDefaultProfileTargetExceedsGrace covers the reason the default profile
+// has its own arithmetic: a 60s restart target under a 90s grace period is
+// unachievable, so the suite would fail its own SLO with no defect present.
+//
+// Steps:
+//  1. Take the restart target under the default profile.
+//  2. Assert it sits above that profile's grace period.
 func TestDefaultProfileTargetExceedsGrace(t *testing.T) {
 	got, err := Recovery(Default, EventServerRestart)
 	if err != nil {
@@ -43,6 +57,13 @@ func TestDefaultProfileTargetExceedsGrace(t *testing.T) {
 	}
 }
 
+// TestMatchRejectsOffProfileValues covers profile pinning. A third lease and
+// grace combination is refused rather than accepted, because measuring against
+// an unknown base silently invalidates every timing assertion in the suite.
+//
+// Steps:
+//  1. Match both accepted combinations and check the names.
+//  2. Offer off-profile combinations and assert none matches.
 func TestMatchRejectsOffProfileValues(t *testing.T) {
 	if _, ok := Match(20*time.Second, 30*time.Second); !ok {
 		t.Error("the tuned profile should match its own values")
@@ -57,12 +78,25 @@ func TestMatchRejectsOffProfileValues(t *testing.T) {
 	}
 }
 
+// TestUnknownProfileIsAnError checks that a profile nobody defined yields an
+// error rather than a zero duration, which would read as an instant SLO that
+// nothing can meet.
+//
+// Steps:
+//  1. Ask for a recovery target under a profile that does not exist.
+//  2. Assert it is an error.
 func TestUnknownProfileIsAnError(t *testing.T) {
 	if _, err := Recovery(Profile{Name: "invented"}, EventServerRestart); err == nil {
 		t.Error("an unknown profile should not yield a target")
 	}
 }
 
+// TestGraceExitBoundIsTwoLeases covers the convention that grace runs about
+// two lease periods, which is the bound the grace cases hold a server to.
+//
+// Steps:
+//  1. Take the grace exit bound for each profile.
+//  2. Assert each is twice that profile's lease.
 func TestGraceExitBoundIsTwoLeases(t *testing.T) {
 	if got, want := GraceExitBound(Tuned), 40*time.Second; got != want {
 		t.Errorf("got %s, want %s", got, want)

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -83,4 +84,22 @@ func exitCodeOf(err error) int {
 		}
 	}
 	return -1
+}
+
+// scriptID matches an identifier that is safe to build a path and a filename
+// from: no separators, no shell metacharacters, no leading dot.
+var scriptID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+
+// CheckScriptID rejects an identifier a helper would interpolate into a path
+// inside a pod. Quoting alone is not enough: a quoted "../../etc/x" is still a
+// path escape, and the helpers here build filenames under /tmp from these.
+//
+// Cases pass literals, so this never fires in practice. It exists because the
+// safety of these helpers should not rest on who happens to call them today.
+func CheckScriptID(id string) error {
+	if !scriptID.MatchString(id) {
+		return fmt.Errorf("%q is not usable as a script id: it must start with a letter or digit and hold "+
+			"only letters, digits, dot, dash and underscore, since it becomes a filename inside the pod", id)
+	}
+	return nil
 }

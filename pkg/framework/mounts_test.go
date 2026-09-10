@@ -8,6 +8,13 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
+// TestParseMounts covers the /proc/mounts reader preflight uses to check that
+// the mount is nfs4 at version 4.1 and hard. It reads what the driver actually
+// set, not what the StorageClass asked for.
+//
+// Steps:
+//  1. Parse a mount table holding an NFS line among others.
+//  2. Check the fields and the option lookups the checks depend on.
 func TestParseMounts(t *testing.T) {
 	const procMounts = `
 proc /proc proc rw,nosuid,nodev,noexec,relatime 0 0
@@ -34,6 +41,13 @@ proc /proc proc rw,nosuid,nodev,noexec,relatime 0 0
 
 // The preflight cache is keyed by kubeconfig context, and context names are not
 // constrained to anything a filename likes.
+// TestPreflightCachePath covers the cache filename. It is keyed by kubeconfig
+// context, so two clusters must never share a file: a preflight result reused
+// against the wrong cluster describes a cluster nobody is testing.
+//
+// Steps:
+//  1. Build paths for contexts with characters a filename cannot hold.
+//  2. Assert each is sanitised, and that distinct contexts stay distinct.
 func TestPreflightCachePath(t *testing.T) {
 	cases := map[string]string{
 		"gke-w1":                            "artifacts/preflight-gke-w1.json",
@@ -52,6 +66,14 @@ func TestPreflightCachePath(t *testing.T) {
 // process starts at the repository root (cmd/preflight) or in a test package
 // (go test), or the preflight cache is written to one place and read from
 // another.
+// TestArtifactsDirIsAnchored covers where artifacts land. go test runs in the
+// package directory and cmd/preflight runs wherever the operator is, so a
+// relative path would name two different directories and the preflight cache
+// would never be found.
+//
+// Steps:
+//  1. Set a relative artifacts directory and finalize the flags.
+//  2. Assert it resolved against the repository root.
 func TestArtifactsDirIsAnchored(t *testing.T) {
 	original := cfg.ArtifactsDir
 	defer func() { cfg.ArtifactsDir = original }()
@@ -78,6 +100,12 @@ func TestArtifactsDirIsAnchored(t *testing.T) {
 }
 
 // An absolute path is left alone.
+// TestArtifactsDirAbsoluteIsKept is the other half: an operator who names an
+// absolute directory must get that directory.
+//
+// Steps:
+//  1. Set an absolute artifacts directory and finalize the flags.
+//  2. Assert it was left alone.
 func TestArtifactsDirAbsoluteIsKept(t *testing.T) {
 	original := cfg.ArtifactsDir
 	defer func() { cfg.ArtifactsDir = original }()
@@ -94,6 +122,14 @@ func TestArtifactsDirAbsoluteIsKept(t *testing.T) {
 
 // Teardown must not delete a claim a surviving pod still mounts: destroying an
 // export under a live hard mount is what takes a node out of service.
+// TestClaimsHeldByStuckPods covers the teardown rule from F-001. When a pod
+// will not terminate, the node has stopped answering, and deleting a claim it
+// still mounts destroys an export under a live hard mount. Leaking a claim is
+// recoverable; wedging a node is not.
+//
+// Steps:
+//  1. Take a set of stuck pods with claims among their volumes.
+//  2. Assert every claim they mount is reported as held.
 func TestClaimsHeldByStuckPods(t *testing.T) {
 	pod := func(name, node string, claims ...string) corev1.Pod {
 		p := corev1.Pod{}

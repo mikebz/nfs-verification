@@ -8,6 +8,139 @@ New entries go at the top.
 
 ---
 
+## F-003: A broken `umount.nfs` wrapper on GKE wedges every terminating pod
+
+**Found:** 2026-09-10, GKE worker nodes, reviewing
+[PR #3](https://github.com/mikebz/nfs-verification/pull/3) against a live
+cluster.
+
+**Severity:** high, and it is not the harness. Every pod holding an NFS mount
+stays `Terminating` forever, on any workload, whether or not this suite is
+running.
+
+### What happened
+
+Pods with the share mounted would not go away. Kubelet's volume teardown failed
+with:
+
+```
+mount.nfs.real: no mount point provided (exit status 32)
+```
+
+### Why
+
+GKE wraps `/sbin/mount.nfs` with `/home/kubernetes/bin/mount.nfs`, a script that
+arranges a private mount namespace so an in-cluster Service DNS name resolves.
+`/sbin/umount.nfs` is a symlink to the same file, because the real binary is
+multi-call: it decides whether it is mounting or unmounting from `argv[0]`.
+
+The wrapper ended in:
+
+```sh
+exec /home/kubernetes/bin/mount.nfs.real "$@"
+```
+
+which sets `argv[0]` to `mount.nfs.real`. The multi-call binary therefore chose
+mount mode no matter how it was invoked, so `umount.nfs <mountpoint>` was read
+as a mount with no mount point, and failed. Nothing on the unmount path could
+ever succeed.
+
+### The fix applied to the nodes
+
+Handle the unmount case before the wrapper's mount logic, preserving `argv[0]`
+with `exec -a`:
+
+```sh
+if [[ "$(basename "$0")" == *"umount"* ]]; then
+  out=$(exec -a "$0" /home/kubernetes/bin/mount.nfs.real "$@" 2>&1)
+  status=$?
+  if [[ $status -eq 0 || $status -eq 16 ]] || [[ "$out" == *"not mounted"* ]]; then
+    exit 0
+  fi
+  echo "$out" >&2
+  exit $status
+fi
+```
+
+Exit status 16 and "not mounted" are treated as success on purpose: an unmount
+of something already gone is the outcome the caller wanted. With this in place
+kubelet unmounts finished in under two seconds.
+
+### What it means for the suite
+
+Nothing in this repository changed. The value of the finding is that the
+symptom is indistinguishable, from inside a case, from the failures this plan
+is actually hunting:
+
+- Pods stuck `Terminating` are what teardown treats as "the node has stopped
+  answering" (F-001), so a run against an affected cluster reports leaked
+  claims and stuck pods in every case, for a reason that has nothing to do with
+  NFS.
+- It arrives as a storage-shaped failure and routes to the storage owner, when
+  the defect is in a node image's wrapper script.
+
+Anyone seeing `Terminating` pods across the board should check
+`/sbin/umount.nfs` on the node before suspecting the server or the driver. The
+tell is that unmount fails while everything else about the mount works.
+
+### Open
+
+Preflight could catch this in seconds: the node agent already runs in the host
+namespaces, so it could unmount a path that is not mounted and check that the
+failure is "not mounted" rather than "no mount point provided". That would turn
+a day of attribution into a preflight message. Not built yet, and it would be a
+recorded warning rather than a gate, since the wrapper is specific to one node
+image and the plan admits no distro-specific checks.
+
+---
+
+## F-004: `allowVolumeExpansion` is a claim, not a capability
+
+**Found:** 2026-09-10, cluster `gke-w2`, running PROV-04 while reviewing
+[PR #3](https://github.com/mikebz/nfs-verification/pull/3).
+
+**Severity:** low for the cluster, medium for the suite. It makes one case fail
+for a reason that is not obvious from its failure.
+
+### What happened
+
+The StorageClass under test sets `allowVolumeExpansion: true`, so preflight
+recorded `canExpand` and PROV-04 took the expansion path. The resize request was
+accepted by the API and then nothing happened. The case failed with:
+
+```
+claim capacity did not reach 2Gi: timed out after 5m0s
+```
+
+### Why
+
+`allowVolumeExpansion` on a StorageClass is what the class asserts, not what its
+provisioner can do. The in-cluster `nfs-server-provisioner` behind that class
+performs no expansion, and no external-resizer sidecar was running to act on the
+request, so the claim sat with the larger request and the smaller status
+forever. No resize condition was ever posted, because nothing was resizing.
+
+### What changed
+
+`WaitPVCCapacity`'s timeout message now distinguishes the three answers. A
+resize condition present means expansion is in progress or is waiting on
+something (a pod restart, for instance). **No condition at all** means nothing
+acted on the request, and the message now says so and names the two things to
+check: whether the provisioner supports expansion, and whether an
+external-resizer sidecar is running.
+
+### What it says about capability discovery
+
+`Caps.CanExpand` is optimistic by construction, because the only thing the
+Kubernetes API offers is the class's own assertion. Every other capability in
+the suite is probed; this one is declared, and it is the one that lied. The case
+still fails rather than skipping, which is right: a class advertising a
+capability its provisioner lacks is a real deployment defect, and a claim
+accepted for a resize that never happens is a trap for any workload, not only
+this suite. What the case owed was a failure message that says where to look.
+
+---
+
 ## F-002: 2GB worker nodes cannot host the suite
 
 **Found:** 2026-09-10, cluster `gke-w1`, `e2-small` node pool (2GB RAM).
