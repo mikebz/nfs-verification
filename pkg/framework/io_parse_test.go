@@ -130,32 +130,45 @@ some-server:/exports/pvc-1  1048576   10240   1038336       1% /mnt/share`
 	}
 }
 
-// TestParseOwner covers the ownership reader, including the unmapped case the
-// identity cases exist to catch: busybox prints the numeric id in place of a
-// name it cannot resolve, and that is what "mapped to nobody" looks like.
+// TestParseOwner covers the ownership reader, including the two cases that
+// would otherwise be found on a cluster: an unmapped owner, which is what the
+// identity cases exist to catch and which busybox prints as a numeric id in
+// place of the name, and a name with a space in it, which is ordinary wherever
+// names resolve through a directory service.
 //
 // Steps:
 //  1. Parse a resolved owner and check all four fields.
-//  2. Parse an unmapped owner and check it renders readably in a failure.
-//  3. Reject short, empty and non-numeric output.
+//  2. Parse an owner whose user and group names hold spaces.
+//  3. Parse an unmapped owner and check it renders readably in a failure.
+//  4. Reject short, empty, non-numeric and undelimited output.
 func TestParseOwner(t *testing.T) {
-	got, err := parseOwner("1234 1234 nfsuser nfsgroup\n")
+	got, err := parseOwner("1234|1234|nfsuser|nfsgroup\n")
 	if err != nil {
 		t.Fatalf("parsing stat output: %v", err)
 	}
 	if got.UID != 1234 || got.GID != 1234 || got.User != "nfsuser" || got.Group != "nfsgroup" {
 		t.Errorf("parsed %+v", got)
 	}
+	// Names with spaces in them. An environment resolving through LDAP, Active
+	// Directory or an NSS module hands these back routinely, and splitting on
+	// whitespace would turn correct ownership into a parse failure.
+	got, err = parseOwner("1234|1234|Domain Admin|Domain Users")
+	if err != nil {
+		t.Fatalf("parsing an owner whose names hold spaces: %v", err)
+	}
+	if got.User != "Domain Admin" || got.Group != "Domain Users" {
+		t.Errorf("parsed %+v: a name with a space in it was cut", got)
+	}
 	// The unmapped case, which is what the identity case is hunting: busybox
 	// prints the numeric id in place of a name it cannot resolve.
-	got, err = parseOwner("65534 65534 65534 65534")
+	got, err = parseOwner("65534|65534|65534|65534")
 	if err != nil {
 		t.Fatalf("parsing an unmapped owner: %v", err)
 	}
 	if got.UID != 65534 || got.String() != "65534(65534):65534(65534)" {
 		t.Errorf("parsed %+v, rendered %q", got, got.String())
 	}
-	for _, bad := range []string{"", "1234 1234", "x y u g", "1234 y u g"} {
+	for _, bad := range []string{"", "1234|1234", "x|y|u|g", "1234|y|u|g", "1234 1234 u g"} {
 		if _, err := parseOwner(bad); err == nil {
 			t.Errorf("parsed %q without error", bad)
 		}

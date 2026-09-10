@@ -45,7 +45,7 @@ exec 9>>"$1"
 # lives in the caller, which polls the state file.
 if flock -x 9; then
   echo held > "$2"
-  while [ -f "$3" ]; do sleep 1; done
+  while [ -f "$3" ]; do sleep 0.2 2>/dev/null || sleep 1; done
   echo released > "$2"
 else
   echo failed > "$2"

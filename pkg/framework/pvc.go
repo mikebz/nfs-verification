@@ -8,9 +8,9 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/util/retry"
 )
 
 // PVCSpec describes a claim the harness creates.
@@ -178,7 +178,11 @@ func (f *Framework) ExpandPVC(ctx context.Context, name, size string) error {
 	claims := f.C.Kube.CoreV1().PersistentVolumeClaims(Namespace)
 	// Read-modify-write, retried on conflict: the resize controller writes to
 	// the same object, so a stale read here is ordinary rather than a defect.
-	return retryOnConflict(func() error {
+	// client-go's own retry backs off between attempts; a tight loop can spend
+	// every attempt inside the window where the resource version has not
+	// changed yet, and report a conflict that a moment's wait would have
+	// resolved.
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		pvc, err := claims.Get(ctx, f.Name(name), metav1.GetOptions{})
 		if err != nil {
 			return err
@@ -218,26 +222,23 @@ func (f *Framework) WaitPVCCapacity(ctx context.Context, name, size string, time
 // describeResizeConditions names the resize condition the driver left behind,
 // which is the difference between "expansion is still running" and "expansion
 // needs a pod restart the case is not doing".
+//
+// No condition at all is the third answer, and the one that costs the most time
+// to work out from the outside: the claim was accepted for resize and nothing
+// ever picked it up. A StorageClass may advertise allowVolumeExpansion whether
+// or not the provisioner behind it can perform one, so this says where to look
+// rather than leaving a bare timeout.
 func describeResizeConditions(pvc *corev1.PersistentVolumeClaim) string {
 	var parts []string
 	for _, c := range pvc.Status.Conditions {
 		parts = append(parts, fmt.Sprintf("%s=%s(%s)", c.Type, c.Status, c.Message))
 	}
 	if len(parts) == 0 {
-		return ""
+		return " [no resize condition was ever posted on the claim: nothing acted on the request. " +
+			"The StorageClass advertises allowVolumeExpansion, so check whether its provisioner supports " +
+			"expansion at all and whether an external-resizer sidecar is running alongside the CSI driver]"
 	}
 	return " [" + strings.Join(parts, " ") + "]"
-}
-
-// retryOnConflict retries a read-modify-write a few times on a conflict.
-func retryOnConflict(fn func() error) error {
-	var err error
-	for i := 0; i < 5; i++ {
-		if err = fn(); !apierrors.IsConflict(err) {
-			return err
-		}
-	}
-	return err
 }
 
 // GetPVC returns a claim by its logical name.

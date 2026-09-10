@@ -36,6 +36,12 @@ type PodSpec struct {
 	// RunAsUser and RunAsGroup set the pod's identity. The identity cases need
 	// a pod that is not root, because the property under test is whether the
 	// uid a pod writes as is the uid another pod reads back.
+	//
+	// fsGroup and supplementary groups are deliberately absent. fsGroup makes
+	// kubelet walk the volume and chown every file in it on each mount, which
+	// on a share of any size is slow enough to dominate a case and destructive
+	// enough to erase the ownership the identity cases are asserting on. It
+	// arrives with SEC-03, which is the case that means to measure that.
 	RunAsUser  *int64
 	RunAsGroup *int64
 }

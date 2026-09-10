@@ -78,6 +78,11 @@ func openWriteScript(state, run, id, path, payload string) string {
 	// included. Ids are written by cases rather than by users, but a helper
 	// that is safe only because of who calls it is one refactor away from not
 	// being safe at all.
+	//
+	// The close poll asks for a fraction of a second and falls back to one, so
+	// that Close returns promptly where busybox was built with fractional
+	// sleep and still works where it was not. It cannot be shorter than the
+	// fallback on such an image, which is why Close waits rather than assuming.
 	return fmt.Sprintf(`
 set -u
 : > %[1]s
@@ -86,7 +91,7 @@ cat > %[3]s <<'OPENEOF'
 exec 8> "$1"
 printf '%%s' "$2" >&8
 echo open > "$4"
-while [ -f "$3" ]; do sleep 1; done
+while [ -f "$3" ]; do sleep 0.2 2>/dev/null || sleep 1; done
 exec 8>&-
 echo closed > "$4"
 OPENEOF
@@ -134,23 +139,28 @@ func (o Owner) String() string { return fmt.Sprintf("%d(%s):%d(%s)", o.UID, o.Us
 // a client-side mapping problem, not a server-side one.
 func (f *Framework) StatOwner(ctx context.Context, pod, path string) (Owner, error) {
 	out, err := f.C.MustSh(ctx, Namespace, f.Name(pod), "main",
-		fmt.Sprintf("stat -c '%%u %%g %%U %%G' %s", shellQuote(path)))
+		fmt.Sprintf("stat -c '%%u|%%g|%%U|%%G' %s", shellQuote(path)))
 	if err != nil {
 		return Owner{}, err
 	}
 	return parseOwner(out)
 }
 
+// parseOwner reads the delimited form of `stat -c '%u|%g|%U|%G'`. The delimiter
+// is not decoration: an environment resolving names through LDAP, Active
+// Directory or an NSS module hands back names with spaces in them, and
+// splitting an owner like "Domain Users" on whitespace turns a correct
+// ownership into a parse failure.
 func parseOwner(out string) (Owner, error) {
-	fields := strings.Fields(out)
+	fields := strings.Split(strings.TrimSpace(out), "|")
 	if len(fields) != 4 {
 		return Owner{}, fmt.Errorf("unexpected stat output %q", out)
 	}
-	uid, err := strconv.Atoi(fields[0])
+	uid, err := strconv.Atoi(strings.TrimSpace(fields[0]))
 	if err != nil {
 		return Owner{}, fmt.Errorf("unexpected uid in stat output %q: %w", out, err)
 	}
-	gid, err := strconv.Atoi(fields[1])
+	gid, err := strconv.Atoi(strings.TrimSpace(fields[1]))
 	if err != nil {
 		return Owner{}, fmt.Errorf("unexpected gid in stat output %q: %w", out, err)
 	}

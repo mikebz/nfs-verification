@@ -157,11 +157,17 @@ here would silently invalidate every timing assertion.
 ## State of this code
 
 The harness compiles, `go vet` is clean, and the unit tests in `pkg/slo` and
-`pkg/framework` pass. The end-to-end cases have not been run against a real
-cluster from this repository yet; they need one with an RWX-capable
-StorageClass and a reachable NFS server workload. Expect the first run to
-surface flag values that need setting for the deployment at hand, which is what
-the specific preflight failure messages exist to make quick.
+`pkg/framework` pass.
+
+The presubmit cases have been run against GKE clusters during review, not by
+the author of this code, and what that first real run produced is recorded in
+[`docs/findings.md`](docs/findings.md) rather than summarised here: a node image
+whose `umount.nfs` wrapper could never unmount anything (F-003), and a
+StorageClass advertising an expansion its provisioner cannot perform (F-004).
+Both arrived looking like storage defects and neither was one. Expect a first
+run on a new cluster to surface flag values that need setting for the deployment
+at hand, which is what the specific preflight failure messages exist to make
+quick.
 
 The unit tests cover the parts of the harness that can be wrong on a
 workstation: every manifest renders and decodes, the capacity and ownership
