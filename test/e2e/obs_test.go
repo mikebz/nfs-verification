@@ -1,6 +1,7 @@
 package e2e
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -8,7 +9,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"github.com/mikebz/nfs-verification/pkg/chaos"
 	"github.com/mikebz/nfs-verification/pkg/framework"
+	"github.com/mikebz/nfs-verification/pkg/slo"
 )
 
 // mountFailureReasons are the reasons kubelet and the attach-detach controller
@@ -122,4 +125,179 @@ func containsAny(s string, subs []string) bool {
 		}
 	}
 	return false
+}
+
+// OBS-02: a failover must be visible to whoever runs the cluster, with a
+// timestamp and a duration. A failover only the client noticed is an
+// observability defect: the operator is left with a stalled workload and no
+// record of what happened underneath it.
+//
+// Two channels are read, and either satisfies the case. The server's own log
+// stream says NFS failed over; the Kubernetes API says a pod restarted, which
+// is less, but it is still something an operator can see. Both are recorded,
+// because the difference matters when the server is one pod among many.
+//
+// It is named for the chaos gate rather than for its plan section, because it
+// injures the server and the fast path holds no fault injection.
+//
+// Steps:
+//  1. Start a workload and delete the server pod.
+//  2. Assert the ordinary recovery, and keep the outage the client experienced.
+//  3. Read the server's log stream from the fault onwards.
+//  4. Read the Kubernetes API for a server container that started after it.
+//  5. Fail when neither channel produced a timestamp, since the failover was
+//     then invisible from outside the client.
+//  6. Report each channel's duration next to the client's outage, and say so
+//     when only Kubernetes noticed.
+func TestChaosFailoverIsObservable(t *testing.T) {
+	f := framework.New(t, "OBS-02")
+	ctx, cancel := caseCtx(t, 45*time.Minute)
+	defer cancel()
+
+	s := startChaosCase(ctx, t, f, "obs02")
+	if s.target.Controller == "" {
+		t.Skipf("blocked: server pod %s has no controller, so deleting it would not bring it back", s.target.Pod)
+	}
+
+	faultAt, err := f.PodNow(ctx, s.writer)
+	if err != nil {
+		t.Fatalf("reading the writer's clock: %v", err)
+	}
+	// The reference for both channels below. It is the workstation's clock,
+	// while the timestamps the channels carry are the server node's, so the
+	// durations here are reported rather than asserted against an SLO. What is
+	// asserted is that a duration can be produced at all.
+	since := time.Now()
+	if err := chaos.DeleteServerPod(ctx, f, s.target); err != nil {
+		t.Skipf("blocked: %v", err)
+	}
+
+	outage := assertRecovered(ctx, t, s, faultAt)
+
+	lines, sources, logErr := framework.ServerLog(ctx, f.C, since)
+	if logErr != nil {
+		t.Logf("could not read the server log stream: %v", logErr)
+	}
+	said, serverSpoke := framework.FirstDated(lines)
+	start, kubeSaw, err := framework.ServerStartedAfter(ctx, f.C, since)
+	if err != nil {
+		t.Logf("could not read the server pods back from the API: %v", err)
+	}
+
+	switch {
+	case !serverSpoke && !kubeSaw:
+		t.Errorf("the failover left no timestamped trace an operator could find: the server printed nothing "+
+			"after the fault in %v, and no server container reports having started since. The client saw a "+
+			"%s outage, so something happened; an operator watching this deployment would see a stalled "+
+			"workload and no record of why",
+			sources, outage.Round(time.Second))
+	case !serverSpoke:
+		t.Logf("only Kubernetes noticed: container in %s on %s started %s after the fault, and the server "+
+			"itself printed nothing. That tells an operator a pod restarted, not that NFS failed over, "+
+			"which is thin when the server is one pod among many",
+			start.Pod, start.Node, start.At.Sub(since).Round(time.Second))
+	default:
+		t.Logf("the server spoke %s after the fault: %q (from %s)",
+			said.At.Sub(since).Round(time.Second), said.Text, said.Source)
+	}
+	if kubeSaw {
+		t.Logf("Kubernetes reports the replacement container in %s on %s started %s after the fault",
+			start.Pod, start.Node, start.At.Sub(since).Round(time.Second))
+	}
+	t.Logf("the client's own outage was %s, measured from the writer pod's clock at both ends",
+		outage.Round(time.Second))
+
+	// Grace is the OBS-03 assertion, not this one, but a grace line in the
+	// window is the strongest thing a server can say about a failover, so it is
+	// worth recording here.
+	observeGrace(ctx, t, f, since)
+}
+
+// OBS-03: grace entry and exit must both be observable, and the window between
+// them measurable. This is the case the plan says CHAOS-05 needs to be
+// diagnosable at all: without it, a grace re-entry loop and a hung client look
+// the same, and the triage runbook calls that the most common wrong diagnosis
+// in this architecture.
+//
+// A server that says nothing about grace fails this case. That is the finding
+// rather than a harness gap: an operator on that deployment cannot see grace
+// either. Where a server words it differently, -grace-enter-pattern and
+// -grace-exit-pattern state the wording.
+//
+// It is named for the chaos gate rather than for its plan section, because it
+// injures the server and the fast path holds no fault injection.
+//
+// Steps:
+//  1. Start a workload and take a lock that is never released, so the server
+//     has state to reclaim and grace means something.
+//  2. Delete the server pod and assert the ordinary recovery.
+//  3. Wait for grace to be observed both entered and left.
+//  4. Fail when nothing was observed, and say which of the two shapes it was:
+//     silence, or an entry with no exit.
+//  5. Assert the window is measurable and inside the grace exit bound.
+//  6. Assert grace was entered once, since a second entry for one failover is
+//     the re-entry loop.
+func TestChaosGracePeriodIsObservable(t *testing.T) {
+	f := framework.New(t, "OBS-03")
+	ctx, cancel := caseCtx(t, 45*time.Minute)
+	defer cancel()
+
+	s := startChaosCase(ctx, t, f, "obs03")
+	if s.target.Controller == "" {
+		t.Skipf("blocked: server pod %s has no controller, so deleting it would not bring it back", s.target.Pod)
+	}
+
+	// Grace exists to let clients reclaim state. A failover with no outstanding
+	// state may be over before it starts, and a case that measured that would
+	// be measuring nothing.
+	holder, err := f.HoldFlock(ctx, s.writer, s.dir+"/obs03.lock", "obs03")
+	if err != nil {
+		t.Fatalf("taking the lock that gives grace something to reclaim: %v", err)
+	}
+	f.Defer(func(ctx context.Context) { _ = holder.Release(ctx) })
+
+	faultAt, err := f.PodNow(ctx, s.writer)
+	if err != nil {
+		t.Fatalf("reading the writer's clock: %v", err)
+	}
+	since := time.Now()
+	if err := chaos.DeleteServerPod(ctx, f, s.target); err != nil {
+		t.Skipf("blocked: %v", err)
+	}
+
+	assertRecovered(ctx, t, s, faultAt)
+
+	bound := slo.GraceExitBound(profile(t))
+	window, obs, ok := waitGraceWindow(ctx, t, f, since, bound+s.budget)
+	if !ok {
+		if enters := obs.Enters(); len(enters) > 0 {
+			t.Fatalf("the server entered grace at %s and was never observed to leave it within %s. "+
+				"Grace entered and never left is what a stuck server and a re-entry loop both look like, "+
+				"and on this deployment an operator has no way to tell them apart either",
+				enters[0].At.UTC().Format(time.RFC3339), bound+s.budget)
+		}
+		t.Fatalf("the server's log stream says nothing about grace across a failover, so grace entry and "+
+			"exit are not observable on this deployment: %s. An operator here cannot answer the third "+
+			"question in the triage runbook. If this server words grace differently, pass "+
+			"-grace-enter-pattern and -grace-exit-pattern; metrics are the other channel the plan allows "+
+			"and this suite does not read them yet", obs.Describe())
+	}
+
+	if window.Duration() <= 0 {
+		t.Fatalf("grace was observed entering and leaving at the same moment (%s), so no duration can be "+
+			"measured from it", window)
+	}
+	t.Logf("grace ran %s on the %s profile, whose configured grace period is %s",
+		window, profile(t).Name, profile(t).Grace)
+	if window.Duration() > bound {
+		t.Errorf("grace lasted %s, above the %s bound for the %s profile, which is two lease periods. "+
+			"Every client is blocked for the whole of that window, so this is the term that dominates "+
+			"the recovery numbers the other cases report",
+			window.Duration().Round(time.Second), bound, profile(t).Name)
+	}
+	if n := len(obs.Enters()); n > 1 {
+		t.Errorf("the server entered grace %d times for one failover, which is a grace re-entry loop: %s. "+
+			"It presents as a hung client in front of a healthy server, which is why CHAOS-05 needs this "+
+			"case to be diagnosable", n, obs.Describe())
+	}
 }

@@ -148,6 +148,47 @@ func podReady(p *corev1.Pod) bool {
 	return len(p.Status.ContainerStatuses) > 0
 }
 
+// ServerStart is a server container coming up, as the Kubernetes API reports
+// it. It is the channel an operator has when the server itself says nothing:
+// it states that a pod restarted, which is less than saying NFS failed over,
+// and it is timestamped by the kubelet rather than by the process under test.
+type ServerStart struct {
+	At   time.Time
+	Pod  string
+	Node string
+}
+
+// ServerStartedAfter returns the earliest server container that reports having
+// started at or after t. OBS-02 reads it as the second of the two channels an
+// operator can reach; nothing measures a recovery from it, because a container
+// that has started is not a server that is serving.
+//
+// The caller's t comes from the workstation's clock and the start times from
+// the kubelet's, so the comparison is relaxed by the same guard band that
+// narrows a grace window.
+func ServerStartedAfter(ctx context.Context, c *Client, t time.Time) (ServerStart, bool, error) {
+	t = t.Add(-slo.ClockSkewGuard)
+	pods, err := ServerPods(ctx, c)
+	if err != nil {
+		return ServerStart{}, false, err
+	}
+	var best ServerStart
+	found := false
+	for i := range pods {
+		p := &pods[i]
+		for _, cs := range p.Status.ContainerStatuses {
+			if cs.State.Running == nil || cs.State.Running.StartedAt.Time.Before(t) {
+				continue
+			}
+			at := cs.State.Running.StartedAt.Time
+			if !found || at.Before(best.At) {
+				best, found = ServerStart{At: at, Pod: p.Name, Node: p.Spec.NodeName}, true
+			}
+		}
+	}
+	return best, found, nil
+}
+
 // ServerRestartCount sums container restarts across server pods. A chaos case
 // that expects no restart asserts on this rather than on log scraping.
 func ServerRestartCount(ctx context.Context, c *Client) (int32, error) {

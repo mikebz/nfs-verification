@@ -242,7 +242,7 @@ mimics it, which is the one distinction the triage runbook says matters.
 
 ### 5.2 Classifying a line as entry or exit
 
-[decided: a word-level rule over lines mentioning grace, plus one flag for a server that words it differently]
+[decided: a word-level rule over lines mentioning grace, plus a pair of flags for a server that words it differently]
 
 The rule is: a line mentioning grace is an exit if it also carries a word that
 negates or ends it, and an entry otherwise. That ordering matters, because the
@@ -252,8 +252,12 @@ re-entry loop on a healthy server.
 
 This is the one piece of this phase that is implementation-specific in
 practice, even though it depends on no implementation's API. It is unit tested
-against the wordings of several servers, and the flag exists for a server whose
-wording the rule does not cover. A server that says nothing at all fails
+against the wordings of several servers, and a pair of flags exists for a server
+whose wording the rule does not cover. They are set together or not at all, and
+they replace the rule rather than adding to it: an operator who states the
+wording owns it, and a run that stated only the entry wording would observe
+every failover entering grace and never leaving it, which is the re-entry loop
+symptom these cases exist to report honestly. A server that says nothing at all fails
 OBS-03, which is the finding rather than a harness gap: an operator on that
 deployment cannot see grace either.
 
@@ -407,11 +411,12 @@ Source: command line flags, passed through the make targets, as in phase 3.
 
 | Flag | Default | Needed for |
 |---|---|---|
-| grace log pattern | built-in wording rule | a server whose grace wording the rule does not cover |
+| grace enter pattern, grace exit pattern | built-in wording rule | a server whose grace wording the rule does not cover; set together or not at all |
 | everything from phase 3 | unchanged | the fault, the target and the profile |
 
 Validation and behavior on bad config: fail loud. A pattern that does not
-compile is a startup failure, not a case that quietly observes nothing. A
+compile is a startup failure, not a case that quietly observes nothing, and so
+is one of the pair without the other. A
 server whose logs are unreadable, because the pod is gone and its predecessor's
 logs went with it, is reported as such rather than as a server that never
 entered grace.
