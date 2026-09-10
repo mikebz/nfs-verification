@@ -111,7 +111,7 @@ func (f *Framework) Selector() string {
 // the export, and the node is left retrying RPCs against an export that no
 // longer exists. On a hard NFSv4.1 mount that retry loop is uninterruptible: it
 // wedges kubelet's volume manager and takes the node out of service. See
-// doc/findings.md.
+// docs/findings.md.
 func (f *Framework) DeleteCaseObjects(ctx context.Context) error {
 	pods := f.C.Kube.CoreV1().Pods(Namespace)
 	if err := pods.DeleteCollection(ctx, metav1.DeleteOptions{}, ListOptions(f.Selector())); err != nil {

@@ -2,11 +2,11 @@
 
 End-to-end verification of NFS RWX persistent volumes on Kubernetes.
 
-- [`doc/01-test-plan.md`](doc/01-test-plan.md) is the test plan: what gets
+- [`docs/01-test-plan.md`](docs/01-test-plan.md) is the test plan: what gets
   verified and why.
-- [`plan.md`](plan.md) is the implementation plan: the test approach, and the
+- [`docs/plan.md`](docs/plan.md) is the implementation plan: the test approach, and the
   order the plan gets built in.
-- [`doc/findings.md`](doc/findings.md) records what running the suite against a
+- [`docs/findings.md`](docs/findings.md) records what running the suite against a
   real cluster taught us.
 
 This repository currently holds the harness skeleton, preflight, and the first
@@ -90,7 +90,7 @@ one the scheduler writes.
 still has the share mounted removes it from the API before kubelet unmounts; the
 claim then goes, the export is destroyed, and the node retries RPCs against it
 forever on a hard mount. That takes the node out of service. See F-001 in
-[`doc/findings.md`](doc/findings.md).
+[`docs/findings.md`](docs/findings.md).
 
 **Lease and grace often are not discoverable.** A server that keeps them in a
 config file the pod spec does not reference will fail preflight, and the run

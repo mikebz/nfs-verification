@@ -163,7 +163,7 @@ func (f *Framework) DeletePod(ctx context.Context, name string) error {
 //
 // Never use it for teardown. The pod leaves the API before kubelet unmounts, so
 // anything that then deletes the claim destroys an export a node is still
-// mounting, and a hard NFSv4.1 mount retries that forever. See doc/findings.md.
+// mounting, and a hard NFSv4.1 mount retries that forever. See docs/findings.md.
 func (f *Framework) DeletePodNow(ctx context.Context, name string) error {
 	return IgnoreNotFound(f.C.Kube.CoreV1().Pods(Namespace).Delete(ctx, f.Name(name), DeleteNow()))
 }

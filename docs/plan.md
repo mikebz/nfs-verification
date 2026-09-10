@@ -1,6 +1,6 @@
 # Implementation plan
 
-How the test plan in [`doc/01-test-plan.md`](doc/01-test-plan.md) gets built.
+How the test plan in [`01-test-plan.md`](01-test-plan.md) gets built.
 The test plan says what to verify; this file says in what order, in what shape,
 and what each step is allowed to assume.
 
@@ -193,7 +193,7 @@ image, fio, snapshots, expansion. Those arrive with the cases that use them.
 
 ## 4. Known gaps to settle as we go
 
-0. **Read [`doc/findings.md`](doc/findings.md) before touching teardown.** F-001
+0. **Read [`findings.md`](findings.md) before touching teardown.** F-001
    is a way to take a node out of service with two ordinary API calls in the
    wrong order, and it will be tempting to reintroduce.
 
