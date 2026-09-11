@@ -58,7 +58,7 @@ Observable outcomes that define done:
 
 Requirements: Section 3.2 of [`01-test-plan.md`](01-test-plan.md) for DATA-06
 through DATA-14, Section 3.3 for the CHAOS-06 extension, Section 4.2 for the
-gate budgets, Section 2.3 for the protocol claim these assertions are calibrated
+per-category targets and their budgets, Section 2.3 for the protocol claim these assertions are calibrated
 against. Delivery order and the harness inventory: [`plan.md`](plan.md) step 6
 and section 3e.
 
@@ -117,7 +117,7 @@ section without reading code.
   Section 5.2 says why nothing off the shelf does this.
 - A `/proc/locks` reader on the node agent, for the client's own view of what it
   believes it holds, with ranges. No tool required; it is a kernel file.
-- A mount-option gate on the lock cases: `nolock` and `local_lock=` block them.
+- A mount-option check on the lock cases: `nolock` and `local_lock=` block them.
 - The byte-range half of DATA-05 and the disjoint-range extension of CHAOS-06,
   both of which [`03-grace-and-lock-reclaim-design.md`](03-grace-and-lock-reclaim-design.md)
   section 5.5 deferred to this phase by name.
@@ -131,8 +131,10 @@ section without reading code.
 
 **Out of scope (explicit non-goals)**
 
-- Any new container image, and any new gate. Section 5.3 for the first,
-  section 5.14 for the second.
+- Any new container image. Section 5.3.
+- Renaming or re-targeting any case outside DATA. [PR #11](https://github.com/mikebz/nfs-verification/pull/11) sorted the whole suite
+  by category; this phase adds to that and changes none of it. The one open
+  question it raises is where DATA-14's hour runs, in section 5.14.
 - NFSv4.2. Preflight pins the mount at `vers=4.1` and fails otherwise, so
   `ALLOCATE`, `DEALLOCATE` and `READ_PLUS` are out of reach. DATA-11 is written
   so that the day preflight accepts 4.2, the punch-hole half becomes an
@@ -742,40 +744,72 @@ checksum mismatches. Three decisions inside that:
 
 `fio` comes from `-fio-image` and the case skips without it. That is right here
 and wrong for locktool (section 5.3) for one reason: `fio` is not ours, its
-image is a packaging decision of whoever runs the suite, and a soak case that is
-skipped in the fast path costs nothing on the days nobody runs the soak.
+image is a packaging decision of whoever runs the suite, and a soak case that
+skips costs nothing on the days nobody has an image to run it with.
 
-### 5.14 Gates: no new one
+### 5.14 Naming: every case here is a `TestData` case
 
-[decided: the two existing prefixes are enough; nothing here is named for a schedule nothing runs]
+[decided: follow the category scheme introduced by the suite-wide reorganization, including for the two cases that kill the server]
 
-An earlier draft of this document proposed a nightly gate, because seven of
-these cases carry gate N in the plan and the repository has no N. That was
-wrong, and the reason is worth writing down.
+Two earlier drafts of this section are now wrong, and the history is worth one
+paragraph because it is the second time this has moved.
 
-Nothing in this repository runs on a schedule. There is no nightly job, and a
-`TestNightly` prefix would name a cadence that nothing keeps. What the existing
-prefixes name is what a case *does*: `TestChaos` marks a case that injures the
-server, `TestSoak` marks one that runs long. Both are properties a reader can
-check against the code. A prefix naming when someone intends to run it is not.
+The first draft proposed a nightly gate for the plan's gate-N cases. The second
+dropped it: nothing in this repository runs on a schedule, so a `TestNightly`
+prefix would name a cadence nothing keeps, and the prefixes then in use named
+what a case *did* (`TestChaos` for injuring the server, `TestSoak` for running
+long). [PR #11](https://github.com/mikebz/nfs-verification/pull/11) has since replaced that scheme outright. There is no gate column
+in the test plan any more, `test-presubmit` and `test-soak` are gone, and
+Section 4.2 is now "Execution by Category": one prefix and one target per plan
+section, `TestProv`, `TestData`, `TestChaos`, `TestObs`, `TestSec`.
 
-So the cases sort by what they do, which they can do today:
+So every case in this phase is a DATA case and carries `TestData`:
 
-| Case | Prefix | Because |
+| Case | Name | Target |
 |---|---|---|
-| DATA-06, 07, 08, 09, 11 | none | minutes, no fault, no soak |
-| DATA-10 | `TestSoak` | 100k entries is soak-shaped work whatever the plan's gate column says |
-| DATA-12, DATA-13 | `TestChaos` | they kill the server, and that prefix outranks the others |
-| DATA-14 | `TestSoak` | an hour |
+| DATA-06 to DATA-14 | `TestData...` | `make test-data` |
+| the DATA-05 byte-range half | `TestDataLocksAcrossNodes`, extended | `make test-data` |
+| the CHAOS-06 range extension | `TestChaosLockReclaimAcrossFailover`, extended | `make test-chaos` |
 
-No Makefile change: `test-presubmit` already skips `^Test(Chaos|Soak)`.
+**Including DATA-12 and DATA-13, which kill the server.** Under the previous
+scheme they would have been `TestChaos`, because that prefix marked a case that
+injures the server whatever section it came from; that is
+[`03-grace-and-lock-reclaim-design.md`](03-grace-and-lock-reclaim-design.md)
+section 5.8, and [PR #11](https://github.com/mikebz/nfs-verification/pull/11) supersedes it. The precedent is already in the tree and
+it is unambiguous: PROV-07 and PROV-08 take the server down and are
+`TestProvProvisionServerDown` and `TestProvDeleteClaimServerDown`; OBS-02 and
+OBS-03 inject a failover and are `TestObsFailoverIsObservable` and
+`TestObsGracePeriodIsObservable`. Category wins over what the case does. Doc 03
+is not edited; this records the supersession, as the rule for prior numbered
+design docs requires.
 
-The five cases with no prefix land in the fast gate, which Section 4.2 budgets
-at 15 minutes on two nodes. That budget is the thing to watch, and section 11
-carries it: if it is exceeded, the answer is to measure and move a case to
-`TestSoak`, not to invent a gate. The mismatch between the plan's four gate
-letters and the repository's two prefixes is real and predates this phase; it is
-a question for the test plan, not something to paper over with a name.
+One consequence deserves saying out loud rather than being discovered: after
+this phase **`make test-data` injects faults**. It kills the NFS server twice,
+through `pkg/chaos`, and it is no longer a read-mostly target. `make test-prov`
+and `make test-obs` are already in that position, so this is where the
+repository is rather than something this phase introduces, but a reader of the
+Makefile should not have to infer it.
+
+**DATA-14 does not fit its target, and that needs a decision.** Section 4.2
+budgets `make test-data` at under 45 minutes on two nodes, and the Makefile
+gives it `-timeout=45m`. DATA-14 is a one-hour soak across 20 pods. Both cannot
+be true. Three ways out, and this design does not get to pick alone, because
+[PR #11](https://github.com/mikebz/nfs-verification/pull/11) deliberately removed the cost axis that would have answered it:
+
+1. Raise `test-data` to something like `-timeout=120m` and restate the budget.
+   Costs the category its "under 45 minutes" property, which is the thing that
+   makes a category target worth running.
+2. Give the soak its own target, `make test-data-soak` selecting
+   `^TestDataMixedSoak`, and have `test-data` skip it. Keeps one prefix, one
+   file and one budget; costs one target, and reintroduces a cost distinction
+   inside a category rather than across categories.
+3. Shorten DATA-14 in the test plan. Requirements live there, so this is a
+   legitimate answer, but it changes what is verified to fit a Makefile, which
+   is the wrong direction to reason in.
+
+This design recommends 2 and marks it open in section 11. It does not block the
+phase: DATA-14 is in the last PR, and the eight cases before it fit the target
+as it stands.
 
 ### 5.15 What DATA-05 and CHAOS-06 gain
 
@@ -940,7 +974,8 @@ Export path: unchanged, `artifacts/<run-id>/<CASE-ID>/`.
 | `k8s.io/kubectl/pkg/cmd/cp` as a library | Import the copy logic instead of shelling out | Pulls the cobra command surface in; the package backs a command rather than a caller |
 | locktool embedded with `go:embed` | Commit the compiled binaries and embed them in the test binary | Committed binaries cannot be reviewed, and the repository would carry two per release |
 | Compile locktool inside the pod | Ship the source and build it there | No toolchain on a busybox image, and adding one makes the image the thing under test |
-| A `TestNightly` gate | A third prefix for the plan's gate-N cases | Names a schedule nothing in this repository keeps. Section 5.14 |
+| A `TestNightly` gate | A third prefix for the plan's gate-N cases | Named a schedule nothing keeps, and [PR #11](https://github.com/mikebz/nfs-verification/pull/11) has since removed the gate column entirely. Section 5.14 |
+| `TestChaos` for DATA-12 and DATA-13 | Name the two fault-injecting cases for what they do rather than their section | [PR #11](https://github.com/mikebz/nfs-verification/pull/11) sorts strictly by category, and PROV-07 and OBS-02 already inject faults under their own prefixes. Section 5.14 |
 | `volumesInUse` alone for the unmount wait | Watch the Node object, skip the node agent | Only covers attachable volumes, and NFS CSI drivers set `attachRequired: false`. Section 5.6 uses it where it applies and falls back where it does not |
 | A second StorageClass with `noac` | Clone the discovered class with an extra mount option and provision from it | Gives a different export. DATA-08 needs two mounts of the *same* file |
 | Per-pod mount options | Set `noac` on the reader pod | Mount options belong to the PV. Kubernetes has no per-pod override |
@@ -966,11 +1001,13 @@ Export path: unchanged, `artifacts/<run-id>/<CASE-ID>/`.
    `FEATURE_DD_IBS_OBS` in busybox. **Decided by** the probe in section 5.7 on
    the first real run. If it is absent, section 5.4 is revisited and locktool
    grows a `dio` subcommand rather than DATA-07 being permanently blocked.
-3. **The fast gate's budget.** Five of these cases land in it, and Section 4.2
-   budgets 15 minutes on two nodes. **Decided by** timing the gate once they are
-   in. If it is over, a case moves to `TestSoak` on the evidence; a new gate is
-   not the answer, and neither is leaving it over budget, because a fast gate
-   nobody waits for is a gate nobody reads.
+3. **`make test-data` is budgeted at 45 minutes and this phase puts nine cases
+   into it.** DATA-10 alone populates 100k entries, and DATA-14 is an hour by
+   itself, over the target's own `-timeout=45m`. **Decided by** section 5.14's
+   three options for DATA-14, which is the maintainer's call because [PR #11](https://github.com/mikebz/nfs-verification/pull/11)
+   removed the cost axis deliberately, and then by timing the target once the
+   other eight cases are in. The recommendation is a separate
+   `make test-data-soak`. Not a blocker for the phase: DATA-14 is the last PR.
 4. **Whether 100k entries fit.** The default claim is 1Gi and the export may be
    directory-backed with no per-volume quota, so the real limits are the backing
    filesystem's free inodes. **Decided by** the precheck in section 5.10 on a
@@ -990,13 +1027,15 @@ Export path: unchanged, `artifacts/<run-id>/<CASE-ID>/`.
    write and a page cache. DATA-10 and DATA-14 are heavier than anything the
    suite has run. A case that reboots a node reports a storage defect that is a
    node pool defect. Mitigation is the README's existing minimum of 8GB per
-   worker for anything past presubmit, and the fact that both cases are outside
-   the fast gate; there is no mitigation inside the case.
-8. **The plan has four gate letters and the repository has two prefixes.**
-   Section 5.14 sorts this phase's cases by what they do rather than resolving
-   it. **Decided by** the test plan: either the gate column means something a
-   runner enforces, or it is documentation and the prefixes are the truth. Not
-   this phase's question, but it will be asked again in step 7.
+   worker for anything past the quick cases, and the fact that neither runs
+   unless someone asks for its target; there is no mitigation inside the case.
+8. **Nothing now records that a case is expensive.** [PR #11](https://github.com/mikebz/nfs-verification/pull/11) removed the gate
+   column, so DATA-10's 100k entries and DATA-14's hour read in the plan exactly
+   like a case that takes twenty seconds. **Decided by** whether anyone is
+   surprised by a category target's runtime. If they are, the answer is a cost
+   column in Section 4.2 saying what a case costs, which is a fact about the
+   case, rather than a gate letter saying when to run it, which is a policy
+   nothing enforces.
 
 ---
 
@@ -1017,7 +1056,7 @@ One check per rule in section 2, observable from a run.
 | 9. Undefined operations are recorded | DATA-11 on a `vers=4.1` mount records the punch refusal and passes on the sparse assertions |
 | 10. Listings may miss, never invent | DATA-10 passes with `listed` below `created`, and fails on any name outside `e-<index>`. Unit test: the census classifier flags a `.nfs*` leftover and a truncated name as unknown |
 | 11. Verified by content | The existence check is gone from the durability path; CHAOS-01 and CHAOS-02 assert content after this phase, which is visible as a verdict table in their bundles |
-| 12. Phases 2 and 3 still hold | The chaos gate passes unchanged before the DATA-05 and CHAOS-06 extensions land, and again after |
+| 12. Phases 2 and 3 still hold | `make test-chaos` passes unchanged before the DATA-05 and CHAOS-06 extensions land, and again after |
 
 Sources for the protocol and platform claims above: RFC 8881 for NFSv4.1 file
 locking, RFC 7862 for the NFSv4.2 sparse-file operations, the Linux kernel's
