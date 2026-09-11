@@ -123,19 +123,28 @@ type UsageComparison struct {
 	Verdict UsageVerdict
 }
 
-// CompareUsage decides whether two readings of one claim agree.
+// CompareUsage decides whether two readings of one claim agree, with the
+// tolerance taken as a fraction of the smaller of what the claim was
+// provisioned at and what the workload is told its filesystem holds.
 //
-// The tolerance is a fraction of the capacity the workload sees, because that
-// is the number an operator's threshold would be a fraction of too. Freshness
-// is checked first: a stale reading that happens to be within tolerance has not
-// been compared with anything, it has been compared with a moment before the
-// case started.
-func CompareUsage(pod, kubelet VolumeUsage) UsageComparison {
+// The smaller of the two, because they are not always the same number and the
+// larger one is the wrong denominator. An export with no per-volume quota
+// reports the filesystem behind it: measured on a real cluster, a 1 GiB claim
+// on a 10 GiB backing volume produced a tolerance of 199 MiB, wider than the
+// 128 MiB this case writes, so two sources could have disagreed by more than
+// the whole workload and still agreed. On a multi-terabyte pool the tolerance
+// would swallow anything. The claim is what an operator's threshold would be a
+// fraction of, and where it is unknown the workload's view is all there is.
+//
+// Freshness is checked first: a stale reading that happens to be within
+// tolerance has not been compared with anything, it has been compared with a
+// moment before the case started.
+func CompareUsage(pod, kubelet VolumeUsage, claimBytes int64) UsageComparison {
 	c := UsageComparison{
 		Pod:            pod,
 		Kubelet:        kubelet,
 		DeltaBytes:     kubelet.UsedBytes - pod.UsedBytes,
-		ToleranceBytes: int64(float64(pod.CapacityBytes) * slo.VolumeUsageTolerance),
+		ToleranceBytes: toleranceBytes(pod.CapacityBytes, claimBytes),
 		Lag:            pod.At.Sub(kubelet.At),
 	}
 	switch {
@@ -150,6 +159,20 @@ func CompareUsage(pod, kubelet VolumeUsage) UsageComparison {
 		c.Verdict = UsageAgrees
 	}
 	return c
+}
+
+// toleranceBytes is the permitted disagreement, as a fraction of the smallest
+// capacity in play. Either input may be zero, meaning unknown: a claim whose
+// status carries no capacity, or a df that could not be read.
+func toleranceBytes(workloadBytes, claimBytes int64) int64 {
+	basis := workloadBytes
+	if claimBytes > 0 && (basis <= 0 || claimBytes < basis) {
+		basis = claimBytes
+	}
+	if basis <= 0 {
+		return 0
+	}
+	return int64(float64(basis) * slo.VolumeUsageTolerance)
 }
 
 func abs64(n int64) int64 {

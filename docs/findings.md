@@ -8,6 +8,77 @@ New entries go at the top.
 
 ---
 
+## F-009: The export has no per-volume quota, so capacity monitoring describes the backing filesystem and not the claim
+
+**Found:** 2026-09-11, GKE cluster `gke-w1`, Kubernetes v1.37.0-gke.2941000,
+three workers on Container-Optimized OS, StorageClass `nfs` backed by
+`cluster.local/nfs-provisioner-nfs-server-provisioner`, default profile (60s
+lease, 90s grace) from flags. First run of OBS-06.
+
+**Severity:** none for the data path, high for anyone who sets a capacity
+threshold on this deployment. Nothing is broken; a number an operator would
+reasonably monitor means something other than what its name suggests.
+
+### What happened
+
+OBS-06 got as far as its last assertion and failed there. Everything before it
+passed, and that is the part worth reading:
+
+- The kubelet publishes per-volume usage for this claim through the node proxy,
+  so the CSI driver does implement volume statistics.
+- The two sources agreed exactly, before and after the write: 0 bytes used
+  each, then 134,217,728 bytes each.
+- Both moved by the full 128 MiB the workload wrote, the kubelet's reading
+  arriving 1m33s later, which is its documented aggregation period.
+
+The last check is what failed. The claim is provisioned at 1 GiB and `df`
+inside the pod reports a total of 10,464,788,480 bytes, which is the server's
+own backing volume.
+
+### Why
+
+This provisioner hands out an export per claim as a subdirectory of one
+filesystem, and its XFS quota option is off by default. There is no per-volume
+limit, so `statfs` on the mount answers with the filesystem behind it. Both
+sources read that same filesystem, which is why they agree so precisely.
+
+### What it means for the system under test
+
+Not a defect in the NFS server, and not a failing harness: it is a limitation of
+this deployment, which is the distinction the case exists to draw. An operator
+who sets an alert at 80% of the reported capacity is watching the provisioner's
+10 GiB volume rather than the 1 GiB their workload was promised. A claim can
+reach its own nominal size with the monitored number barely moving, and the
+first sign of trouble is the application getting ENOSPC with every dashboard
+reading healthy. Turning the quota option on is what changes the answer.
+
+The same run leaves the other half of Section 3.5 open: OBS-02 failed for an
+unrelated reason on this cluster and OBS-03 failed as F-008 predicts, neither of
+which OBS-06 touches.
+
+### What changed
+
+Two things in the harness, both exposed by this run rather than by the
+provisioner:
+
+- **The agreement tolerance is now a fraction of the smaller of the claim's
+  provisioned size and the capacity the workload is shown.** It had been a
+  fraction of the workload's view alone, which on this deployment is the backing
+  filesystem: the tolerance came out at 199 MiB against a 128 MiB write, so the
+  two sources could have disagreed by more than the entire workload and still
+  been reported as agreeing. On a multi-terabyte pool it would have swallowed
+  anything. The assertion that caught the quota was unaffected, but the one
+  above it had quietly stopped being able to fail.
+- **`TestWriteBytesScriptReportsWhatLanded` skips where `stat` does not take
+  `-c`.** The script runs in a pod on busybox, and the test ran it on the
+  workstation, so `make unit` failed on macOS for a reason that says nothing
+  about the script. It now probes first, the way the capacity parsers already
+  probe for `stat -f`.
+
+The case itself is unchanged: it reported what it was built to report.
+
+---
+
 ## F-008: `nfs-server-provisioner` never announces grace, so the grace cases cannot run against it
 
 **Found:** 2026-09-11, GKE cluster `gke-w1`, Kubernetes v1.37, StorageClass `nfs`

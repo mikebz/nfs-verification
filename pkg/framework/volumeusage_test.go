@@ -73,7 +73,7 @@ func TestCompareUsageVerdicts(t *testing.T) {
 			want:    UsageAgrees,
 		},
 	} {
-		got := CompareUsage(pod, tc.kubelet)
+		got := CompareUsage(pod, tc.kubelet, oneGiB)
 		if got.Verdict != tc.want {
 			t.Errorf("%s: verdict %s, want %s (delta %d bytes, tolerance %d, lag %s)",
 				name, got.Verdict, tc.want, got.DeltaBytes, got.ToleranceBytes, got.Lag)
@@ -158,7 +158,8 @@ func TestMatchesClaimCapacity(t *testing.T) {
 }
 
 // TestVolumeWriteIsMeasurable checks the two bounds OBS-06 rests on against
-// each other, at the claim size the suite provisions.
+// each other, at the claim size the suite provisions and on the deployment
+// shape that breaks the relationship between them.
 //
 // They are independent constants and either can be changed alone. A write below
 // the tolerance would move a reading by less than the two sources are allowed
@@ -167,19 +168,43 @@ func TestMatchesClaimCapacity(t *testing.T) {
 // case keeps passing and stops meaning anything, which is why this is a test
 // rather than a comment.
 //
+// The second half is what a run on a real cluster found. An export with no
+// per-volume quota reports its backing filesystem, so a 1 GiB claim on a 10 GiB
+// volume produced a tolerance of 199 MiB against a 128 MiB write. Taking the
+// tolerance from the claim rather than from whatever df was shown is what keeps
+// that from growing without limit as the backing pool does.
+//
 // Steps:
 //  1. Work out the tolerance at the claim size the suite asks for.
 //  2. Assert the bounded write is larger than it.
+//  3. Assert a backing filesystem far larger than the claim does not widen it.
 func TestVolumeWriteIsMeasurable(t *testing.T) {
 	size, err := resource.ParseQuantity(Cfg().PVCSize)
 	if err != nil {
 		t.Fatalf("the configured claim size %q is not a quantity: %v", Cfg().PVCSize, err)
 	}
-	tolerance := int64(float64(size.Value()) * slo.VolumeUsageTolerance)
+	claim := size.Value()
+	tolerance := toleranceBytes(claim, claim)
 	if slo.VolumeWriteBytes <= tolerance {
 		t.Errorf("OBS-06 writes %d bytes and the two sources may differ by %d on a %s claim, so the write "+
 			"cannot be told apart from the tolerance and the movement assertion proves nothing",
 			slo.VolumeWriteBytes, tolerance, Cfg().PVCSize)
+	}
+	for name, workload := range map[string]int64{
+		"a backing volume ten times the claim":      claim * 10,
+		"a backing pool a thousand times the claim": claim * 1000,
+		"a df that could not be read":               0,
+	} {
+		if got := toleranceBytes(workload, claim); got > tolerance {
+			t.Errorf("%s widens the tolerance to %d from the claim's %d, so two sources could disagree by "+
+				"more than the whole workload and still be reported as agreeing", name, got, tolerance)
+		}
+	}
+	// And with no claim capacity to work from, the workload's view is all there
+	// is; a tolerance of zero there would fail every comparison on a claim whose
+	// status had not been populated.
+	if got := toleranceBytes(claim, 0); got != tolerance {
+		t.Errorf("with the claim capacity unknown the tolerance is %d, want the workload's %d", got, tolerance)
 	}
 }
 
@@ -200,10 +225,10 @@ func TestUsageReportTable(t *testing.T) {
 		UsedBytes: 10240, At: at.Add(time.Second)}
 
 	var r UsageReport
-	r.Record("before", CompareUsage(pod, kubelet))
+	r.Record("before", CompareUsage(pod, kubelet, oneGiB))
 	pod.UsedBytes += slo.VolumeWriteBytes
 	kubelet.UsedBytes += slo.VolumeWriteBytes
-	r.Record("after", CompareUsage(pod, kubelet))
+	r.Record("after", CompareUsage(pod, kubelet, oneGiB))
 
 	table := r.Table()
 	for _, want := range []string{
@@ -232,13 +257,22 @@ func TestUsageReportTable(t *testing.T) {
 //  3. Assert the seed landed as bytes rather than being expanded.
 func TestWriteBytesScriptReportsWhatLanded(t *testing.T) {
 	sh := lookOrSkip(t, "sh", "yes", "head", "stat", "sync")
+	// The script runs in a pod on the busybox image, whose stat takes -c. A
+	// workstation running BSD stat rejects it, and that says nothing about the
+	// script: skip rather than fail, the way the capacity parsers skip a stat
+	// built without -f.
+	if err := exec.Command(sh, "-c", "stat -c %s /").Run(); err != nil {
+		t.Skipf("stat here does not take -c, which is what the pods this script runs in use: %v", err)
+	}
 	target := filepath.Join(t.TempDir(), "a dir", "a file.bin")
 	const seed = `seed with 'quotes' and $VARS`
 	const size = 64 << 10
 
-	out, err := exec.Command(sh, "-c", writeBytesScript(target, size, seed)).Output()
+	// CombinedOutput, so that a script that failed says why rather than leaving
+	// an exit status to guess at.
+	out, err := exec.Command(sh, "-c", writeBytesScript(target, size, seed)).CombinedOutput()
 	if err != nil {
-		t.Fatalf("running the write script: %v", err)
+		t.Fatalf("running the write script: %v\n%s", err, out)
 	}
 	n, err := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64)
 	if err != nil {

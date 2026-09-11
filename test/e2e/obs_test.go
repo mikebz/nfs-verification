@@ -336,6 +336,18 @@ func TestObsVolumeUsageAgreesWithControlPlane(t *testing.T) {
 	t.Logf("claim %s is mounted by %s on node %s, and the kubelet on that node is the control plane's "+
 		"view of it", pvc.Name, pod.Name, node)
 
+	// Read the provisioned capacity now, because the agreement tolerance is a
+	// fraction of it. Nothing is asserted about it here: the quota check that
+	// compares it against what df reports runs last, after everything else has
+	// been measured and recorded.
+	bound, err := f.C.Kube.CoreV1().PersistentVolumeClaims(framework.Namespace).
+		Get(ctx, pvc.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("re-reading claim %s for the capacity it was provisioned at: %v", pvc.Name, err)
+	}
+	capacity := bound.Status.Capacity[corev1.ResourceStorage]
+	claimBytes := capacity.Value()
+
 	report := &framework.UsageReport{}
 	// Written whether the case passed or not, and before teardown: a run where
 	// the two sources differed by 2% is a different run from one where they
@@ -346,7 +358,7 @@ func TestObsVolumeUsageAgreesWithControlPlane(t *testing.T) {
 		}
 	})
 
-	before := agreeOnUsage(ctx, t, f, node, pvc.Name, "before", report)
+	before := agreeOnUsage(ctx, t, f, node, pvc.Name, "before", claimBytes, report)
 
 	written, err := f.WriteBytes(ctx, "writer", fileIn("obs06.bin"), slo.VolumeWriteBytes, "obs06")
 	if err != nil {
@@ -358,7 +370,7 @@ func TestObsVolumeUsageAgreesWithControlPlane(t *testing.T) {
 			"it is about and nothing it could read afterwards would mean anything", written)
 	}
 
-	after := agreeOnUsage(ctx, t, f, node, pvc.Name, "after", report)
+	after := agreeOnUsage(ctx, t, f, node, pvc.Name, "after", claimBytes, report)
 
 	// Two sources that agree on a static number prove less than two that move
 	// together, so the movement is asserted against the bytes that actually
@@ -388,13 +400,6 @@ func TestObsVolumeUsageAgreesWithControlPlane(t *testing.T) {
 
 	// Last, and on purpose: everything above is measured and recorded before
 	// this can stop the case.
-	bound, err := f.C.Kube.CoreV1().PersistentVolumeClaims(framework.Namespace).
-		Get(ctx, pvc.Name, metav1.GetOptions{})
-	if err != nil {
-		t.Fatalf("re-reading claim %s for the capacity it was provisioned at: %v", pvc.Name, err)
-	}
-	capacity := bound.Status.Capacity[corev1.ResourceStorage]
-	claimBytes := capacity.Value()
 	if claimBytes <= 0 {
 		// Without a capacity on the bound claim there is nothing to compare
 		// against, and failing here would name the provisioner for a number the
@@ -422,7 +427,7 @@ func TestObsVolumeUsageAgreesWithControlPlane(t *testing.T) {
 // that cluster an operator has no input either and no rule they write will
 // change that.
 func agreeOnUsage(ctx context.Context, t *testing.T, f *framework.Framework, node, claim, label string,
-	report *framework.UsageReport) framework.UsageComparison {
+	claimBytes int64, report *framework.UsageReport) framework.UsageComparison {
 	t.Helper()
 
 	podUsage, err := f.ClaimUsage(ctx, "writer", mountPath, claim)
@@ -448,16 +453,16 @@ func agreeOnUsage(ctx context.Context, t *testing.T, f *framework.Framework, nod
 		t.Fatalf("reading what the control plane sees of %s on node %s: %v", claim, node, err)
 	}
 
-	cmp := framework.CompareUsage(podUsage, kubeletUsage)
+	cmp := framework.CompareUsage(podUsage, kubeletUsage, claimBytes)
 	report.Record(label, cmp)
 	t.Logf("%s: %s", label, cmp)
 	if cmp.Verdict != framework.UsageAgrees {
 		t.Errorf("the two views of %s %s at the %s reading. The workload's own df says %s; the control "+
 			"plane says %s; they differ by %d bytes against a tolerance of %d, which is %.0f%% of the "+
-			"capacity the workload sees. An operator watching the control plane's number is not watching "+
-			"the volume the application is writing to",
+			"smaller of the claim's %d bytes and the capacity the workload is shown. An operator watching "+
+			"the control plane's number is not watching the volume the application is writing to",
 			claim, cmp.Verdict, label, cmp.Pod, cmp.Kubelet, cmp.DeltaBytes, cmp.ToleranceBytes,
-			slo.VolumeUsageTolerance*100)
+			slo.VolumeUsageTolerance*100, claimBytes)
 	}
 	return cmp
 }
