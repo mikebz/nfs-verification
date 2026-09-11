@@ -50,8 +50,9 @@ what keeps a workstation kernel out of the result.
 ### Structure
 
 Go, `client-go`, the standard `testing` package, table-driven where the case has
-a table. No Ginkgo. One test function per plan case, named for its plan ID
-(`TestPROV01_...`), so a failure in CI names the case a human can look up.
+a table. No Ginkgo. One test function per plan case, named for what the case does
+(with the plan ID in the comment above it), so a failure in CI names what actually
+failed.
 
 ### Discovery over declaration
 
@@ -146,8 +147,8 @@ Each step is one pull request. Later steps depend only on earlier ones.
 | 2b | The three presubmit cases held back from step 2: DATA-02, OBS-04, SEC-02 | done, [PR #4](https://github.com/mikebz/nfs-verification/pull/4) |
 | 3 | Chaos operations package plus CHAOS-01 and CHAOS-02, the SLO measurement path, fault timelines | done, [PR #4](https://github.com/mikebz/nfs-verification/pull/4) |
 | 4 | Grace and lock reclaim: CHAOS-05, CHAOS-06, CHAOS-07, OBS-02, OBS-03, designed in [`03-grace-and-lock-reclaim-design.md`](03-grace-and-lock-reclaim-design.md) | done, [PR #8](https://github.com/mikebz/nfs-verification/pull/8) |
-| 5 | Close out Provisioning (PROV): PROV-02, PROV-05 to PROV-11 | in progress, branch `prov-step5-cases` |
-| 6 | Close out Concurrency and Data Integrity (DATA): DATA-06 to DATA-14, locktool helper | |
+| 5 | Close out Provisioning (PROV): PROV-02, PROV-05 to PROV-11 | done, [PR #10](https://github.com/mikebz/nfs-verification/pull/10) |
+| 6 | Close out Concurrency and Data Integrity (DATA): DATA-06 to DATA-14, locktool helper | next |
 | 7 | Close out Observability (OBS): OBS-01, OBS-05, OBS-06, OBS-07 | |
 | 8 | Close out Security and Identity (SEC): SEC-03 to SEC-09 | |
 | 9 | Close out Scale and Performance (SCALE): SCALE-01 to SCALE-07 | |

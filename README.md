@@ -9,8 +9,8 @@ End-to-end verification of NFS RWX persistent volumes on Kubernetes.
 - [`docs/findings.md`](docs/findings.md) records what running the suite against a
   real cluster taught us.
 
-This repository currently holds the harness skeleton, preflight, thirteen cases
-and the first fault injection. The remaining cases land in the steps listed in
+This repository currently holds the harness skeleton, preflight, twenty-six cases,
+the fault injection engine, and grace observability. The remaining cases land in the steps listed in
 [`docs/plan.md`](docs/plan.md).
 
 ## Layout
@@ -39,6 +39,7 @@ make unit                                                 # harness unit tests, 
 make preflight      FLAGS="-storage-class=nfs -lease-seconds=60 -grace-seconds=90"
 make test-presubmit FLAGS="-storage-class=nfs -lease-seconds=60 -grace-seconds=90"
 make test-chaos     FLAGS="-storage-class=nfs -lease-seconds=60 -grace-seconds=90"
+make test-soak      FLAGS="-storage-class=nfs -lease-seconds=60 -grace-seconds=90"
 make clean                                                # remove artifacts/
 ```
 
@@ -49,11 +50,11 @@ the generated run ID. `make unit` needs no cluster, no network and no
 kubeconfig, and unit tests must stay that way: a test under `pkg/` that needs a
 cluster belongs in `test/e2e` behind a capability check.
 
-`test-presubmit` skips the chaos cases and `test-chaos` runs only those; both
-select by test name, since chaos cases are named `TestChaos...`. Presubmit
-deliberately holds no chaos: chaos is slow, its failures need human triage, and
-red in the fast path trains people to ignore red. `make test-e2e` runs
-everything.
+`test-presubmit` skips chaos and soak cases (`-skip '^Test(Chaos|Soak)'`),
+`test-chaos` runs the chaos cases (`-run '^TestChaos'`), and `test-soak` runs the
+weekly soak cases (`-run '^TestSoak'`). Presubmit deliberately holds no chaos or
+long soaks: chaos is slow, its failures need human triage, and red in the fast path
+trains people to ignore red. `make test-e2e` runs everything.
 
 The suite creates no namespaces. Everything lands in `default`. Objects are
 named `nfsv-<case>-<run>-<what>` and labelled with the run and the case, so
@@ -262,19 +263,12 @@ here would silently invalidate every timing assertion.
 The harness compiles, `go vet` is clean, and the unit tests in `pkg/slo` and
 `pkg/framework` pass.
 
-PROV-01, PROV-03, PROV-04, DATA-01, DATA-03, DATA-04, DATA-05 and SEC-01 have
-been run against GKE clusters during review, not by the author of this code, and
-what that first real run produced is recorded in
-[`docs/findings.md`](docs/findings.md) rather than summarised here: a node image
-whose `umount.nfs` wrapper could never unmount anything (F-003), and a
-StorageClass advertising an expansion its provisioner cannot perform (F-004).
-Both arrived looking like storage defects and neither was one.
+Notable findings from running the suite against real clusters are recorded in
+[`docs/findings.md`](docs/findings.md).
 
-**DATA-02, SEC-02, OBS-04 and every chaos case have not been run against any
-cluster.** Neither has any fault injection, nor the grace observation the
-CHAOS-05 to CHAOS-07 and OBS-02 to OBS-03 cases rest on. Expect a first run on a new cluster
-to surface flag values that need setting for the deployment at hand, which is
-what the specific preflight failure messages exist to make quick.
+Expect a first run on a new cluster to surface flag values that need setting
+for the deployment at hand, which is what the specific preflight failure messages
+exist to make quick.
 
 The unit tests cover the parts of the harness that can be wrong on a
 workstation: every manifest renders and decodes, the capacity and ownership

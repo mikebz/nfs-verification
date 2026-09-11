@@ -46,7 +46,7 @@ These land in `artifacts/<run-id>/environment.json` and are attached to every fa
 | Secondary platform | Bare metal |
 | Portability rule | No distro-specific APIs. Kubernetes API plus portable Linux binaries (fio, dd, flock, stat) in test containers. |
 | Harness | Go, `client-go`, standard `testing` package. No Ginkgo. |
-| Execution | Local `make` targets. No CI wiring in v1. |
+| Execution | Local `make` targets with GitHub Actions CI for hermetic checks (fmt, vet, unit, build). |
 | Topology | 3 control plane, >= 2 workers. CNodes and DNodes colocated. No dedicated storage network. |
 | Upgrade testing | Out of scope, deferred to v2 |
 | Multi-cluster | Out of scope |
