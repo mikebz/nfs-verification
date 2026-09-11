@@ -51,13 +51,18 @@ preflight:
 # All P cases. Budget: under 15 minutes on 2 nodes.
 .PHONY: test-presubmit
 test-presubmit:
-	go test $(PKG) -v -timeout=30m -skip '^TestChaos' $(COMMON)
+	go test $(PKG) -v -timeout=30m -skip '^Test(Chaos|Soak)' $(COMMON)
 
 # The chaos vector. Budget: under 4 hours per Section 4.2, and every case
 # injures the server. Repeated failover alone is five outages end to end.
 .PHONY: test-chaos
 test-chaos:
 	go test $(PKG) -v -timeout=240m -run '^TestChaos' $(COMMON)
+
+# The weekly soak vector. All W cases per Section 4.2.
+.PHONY: test-soak
+test-soak:
+	go test $(PKG) -v -timeout=240m -run '^TestSoak' $(COMMON)
 
 # Everything. Same budget as chaos, since chaos dominates it.
 .PHONY: test-e2e
