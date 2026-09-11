@@ -147,7 +147,7 @@ Each step is one pull request. Later steps depend only on earlier ones.
 | 4 | Grace and lock reclaim: CHAOS-05, CHAOS-06, CHAOS-07, OBS-02, OBS-03, designed in [`03-grace-and-lock-reclaim-design.md`](03-grace-and-lock-reclaim-design.md) | done, [PR #8](https://github.com/mikebz/nfs-verification/pull/8) |
 | 5 | Close out Provisioning (PROV): PROV-02, PROV-05 to PROV-11 | done, [PR #10](https://github.com/mikebz/nfs-verification/pull/10) |
 | 6 | Close out Concurrency and Data Integrity (DATA): DATA-06 to DATA-13, locktool helper, designed in [`04-data-path-and-locktool-design.md`](04-data-path-and-locktool-design.md) | run on GKE 2026-09-11: DATA-05 to DATA-09 and DATA-11 to DATA-13 pass, with CHAOS-06; DATA-11's punch half reports blocked on a busybox image; DATA-10 not yet run; DATA-14 deferred, see test plan Section 3.2 |
-| 7 | Observability (OBS): OBS-05, OBS-06, OBS-07 and the half of OBS-01 that needs no fault, designed in [`05-observability-design.md`](05-observability-design.md). Does not close out Section 3.5: OBS-01's behavioral half needs a fault that lands in step 10 | in progress, first of three pull requests: OBS-06 and the kubelet stats reader run on GKE 2026-09-11. The control plane publishes per-volume usage, it agrees with `df` exactly and both move with the workload's write; the case reports blocked on its last assertion because the export has no per-volume quota, which is [F-009](findings.md) and which it cites. OBS-05 follows, then OBS-01 and OBS-07 |
+| 7 | Observability (OBS): OBS-05, OBS-06, OBS-07 and the half of OBS-01 that needs no fault, designed in [`05-observability-design.md`](05-observability-design.md). Does not close out Section 3.5: OBS-01's behavioral half needs a fault that lands in step 10 | in progress, first of three pull requests: OBS-06 and the kubelet stats reader run on GKE 2026-09-11. The control plane publishes per-volume usage, it agrees with `df` exactly and both move with the workload's write; the case fails on its last assertion because the export has no per-volume quota, which is [F-009](findings.md). OBS-05 follows, then OBS-01 and OBS-07 |
 | 8 | Close out Security and Identity (SEC): SEC-03 to SEC-09 | |
 | 9 | Close out Scale and Performance (SCALE): SCALE-01 to SCALE-07 | |
 | 10 | Close out Resiliency and Chaos (CHAOS): CHAOS-03, CHAOS-04, CHAOS-08 to CHAOS-18 | |
@@ -501,17 +501,14 @@ with:
   behavioral half, that the signal moves when a running server stops answering,
   needs a stop-without-exit fault and lands in **step 10**.
 - OBS-05: the server declares a memory limit, its working set is readable
-  against it, and the reading moves when the server is worked. Reports blocked
-  citing the finding when no limit is declared. No case drives the server to its
-  limit.
+  against it, and the reading moves when the server is worked. Fails when no
+  limit is declared. No case drives the server to its limit.
 - OBS-06: the control plane reports the volume's usage, it agrees with `df`
   inside the pod within a stated tolerance, and both move together when the
-  workload writes. Reports blocked citing the finding when the CSI driver
-  reports no usage or the export carries no per-volume quota; fails when the
-  usage is published and does not track the workload.
+  workload writes. Fails when the CSI driver reports no usage.
 - OBS-07: the server's own metrics answer either side of a restart, and either
-  reset cleanly or persist. Reports blocked citing the finding when the server
-  publishes no endpoint; no container-level signal is substituted for one.
+  reset cleanly or persist. Fails when the server publishes no endpoint; no
+  container-level signal is substituted for one.
 
 **Harness added**: two readers. The kubelet's stats summary through the API
 server's node proxy, serving per-volume usage and per-container working set for
@@ -524,11 +521,9 @@ off on exactly the runs whose findings matter.
 Delivered as three pull requests: OBS-06 first, then OBS-05, then OBS-01 and
 OBS-07.
 
-Expect most of it to come back blocked on the provisioner this project runs
-against, which declares no probes, no resource limits and no metrics endpoint.
-That is the phase working, and each result cites its entry in `findings.md`:
-the entries are the deliverable, since a blocked line scrolls past and an entry
-does not. What stays red is data that is published and does not hold up.
+Expect most of it to come back red on the provisioner this project runs against,
+which declares no probes, no resource limits and no metrics endpoint. That is
+the phase working, and it belongs in `findings.md` as one entry.
 
 ---
 

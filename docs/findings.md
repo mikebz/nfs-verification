@@ -58,18 +58,7 @@ which OBS-06 touches.
 
 ### What changed
 
-The verdict first. A deployment that does not implement what an OBS case is
-about now reports **blocked** citing the entry that records it, rather than
-failing, and this entry is what OBS-06 cites when it meets the missing quota.
-The owner's call, taken on this run: a limitation somebody has written down is a
-different result from a defect, and a suite that cannot tell them apart gets
-read as broken. The line held is that an absence the deployment could configure
-away is blocked, while a number contradicting another number still fails, so the
-agreement and movement assertions above keep their teeth. Section 3.5 of the
-test plan and section 5.2 of the observability design carry the rule; the design
-doc records the amendment at its head rather than pretending it always said so.
-
-Then two things in the harness, both exposed by this run rather than by the
+Two things in the harness, both exposed by this run rather than by the
 provisioner:
 
 - **The agreement tolerance is now a fraction of the smaller of the claim's
@@ -86,8 +75,25 @@ provisioner:
   about the script. It now probes first, the way the capacity parsers already
   probe for `stat -f`.
 
-The case itself asserts exactly what it did before. What changed is which
-column of the run summary the answer lands in.
+The case itself is unchanged, and stays red here. That is the point of it: an
+assertion is not relaxed because one provisioner cannot meet it, and this one
+would pass unchanged on a deployment whose exports carry a quota. A run against
+this cluster reports OBS-06 as a failure naming the provisioner's
+configuration, with F-009 as the explanation.
+
+### What the second run settled
+
+Re-run the same day on the same cluster with the corrected tolerance, which is
+what it was there to check. The tolerance came out at 20.5 MiB, two percent of
+the 1 GiB claim rather than of the 10 GiB volume behind it, and both sources
+still tracked the 128 MiB write and cleared the 64 MiB movement floor. So the
+agreement assertion above the quota check can now fail, and the quota check is
+still the only thing failing here.
+
+OBS-02 passed on this run, having failed on the first with a record sweep that
+answered nothing. Nothing in this change reaches that case, so the first result
+was environmental; it is noted because two runs of the same target disagreeing
+is worth knowing when the next one is read.
 
 ---
 
