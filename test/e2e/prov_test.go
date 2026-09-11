@@ -1,6 +1,7 @@
 package e2e
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
@@ -8,6 +9,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -454,7 +456,10 @@ func TestSnapshotAndRestore(t *testing.T) {
 	}
 
 	classes, err := f.C.VolumeSnapshotClasses(ctx)
-	if err != nil || len(classes) == 0 {
+	if err != nil {
+		t.Fatalf("listing VolumeSnapshotClasses: %v", err)
+	}
+	if len(classes) == 0 {
 		t.Logf("VolumeSnapshot CRD is served but no VolumeSnapshotClass is configured for StorageClass %s", f.Env.StorageClass)
 		// Assert clean rejection or unready status when no class is configured.
 		_, snapErr := f.CreateVolumeSnapshot(ctx, "prov05-snap", pvc.Name, "")
@@ -462,7 +467,7 @@ func TestSnapshotAndRestore(t *testing.T) {
 			t.Logf("VolumeSnapshot creation without class rejected cleanly: %v", snapErr)
 		} else {
 			t.Logf("VolumeSnapshot created without class; verifying it does not falsely report readyToUse")
-			readyErr := f.WaitVolumeSnapshotReady(ctx, "prov05-snap", 10*time.Second)
+			readyErr := f.WaitVolumeSnapshotReady(ctx, "prov05-snap", framework.SnapshotProbeTimeout)
 			if readyErr == nil {
 				t.Errorf("snapshot reported readyToUse without a backing VolumeSnapshotClass")
 			}
@@ -633,42 +638,51 @@ func TestChaosProvisionServerDown(t *testing.T) {
 		t.Skipf("blocked: server pod %s has no controller, so deleting it would not bring it back", target.Pod)
 	}
 
-	if err := chaos.DeleteServerPod(ctx, f, target); err != nil {
-		t.Fatalf("injuring server pod: %v", err)
-	}
-
-	// Create claim while server is down.
-	pvc, err := f.CreatePVC(ctx, framework.PVCSpec{Name: "prov07"})
-	if err != nil {
-		t.Fatalf("creating claim during server outage: %v", err)
-	}
-
-	// Check that the claim remains Pending while the server is missing.
-	time.Sleep(5 * time.Second)
-	live, err := f.GetPVC(ctx, pvc.Name)
-	if err != nil {
-		t.Fatalf("re-reading claim: %v", err)
-	}
-	if live.Status.Phase == corev1.ClaimBound {
-		t.Errorf("claim %s bound immediately while server was down", pvc.Name)
-	} else {
-		t.Logf("claim %s remained %s during server outage as expected", pvc.Name, live.Status.Phase)
-	}
-
-	// Wait for server pod recovery.
-	if err := chaos.WaitServerBack(ctx, f, framework.PodReadyTimeout); err != nil {
-		t.Fatalf("server pod did not recover: %v", err)
-	}
-
 	mode, err := f.BindingMode(ctx, f.Env.StorageClass)
 	if err != nil {
 		t.Fatalf("reading binding mode of StorageClass %s: %v", f.Env.StorageClass, err)
 	}
+
+	// Create claim before/during the outage.
+	pvc, err := f.CreatePVC(ctx, framework.PVCSpec{Name: "prov07"})
+	if err != nil {
+		t.Fatalf("creating claim: %v", err)
+	}
+
+	// For WaitForFirstConsumer, schedule the consumer pod before the outage so the
+	// scheduler and CSI driver attempt volume provisioning during the outage.
 	var pod *corev1.Pod
 	if mode == storagev1.VolumeBindingWaitForFirstConsumer {
 		pod = f.MustPod(ctx, toolsPod("holder", pvc.Name, ""))
 	}
 
+	if err := chaos.DeleteServerPod(ctx, f, target); err != nil {
+		t.Fatalf("injuring server pod: %v", err)
+	}
+	if err := chaos.WaitServerGone(ctx, f, target, framework.PodTerminateTimeout); err != nil {
+		t.Fatalf("target server pod did not leave API: %v", err)
+	}
+
+	// Sustained check: verify the claim remains Pending while the server is down.
+	deadline := time.Now().Add(framework.ServerOutageObserveDuration)
+	for time.Now().Before(deadline) {
+		live, err := f.GetPVC(ctx, pvc.Name)
+		if err != nil {
+			t.Fatalf("re-reading claim: %v", err)
+		}
+		if live.Status.Phase == corev1.ClaimBound {
+			t.Fatalf("claim %s bound prematurely while server was down", pvc.Name)
+		}
+		time.Sleep(framework.PollInterval)
+	}
+	t.Logf("claim %s remained Pending throughout server outage", pvc.Name)
+
+	// Wait for a replacement server pod to recover and become Ready.
+	if err := chaos.WaitServerReplaced(ctx, f, target, framework.PodReadyTimeout); err != nil {
+		t.Fatalf("replacement server pod did not recover: %v", err)
+	}
+
+	// For Immediate binding mode, launch the consumer pod once the claim binds.
 	if _, err := f.WaitPVCBound(ctx, pvc.Name, framework.BindTimeout); err != nil {
 		t.Fatalf("claim did not bind after server recovery: %v", err)
 	}
@@ -688,6 +702,29 @@ func TestChaosProvisionServerDown(t *testing.T) {
 	if got != want {
 		t.Fatalf("checksum mismatch: got %s want %s", got, want)
 	}
+
+	// Assert clean teardown and no orphaned backing volume.
+	pv, err := f.PVForClaim(ctx, pvc.Name)
+	if err != nil {
+		t.Fatalf("resolving PV for claim: %v", err)
+	}
+	if err := f.DeletePod(ctx, pod.Name); err != nil {
+		t.Fatalf("deleting pod: %v", err)
+	}
+	if err := f.WaitPodGone(ctx, pod.Name, framework.DeleteTimeout); err != nil {
+		t.Fatalf("pod did not leave API: %v", err)
+	}
+	if err := f.DeletePVC(ctx, pvc.Name); err != nil {
+		t.Fatalf("deleting claim: %v", err)
+	}
+	if err := f.WaitPVCGone(ctx, pvc.Name, framework.DeleteTimeout); err != nil {
+		t.Fatalf("claim did not leave API: %v", err)
+	}
+	if pv.Spec.PersistentVolumeReclaimPolicy == corev1.PersistentVolumeReclaimDelete {
+		if err := f.WaitPVGone(ctx, pv.Name, framework.DeleteTimeout); err != nil {
+			t.Errorf("backing PV %s leaked after server recovery: %v", pv.Name, err)
+		}
+	}
 }
 
 // PROV-08: delete claim while the server pod is down. Deletion must complete
@@ -698,9 +735,9 @@ func TestChaosProvisionServerDown(t *testing.T) {
 //  2. Delete the pod gracefully and wait for it to leave the API before touching the server.
 //  3. Resolve the underlying PV name and reclaim policy.
 //  4. Discover the server pod target. Skip if unmanaged.
-//  5. Delete the server pod via pkg/chaos.
+//  5. Delete the server pod via pkg/chaos and confirm target instance is gone.
 //  6. Delete the claim while the server is down.
-//  7. Wait for the server pod to recover and become Ready.
+//  7. Wait for a replacement server pod to recover and become Ready.
 //  8. Wait for the claim to be completely removed from the API.
 //  9. If reclaim policy was Delete, wait for the PV to be removed as well.
 func TestChaosDeleteClaimServerDown(t *testing.T) {
@@ -741,6 +778,9 @@ func TestChaosDeleteClaimServerDown(t *testing.T) {
 	if err := chaos.DeleteServerPod(ctx, f, target); err != nil {
 		t.Fatalf("injuring server pod: %v", err)
 	}
+	if err := chaos.WaitServerGone(ctx, f, target, framework.PodTerminateTimeout); err != nil {
+		t.Fatalf("target server pod did not leave API: %v", err)
+	}
 
 	// Delete claim while server is down.
 	if err := f.DeletePVC(ctx, pvc.Name); err != nil {
@@ -748,7 +788,7 @@ func TestChaosDeleteClaimServerDown(t *testing.T) {
 	}
 
 	// Wait for server to recover.
-	if err := chaos.WaitServerBack(ctx, f, framework.PodReadyTimeout); err != nil {
+	if err := chaos.WaitServerReplaced(ctx, f, target, framework.PodReadyTimeout); err != nil {
 		t.Fatalf("server pod did not recover: %v", err)
 	}
 
@@ -775,7 +815,7 @@ func TestChaosDeleteClaimServerDown(t *testing.T) {
 //  3. Execute 100 cycles of create PVC -> wait Bound -> delete PVC -> wait gone.
 //  4. Assert all cycles completed successfully.
 //  5. Assert server container restart count did not increase.
-func TestRapidProvisionChurn(t *testing.T) {
+func TestSoakRapidProvisionChurn(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping 100-cycle rapid provision churn in -short mode; Gate: W (weekly soak)")
 	}
@@ -840,8 +880,10 @@ func TestVolumeNameEdgeCases(t *testing.T) {
 	}
 	if _, err := f.C.Kube.CoreV1().PersistentVolumeClaims(framework.Namespace).Create(ctx, longPVC, metav1.CreateOptions{}); err == nil {
 		t.Fatalf("API accepted PVC with 1000-character name")
+	} else if !apierrors.IsInvalid(err) && !apierrors.IsBadRequest(err) {
+		t.Fatalf("expected Invalid/BadRequest API error for 1000-character name, got: %v", err)
 	} else {
-		t.Logf("1000-character volume name rejected cleanly: %v", err)
+		t.Logf("1000-character volume name rejected cleanly with validation error: %v", err)
 	}
 
 	// 2. Direct API call with invalid characters (uppercase letters). Must be rejected cleanly.
@@ -856,8 +898,10 @@ func TestVolumeNameEdgeCases(t *testing.T) {
 	}
 	if _, err := f.C.Kube.CoreV1().PersistentVolumeClaims(framework.Namespace).Create(ctx, badCharPVC, metav1.CreateOptions{}); err == nil {
 		t.Fatalf("API accepted PVC with invalid uppercase name")
+	} else if !apierrors.IsInvalid(err) && !apierrors.IsBadRequest(err) {
+		t.Fatalf("expected Invalid/BadRequest API error for uppercase name, got: %v", err)
 	} else {
-		t.Logf("invalid name rejected cleanly: %v", err)
+		t.Logf("invalid name rejected cleanly with validation error: %v", err)
 	}
 
 	// 3. Boundary RFC 1123 name at maximum allowed length (253 characters).
@@ -948,8 +992,16 @@ func TestTwoStageExpansionUnderIO(t *testing.T) {
 	if err != nil {
 		t.Fatalf("starting background workload: %v", err)
 	}
+	f.Defer(func(ctx context.Context) {
+		if _, err := workload.Stop(ctx); err != nil {
+			t.Logf("stopping background workload in cleanup: %v", err)
+		}
+	})
 
-	// Expand claim while workload is actively writing.
+	// Two-stage expansion:
+	// - For dedicated-server deployments (one server per volume), expansion grows
+	//   the backing block device and then the exported share filesystem.
+	// - For shared-server deployments, expansion updates the per-volume quota / export.
 	if err := f.ExpandPVC(ctx, pvc.Name, grown.String()); err != nil {
 		t.Fatalf("requesting expansion during active I/O: %v", err)
 	}
@@ -957,7 +1009,7 @@ func TestTwoStageExpansionUnderIO(t *testing.T) {
 	if err != nil {
 		t.Fatalf("claim capacity did not reach %s: %v", grown.String(), err)
 	}
-	t.Logf("claim expanded to %s during active I/O", capacity.String())
+	t.Logf("claim expanded to %s during active I/O (sharedServer=%v)", capacity.String(), f.Caps.SharedServer)
 
 	// Stop workload and check results.
 	rep, err := workload.Stop(ctx)
@@ -967,8 +1019,19 @@ func TestTwoStageExpansionUnderIO(t *testing.T) {
 	if errs := rep.Errors(); len(errs) > 0 {
 		t.Errorf("%d I/O errors occurred during volume expansion under active I/O", len(errs))
 	}
-	if len(rep.Committed()) == 0 {
+	if len(rep.Unparsed) > 0 {
+		t.Errorf("the workload log holds %d unparsed lines: %q", len(rep.Unparsed), rep.Unparsed[0])
+	}
+	committed := rep.Committed()
+	if len(committed) == 0 {
 		t.Errorf("no writes were committed by the workload during expansion")
+	}
+	missing, err := f.MissingRecords(ctx, pod.Name, mountPath, committed)
+	if err != nil {
+		t.Fatalf("checking committed records: %v", err)
+	}
+	if len(missing) > 0 {
+		t.Errorf("%d committed writes were lost during volume expansion: %v", len(missing), missing)
 	}
 
 	podRestartsAfter, err := f.PodRestarts(ctx, pod.Name)
@@ -998,8 +1061,13 @@ func TestTwoStageExpansionUnderIO(t *testing.T) {
 		t.Logf("workload sees new capacity under df: %d bytes, was %d",
 			seenAfter.TotalBytes, seenBefore.TotalBytes)
 	case seenAfter.TotalBytes == seenBefore.TotalBytes:
-		t.Logf("df still reports %d bytes after expansion; shared-server export without per-volume quota",
-			seenAfter.TotalBytes)
+		if !f.Caps.SharedServer {
+			t.Errorf("df did not reflect new capacity after expansion on dedicated-server volume: %d bytes, was %d",
+				seenAfter.TotalBytes, seenBefore.TotalBytes)
+		} else {
+			t.Logf("df still reports %d bytes after expansion; shared-server export without per-volume quota",
+				seenAfter.TotalBytes)
+		}
 	default:
 		t.Errorf("share shrank across expansion: df reports %d bytes, was %d",
 			seenAfter.TotalBytes, seenBefore.TotalBytes)
