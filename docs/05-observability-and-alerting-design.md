@@ -88,10 +88,12 @@ section without reading code.
 3. What is asserted is that the input data exists, carries a timestamp, is
    current, and says the same thing the workload says. A number nobody can read
    and a number that is wrong are the same defect from an operator's chair.
-4. A reading is only shown to work by making it move. Every case reads a value,
-   causes something, and reads again. A number that never changes while the
-   thing it measures does is a broken input, and a case that only checked for
-   presence would pass on it.
+4. A reading is only shown to work by making it move. Every case causes
+   something and then establishes that the reading changed, either by a second
+   read of a counter or by a timestamped reading moving past the event the suite
+   already recorded. A number that never changes while the thing it measures
+   does is a broken input, and a case that only checked for presence would pass
+   on it.
 5. A data source the suite cannot reach for its own reasons (RBAC, a missing
    optional API) is blocked, naming what was refused. A source that answers and
    reports nothing about the server or the volume under test is a failure. The
@@ -234,6 +236,17 @@ One named series pulled from a Prometheus-format endpoint. The suite never
 retains these across runs and never aggregates them: a counter reading exists to
 be compared against another reading of the same series taken minutes earlier.
 
+**Read through the Kubernetes API, with the client the suite already has.** A
+`GET` on `/api/v1/nodes/<node>/proxy/metrics` or
+`/api/v1/namespaces/<ns>/pods/<pod>:<port>/proxy/metrics`, issued on the same
+`rest.RESTClient` as every other call, authenticated by the same kubeconfig. No
+SSH, no node login, no pod deployed to scrape from, and no use of the privileged
+node agent: that DaemonSet exists for `/proc/mounts`, dmesg and process signals,
+and nothing in this phase goes through it. The API server proxies to the
+kubelet and to a pod, which is what makes a workstation outside the cluster able
+to read a metrics endpoint with nothing else installed anywhere. Mechanics in
+5.6.
+
 | Field | Type | Meaning |
 |---|---|---|
 | `Name` | string | The series name, verbatim. |
@@ -360,6 +373,12 @@ more code path and no new access:
 | `/metrics/resource` | Prometheus text | The lightweight CPU and memory series metrics-server itself reads. A cross-check on 4.3 that does not need metrics-server installed. |
 | `/metrics/probes` | Prometheus text | Liveness and readiness probe counters for the server container, which is the probe-level view of the same outage OBS-01 reads from pod conditions. |
 
+All five are reached the same way, through the API server's proxy subresource on
+the same client as every other call in the suite. Nothing here execs into a pod,
+logs into a node, deploys a scraper, or uses the privileged node agent: the node
+agent is for `/proc/mounts`, dmesg and process signals, and this phase does not
+touch it.
+
 The parser is minimal and deliberately not a library: Prometheus text format is
 one sample per line, `name{labels} value [timestamp]`, and the suite needs to
 pull a handful of named series out of a response it streams. `/metrics/cadvisor`
@@ -447,23 +466,48 @@ those exists and none of them is usable. With no time-series store, the
 suite is the sampler, and the assertion shape that replaces a stored history is
 a differential one.
 
-The pattern, used by every case in this phase:
+**A baseline read is needed for counters and for nothing else.** A counter
+carries no time dimension: `storage_operation_duration_seconds_count` at a
+moment is everything that has happened since the kubelet started, and the same
+number means "busy cluster, nothing happened just now" or "quiet cluster, one
+mount". Only a second read makes it say anything. That is a property of
+counters, not a choice this design is making, and there is no timestamp that
+substitutes for it because the kubelet sets none on its exposition.
 
-1. Read the series or the reading. This is the baseline.
-2. Cause something: provision a claim, mount it, write bytes, delete the server
+Everything whose value *is* a time needs no baseline at all, and taking one
+would be work for nothing. The suite already records when it caused the event,
+on the fault timeline, so the assertion is against that:
+
+| Reading | What establishes that it changed |
+|---|---|
+| A counter (`storage_operation_*`, `csi_operations_*`, an NFS op count where a server publishes one) | Two reads, before and after. No alternative exists. |
+| A timestamp-valued reading (`container_start_time_seconds`, a pod condition's `lastTransitionTime`, the kubelet's per-volume `time`) | One read, compared against the event time already on the fault timeline. |
+| A gauge on an object the case created (`usedBytes` on its own claim) | Either. The claim starts empty, so the absolute value after writing N bytes is assertable on its own; a baseline read is kept because it costs one call and survives a claim that did not start as empty. |
+
+So the pattern is:
+
+1. Cause something: provision a claim, mount it, write bytes, delete the server
    pod, unmount, delete the claim. All of these are operations the suite already
-   performs.
-3. Read again, after the event's own completion has been established by the
-   existing means (the claim is Bound, the pod is Ready, the recovery measured).
-4. Assert the direction and, where it is knowable, the magnitude. A counter must
-   have increased. A usage gauge must have risen by about what was written. A
-   restart must have moved the container start time forward.
+   performs, and all of them are already timestamped on the fault timeline.
+2. Establish the event completed by the existing means: the claim is Bound, the
+   pod is Ready, the recovery measured.
+3. Read, and for a counter read once before as well.
+4. Assert the direction, or that the timestamp moved past the event, and the
+   magnitude only where the suite knows it.
 
-This is what makes the phase an observability test rather than an inventory. It
-is also the part that needs no monitoring stack at all: the events are the
-suite's own, their times are on the fault timeline already, and a difference
-between two reads is a fact about the cluster that does not depend on anyone's
-retention policy.
+On clocks, since the timestamp comparisons are between two of them: the fault
+timeline is the workstation's clock, `container_start_time_seconds` is the
+node's, and a pod condition's is the API server's. The suite already narrows
+such a comparison by `slo.ClockSkewGuard`, and these assertions use it. At the
+magnitudes here it does not decide anything, a restart moves a start time by
+tens of seconds against a five second guard, but the guard exists, costs one
+call, and keeps this comparison shaped like every other two-clock comparison in
+the suite rather than being the one place that assumes the clocks agree.
+
+This is what makes the phase an observability test rather than an inventory, and
+it needs no monitoring stack: the events are the suite's own, their times are on
+the fault timeline already, and a change established this way is a fact about
+the cluster that does not depend on anyone's retention policy.
 
 The events each case uses, and the reading each expects to move:
 
@@ -838,7 +882,7 @@ because a case that tore down its evidence is unreproducible (Section 4.3).
 | `server-memory.txt` | The readings from 4.3, the declared limit, the fraction, the movement under load, and any OOMKill with its timestamp. |
 | `continuity.txt` | One verdict per series from 4.5, with the interval, the gap, and the last good read either side of the restart. |
 | `server-metrics.txt` | What the server's own endpoint served, or the record that it declares none, with the port that was probed. |
-| `counter-deltas.txt` | The pairs from 4.4: series, the event between the two reads, both values, and the direction asserted. This is the file that shows a reading responded to something rather than merely existing. |
+| `counter-deltas.txt` | One row per change asserted: the reading, the event, and either the pair of counter values from 4.4 or the timestamp and the event time it was compared against. This is the file that shows a reading responded to something rather than merely existing. |
 
 The fault timeline is unchanged: the pod delete records itself through the
 existing mechanism, which is what the availability window is read against.
@@ -896,7 +940,7 @@ One check per rule in section 2, observable from a run.
 | 1. No stack, no hosted backend | The suite creates no Deployment, Service or CRD, and makes no call to any host other than the API server. Reviewable from the diff and from the absence of any new module dependency. |
 | 2. No alert is read or asserted | No case reads a rule, a threshold or a severity, and the word does not appear in an assertion. `AlertSLO` is renamed so the vocabulary matches. Grep-able. |
 | 3. The input is asserted: present, timestamped, current, correct | Each case fails on a missing reading, on a reading with no timestamp, on one older than the freshness bound, and on one that contradicts the workload's own view. Four distinct failure messages, unit tested against recorded kubelet output: a real `/stats/summary` body and a real `/metrics` exposition, parsed by the same code the cases use. |
-| 4. A reading is shown to work by making it move | Every case writes a `counter-deltas.txt` row: the series, the event between the two reads, both values. A case with no delta row has asserted only presence and does not satisfy this phase. Unit tests on the classifier: an unchanged value where the case required an increase fails, naming the event. |
+| 4. A reading is shown to work by making it move | Every case writes a `counter-deltas.txt` row: the reading, the event, and either both values or the event time the timestamp was compared against. A case with no such row has asserted only presence and does not satisfy this phase. Unit tests: an unchanged counter where the case required an increase fails naming the event, and a start time that did not move past the fault fails even though the read succeeded. |
 | 5. Unreachable is blocked, silent is failed | Unit tests on the classifier: a 403 on `nodes/proxy` or `pods/proxy` and an absent `metrics.k8s.io` produce blocked naming the verb or the API; a Summary API that answers with no entry for the claim, a declared server metrics port that serves nothing, and an API that never shows the server unready across a real outage each produce failures whose messages name the deployment. |
 | 6. An unestablished precondition is blocked | OBS-05 with a reading that never moved reports blocked with the delta. OBS-07 with no successful read reports `absent` and blocks. |
 | 7. No ceiling chase | Neither case has a code path that writes toward a capacity threshold or a memory limit. Both write a fixed bounded delta from `pkg/slo` and stop. Reviewable from the two constants and their call sites. |
