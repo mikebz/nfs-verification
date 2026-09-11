@@ -89,11 +89,10 @@ cluster.
 
 ### Categories and skipping
 
-- All E2E tests are organized strictly along one dimension: domain category
-  (`PROV`, `DATA`, `CHAOS`, `OBS`, `SEC`, and later `SCALE`, `SKEW`).
-  Artificial dimensions like soak or presubmit/nightly gates are omitted: each
-  category lives in its own test file, has its own target (`make test-prov`,
-  `make test-data`, etc.), and corresponds to a `Test<Category>...` function prefix.
+- All E2E tests are organized strictly by category (`PROV`, `DATA`, `CHAOS`,
+  `OBS`, `SEC`, and later `SCALE`, `SKEW`). Each category lives in its own test
+  file, has its own target (`make test-prov`, `make test-data`, etc.), and
+  corresponds to a `Test<Category>...` function prefix.
 - Cases skip **by capability, never by platform name**:
   `if !f.Caps.CanStopNode`, never `if platform == "gke"`. Capabilities are
   discovered at preflight and recorded in `environment.json`.

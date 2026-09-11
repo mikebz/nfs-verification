@@ -165,10 +165,6 @@ DATA-06. CHAOS-07 reports **blocked** when the server does not make grace
 observable, because there is then no window to place a lock grant inside or
 outside of, and OBS-03 is the case that fails for that missing signal.
 
-OBS-02 and OBS-03 are named `TestChaos...` like the CHAOS cases, because they
-injure the server and the fast path holds no fault injection. The prefix marks
-what a case does, not which section of the plan it comes from.
-
 The chaos cases report **blocked** when the cluster gives them nothing to
 injure: no server pods discovered, a server whose process name lives in an image
 entrypoint, or a server pod no controller owns, which would not come back. A
