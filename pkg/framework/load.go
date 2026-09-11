@@ -46,15 +46,47 @@ type LoadReport struct {
 	Unparsed []string
 }
 
-// StartWriteLoad launches the workload and returns once its first write has
+// RecordBytes is the length of one record the workload writes. Not
+// configurable: it is a property of the measurement, and the sweep that reads
+// these back computes every expected byte from it.
+const RecordBytes = 4096
+
+// WriteLoadSpec is how a case asks for a workload.
+type WriteLoadSpec struct {
+	Pod string
+	Dir string
+	ID  string
+	// NoFsync leaves each record to the client rather than committing it.
+	//
+	// Only the negative durability case sets this, and it changes what a logged
+	// success means: with the fsync a success is a write the server
+	// acknowledged, and without it a success is only a write the client
+	// accepted. A case that asserted post-COMMIT durability against this
+	// workload would be asserting a guarantee nothing gave it.
+	NoFsync bool
+}
+
+// StartWriteLoad launches a workload that commits every record, which is what
+// every case except the negative durability one wants.
+func (f *Framework) StartWriteLoad(ctx context.Context, pod, dir, id string) (*WriteLoad, error) {
+	return f.StartWriteLoadSpec(ctx, WriteLoadSpec{Pod: pod, Dir: dir, ID: id})
+}
+
+// StartWriteLoadSpec launches the workload and returns once its first write has
 // committed, so a fault injected afterwards lands on a workload that is
 // demonstrably running rather than one that may not have started.
 //
 // The workload itself is scripts/write-load.sh.
-func (f *Framework) StartWriteLoad(ctx context.Context, pod, dir, id string) (*WriteLoad, error) {
+func (f *Framework) StartWriteLoadSpec(ctx context.Context, spec WriteLoadSpec) (*WriteLoad, error) {
+	pod, dir, id := spec.Pod, spec.Dir, spec.ID
+	fsync := "fsync"
+	if spec.NoFsync {
+		fsync = "nofsync"
+	}
 	w := &WriteLoad{f: f, Pod: f.Name(pod), Dir: dir,
 		log: "/tmp/load-" + id + ".log", run: "/tmp/load-" + id + ".run"}
-	script, err := RunScript("write-load.sh", id, dir, w.run, w.log)
+	script, err := RunScript("write-load.sh", id, dir, w.run, w.log,
+		strconv.Itoa(RecordBytes), fsync)
 	if err != nil {
 		return nil, err
 	}
@@ -139,6 +171,21 @@ func (r LoadReport) Committed() []int {
 	return out
 }
 
+// Attempted returns the indices of every write the workload tried, in order.
+//
+// This is the set the negative durability case sweeps. Without an fsync a
+// logged success means only that the client accepted the write, so the
+// committed set is not the set that may be on the share, and a sweep restricted
+// to it would miss a record that arrived by a route nobody asserted on.
+func (r LoadReport) Attempted() []int {
+	var out []int
+	for _, rec := range r.Records {
+		out = append(out, rec.Index)
+	}
+	sort.Ints(out)
+	return out
+}
+
 // CommittedBefore returns the indices acknowledged at or before t, which is the
 // set a fault injected at t may not lose.
 func (r LoadReport) CommittedBefore(t time.Time) []int {
@@ -195,36 +242,4 @@ func (f *Framework) PodNow(ctx context.Context, pod string) (time.Time, error) {
 		return time.Time{}, fmt.Errorf("unexpected clock reading %q from %s: %w", out, pod, err)
 	}
 	return time.Unix(secs, 0), nil
-}
-
-// MissingRecords reports which of the given record indices are absent or empty
-// on the share, read from whichever pod is asked. A different pod from the
-// writer is the interesting one: it crosses the server rather than the writer's
-// own page cache.
-func (f *Framework) MissingRecords(ctx context.Context, pod, dir string, indices []int) ([]int, error) {
-	if len(indices) == 0 {
-		return nil, nil
-	}
-	args := make([]string, 0, len(indices)+1)
-	args = append(args, dir)
-	for _, i := range indices {
-		args = append(args, strconv.Itoa(i))
-	}
-	script, err := RunScript("missing-records.sh", "sweep", args...)
-	if err != nil {
-		return nil, err
-	}
-	out, err := f.C.MustSh(ctx, Namespace, f.Name(pod), "main", script)
-	if err != nil {
-		return nil, err
-	}
-	var missing []int
-	for _, line := range strings.Fields(out) {
-		n, err := strconv.Atoi(line)
-		if err != nil {
-			return nil, fmt.Errorf("unexpected output while checking records: %q", out)
-		}
-		missing = append(missing, n)
-	}
-	return missing, nil
 }

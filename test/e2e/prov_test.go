@@ -1026,13 +1026,9 @@ func TestProvTwoStageExpansionUnderIO(t *testing.T) {
 	if len(committed) == 0 {
 		t.Errorf("no writes were committed by the workload during expansion")
 	}
-	missing, err := f.MissingRecords(ctx, pod.Name, mountPath, committed)
-	if err != nil {
-		t.Fatalf("checking committed records: %v", err)
-	}
-	if len(missing) > 0 {
-		t.Errorf("%d committed writes were lost during volume expansion: %v", len(missing), missing)
-	}
+	// By content, not by existence. An expansion that grew the backing device
+	// and lost a byte inside a record it kept would pass an existence check.
+	assertCommittedRecordsIntact(ctx, t, f, pod.Name, mountPath, committed)
 
 	podRestartsAfter, err := f.PodRestarts(ctx, pod.Name)
 	if err != nil {

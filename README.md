@@ -55,6 +55,11 @@ the generated run ID. `make unit` needs no cluster, no network and no
 kubeconfig, and unit tests must stay that way: a test under `pkg/` that needs a
 cluster belongs in `test/e2e` behind a capability check.
 
+`make test-data` injects faults. DATA-12 and DATA-13 kill the NFS server
+process, because the suite sorts strictly by category and they are DATA cases;
+`test-prov` and `test-obs` are already in the same position. Only `make unit`
+and `make preflight` leave the cluster alone.
+
 E2E tests are organized strictly by category: `test-prov` runs provisioning cases
 (`-run '^TestProv'`), `test-data` runs data consistency cases (`-run '^TestData'`),
 `test-chaos` runs chaos cases (`-run '^TestChaos'`), `test-obs` runs observability
@@ -143,6 +148,8 @@ charged to every case eats the `go test -timeout` budget for the package.
 | DATA-09 | Silly rename, cross-node unlink and rename under a held descriptor | DATA |
 | DATA-10 | A 100k-entry directory listed while another pod deletes from it | DATA |
 | DATA-11 | Sparse write and read back; the hole punch recorded, not asserted, on 4.1 | DATA |
+| DATA-12 | fsync durability: every committed record intact after a server kill | DATA |
+| DATA-13 | Negative durability: un-fsynced records may be absent, never wrong | DATA |
 | SEC-01 | uid and gid preservation across pods on two nodes | SEC |
 | SEC-02 | What the export does to a root-owned write, and whether it does it coherently | SEC |
 | OBS-04 | A mount that cannot succeed reaches the operator as a Kubernetes Event | OBS |

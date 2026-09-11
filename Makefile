@@ -66,6 +66,11 @@ preflight:
 test-prov:
 	go test $(PKG) -v -timeout=45m -run '^TestProv' $(COMMON)
 
+# test-data injects faults. DATA-12 and DATA-13 kill the NFS server process
+# through pkg/chaos, because the suite sorts strictly by category and they are
+# DATA cases. test-prov and test-obs are already in the same position; this is
+# where the repository is rather than something the durability pair introduced,
+# but a reader of this file should not have to infer it.
 .PHONY: test-data
 test-data:
 	go test $(PKG) -v -timeout=45m -run '^TestData' $(COMMON)

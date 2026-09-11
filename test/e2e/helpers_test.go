@@ -87,3 +87,53 @@ func requireServerSideLocking(ctx context.Context, t *testing.T, f *framework.Fr
 		}
 	}
 }
+
+// assertCommittedRecordsIntact sweeps a set of committed records and fails on
+// anything but correct.
+//
+// Every one of these was written with conv=fsync and acknowledged by the
+// server, so post-COMMIT durability applies to all of them and there is no
+// verdict here that is lawful except correct. Absent is data loss, short is a
+// record the server acknowledged and then truncated, and wrong is corruption.
+func assertCommittedRecordsIntact(ctx context.Context, t *testing.T, f *framework.Framework,
+	pod, dir string, committed []int) {
+	t.Helper()
+	sweep, err := f.VerifyRecords(ctx, pod, dir, committed)
+	if err != nil {
+		t.Fatalf("sweeping committed records from %s: %v", pod, err)
+	}
+	recordSweep(t, f, sweep)
+	if len(sweep.Unparsed) > 0 {
+		t.Errorf("the sweep produced %d lines the harness could not read, so the verdicts below cannot "+
+			"be trusted: %q", len(sweep.Unparsed), sweep.Unparsed[0])
+	}
+
+	if wrong, ok := sweep.FirstWrong(); ok {
+		t.Errorf("%d of %d committed records hold bytes nobody wrote, the first in record %d at offset "+
+			"%d. A wrong byte at an offset that was written is corruption under every reading of the "+
+			"protocol, and it is a worse finding than a lost write",
+			sweep.Count(framework.VerdictWrong), len(committed), wrong.Index, wrong.Offset)
+	}
+	lost := sweep.Count(framework.VerdictAbsent) + sweep.Count(framework.VerdictShort)
+	if lost > slo.MaxCommittedWritesLost {
+		t.Errorf("%d of %d writes the server had already committed before the fault are gone or "+
+			"truncated (absent %v, short %v). Post-COMMIT durability is a protocol guarantee, so this "+
+			"is data loss, not a slow recovery",
+			lost, len(committed), sweep.Indices(framework.VerdictAbsent), sweep.Indices(framework.VerdictShort))
+	}
+	if lost == 0 && sweep.Count(framework.VerdictWrong) == 0 {
+		t.Logf("all %d writes committed before the fault survived it, and still say what they said",
+			len(committed))
+	}
+}
+
+// recordSweep puts the verdict table in the bundle. Written whether the case
+// passed or not: a run where three records came back short and recovered is a
+// different run from one where none did, and the pass looks identical.
+func recordSweep(t *testing.T, f *framework.Framework, sweep framework.RecordSweep) {
+	t.Helper()
+	t.Logf("record sweep: %s", sweep)
+	if err := f.WriteArtifact("record-verdicts.txt", []byte(sweep.Table())); err != nil {
+		t.Logf("writing the verdict table: %v", err)
+	}
+}

@@ -62,13 +62,13 @@ func TestRunScriptCarriesArgumentsIntact(t *testing.T) {
 	}
 
 	args := []string{"/mnt/share/a file.txt", "payload with 'quotes'", "$HOME and `id`", "*"}
-	script, err := RunScript("missing-records.sh", "unit", args...)
+	script, err := RunScript("verify-records.sh", "unit", args...)
 	if err != nil {
 		t.Fatalf("building the invocation: %v", err)
 	}
 	// Swap the real script's body for the stand-in, leaving the shipping and
 	// the quoting exactly as RunScript produced them.
-	script = strings.Replace(script, strings.TrimRight(scriptBody("missing-records.sh"), "\n"),
+	script = strings.Replace(script, strings.TrimRight(scriptBody("verify-records.sh"), "\n"),
 		strings.TrimRight(body, "\n"), 1)
 
 	cmd := exec.Command(sh, "-c", script)
@@ -90,7 +90,7 @@ func TestRunScriptCarriesArgumentsIntact(t *testing.T) {
 //  1. Ship a script under an id holding a path separator.
 //  2. Assert it is refused rather than written outside /tmp.
 func TestRunScriptRejectsABadID(t *testing.T) {
-	if _, err := RunScript("missing-records.sh", "../../etc/cron.d/x"); err == nil {
+	if _, err := RunScript("verify-records.sh", "../../etc/cron.d/x"); err == nil {
 		t.Error("an id that escapes /tmp was accepted as a script filename")
 	}
 }

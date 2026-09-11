@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mikebz/nfs-verification/pkg/chaos"
 	"github.com/mikebz/nfs-verification/pkg/framework"
 	"github.com/mikebz/nfs-verification/pkg/slo"
 )
@@ -1261,4 +1262,168 @@ func assertNoNewKernelErrors(ctx context.Context, t *testing.T, f *framework.Fra
 			}
 		}
 	}
+}
+
+// DATA-12: fsync and COMMIT durability. Write records with conv=fsync, SIGKILL
+// the server under the load, and assert every record the server acknowledged
+// before the fault is still there and still says what it said.
+//
+// It asserts durability and nothing else. CHAOS-01 owns the recovery number for
+// this same fault, and two cases reporting it is two numbers to reconcile when
+// they disagree. This waits for recovery because it has to read the share
+// afterwards, and does not assert the SLO.
+//
+// It is a TestData case, not a TestChaos one, even though it kills the server.
+// The suite sorts strictly by category, and the precedent is already in the
+// tree: PROV-07 and PROV-08 take the server down under TestProv, OBS-02 and
+// OBS-03 inject a failover under TestObs. After this case `make test-data`
+// injects faults, which a reader of the Makefile should not have to infer.
+//
+// Steps:
+//  1. Start a record workload that commits every record, and let it run.
+//  2. SIGKILL the server process on its node.
+//  3. Wait for I/O to resume, without asserting the recovery SLO.
+//  4. Sweep every record committed before the fault, from a pod on the other
+//     node, by content.
+//  5. Fail on any verdict but correct: absent is data loss, short is a record
+//     the server acknowledged and then truncated, wrong is corruption.
+func TestDataFsyncDurabilityAcrossServerKill(t *testing.T) {
+	f := framework.New(t, "DATA-12")
+	requireCap(t, f.Caps.NodeAgent, "signalling the server process on a node needs the privileged node agent")
+	ctx, cancel := caseCtx(t, 45*time.Minute)
+	defer cancel()
+
+	s := startChaosCase(ctx, t, f, "data12")
+
+	faultAt, err := f.PodNow(ctx, s.writer)
+	if err != nil {
+		t.Fatalf("reading the writer's clock: %v", err)
+	}
+	before, err := s.load.Report(ctx)
+	if err != nil {
+		t.Fatalf("reading the workload log: %v", err)
+	}
+	committed := before.CommittedBefore(faultAt)
+	if len(committed) == 0 {
+		t.Fatalf("the workload committed nothing before the fault, so this case would assert over an " +
+			"empty set and pass having checked nothing")
+	}
+
+	killed, err := chaos.KillServerProcess(ctx, f, s.target, "KILL")
+	if err != nil {
+		// Every path out means the fault was not injected. Asserting durability
+		// across a crash that never happened would pass for the wrong reason.
+		t.Skipf("blocked: %v", err)
+	}
+	t.Logf("SIGKILLed %d process(es) in %s on %s with %d records committed",
+		killed, s.target.Pod, s.target.Node, len(committed))
+
+	// Waited out, not asserted. CHAOS-01 owns this number for this fault.
+	waitRecovered(ctx, t, s, faultAt)
+	final, err := s.load.Stop(ctx)
+	if err != nil {
+		t.Fatalf("stopping the workload: %v", err)
+	}
+	if errs := final.Errors(); len(errs) > slo.MaxIOErrors {
+		t.Errorf("the workload saw %d I/O errors across the kill, want %d: a hard NFSv4.1 mount is "+
+			"specified to block and retry, not to return an error (first at index %d)",
+			len(errs), slo.MaxIOErrors, errs[0].Index)
+	}
+
+	assertCommittedRecordsIntact(ctx, t, f, s.verifier, s.dir, committed)
+}
+
+// DATA-13: the negative of DATA-12, and the reason it is worth having. The
+// records are written without an fsync, so nothing the server acknowledged is
+// at stake and data that was never committed may be absent. That is never a
+// failure. What still fails is a byte that differs at an offset that was
+// written.
+//
+// Three things this case deliberately does not do.
+//
+// It does not assert that data was lost. It very often will not be: a SIGKILL
+// of the server *process* does not drop the host page cache underneath it, so
+// unstable writes the server had not yet committed to disk may well still be
+// there when it restarts. The plan says "may be absent, asserted as acceptable,
+// documented", and documented is the whole job.
+//
+// It does not call a short record corruption. Without an fsync the client is
+// free to have flushed a prefix, and a prefix is lawful. A wrong byte inside
+// the prefix is not, and that is the line the sweep draws.
+//
+// It does not measure recovery. CHAOS-01 owns that number.
+//
+// Steps:
+//  1. Start a record workload with no fsync, and let it run.
+//  2. SIGKILL the server process on its node.
+//  3. Wait for I/O to resume.
+//  4. Sweep every record the workload attempted, from a pod on the other node.
+//  5. Record how many were absent or short, and fail only on wrong.
+func TestDataDurabilityWithoutFsync(t *testing.T) {
+	f := framework.New(t, "DATA-13")
+	requireCap(t, f.Caps.NodeAgent, "signalling the server process on a node needs the privileged node agent")
+	ctx, cancel := caseCtx(t, 45*time.Minute)
+	defer cancel()
+
+	s := startChaosCaseWith(ctx, t, f, "data13", framework.WriteLoadSpec{NoFsync: true})
+
+	faultAt, err := f.PodNow(ctx, s.writer)
+	if err != nil {
+		t.Fatalf("reading the writer's clock: %v", err)
+	}
+	before, err := s.load.Report(ctx)
+	if err != nil {
+		t.Fatalf("reading the workload log: %v", err)
+	}
+	// Every record it tried, not the ones it logged as succeeding. Without an
+	// fsync a logged success means only that the client accepted the write, so
+	// a sweep restricted to that set would miss a record that reached the share
+	// by a route nothing asserted on.
+	attempted := before.Attempted()
+	if len(attempted) == 0 {
+		t.Fatalf("the workload attempted nothing before the fault, so this case would sweep an empty " +
+			"set and pass having checked nothing")
+	}
+
+	killed, err := chaos.KillServerProcess(ctx, f, s.target, "KILL")
+	if err != nil {
+		t.Skipf("blocked: %v", err)
+	}
+	t.Logf("SIGKILLed %d process(es) in %s on %s with %d un-fsynced records attempted",
+		killed, s.target.Pod, s.target.Node, len(attempted))
+
+	waitRecovered(ctx, t, s, faultAt)
+	if _, err := s.load.Stop(ctx); err != nil {
+		t.Fatalf("stopping the workload: %v", err)
+	}
+
+	sweep, err := f.VerifyRecords(ctx, s.verifier, s.dir, attempted)
+	if err != nil {
+		t.Fatalf("sweeping the records from %s: %v", s.verifier, err)
+	}
+	recordSweep(t, f, sweep)
+	if len(sweep.Unparsed) > 0 {
+		t.Errorf("the sweep produced %d lines the harness could not read, so the verdicts below cannot "+
+			"be trusted: %q", len(sweep.Unparsed), sweep.Unparsed[0])
+	}
+
+	// The only failure in this case. A byte that differs at an offset that was
+	// written is corruption under every reading of the protocol, fsync or no
+	// fsync, and it is why this case exists rather than being folded into a log
+	// line of DATA-12's.
+	if wrong, ok := sweep.FirstWrong(); ok {
+		t.Errorf("%d of %d records hold a byte that differs from what was written, the first in record "+
+			"%d at offset %d. Losing an un-fsynced write is lawful and is not what this reports: a "+
+			"record that is present and says something else is corruption, and the absence of an fsync "+
+			"does not licence it",
+			sweep.Count(framework.VerdictWrong), len(attempted), wrong.Index, wrong.Offset)
+	}
+
+	// Documented, not asserted. This is the whole job of the case.
+	absent, short := sweep.Count(framework.VerdictAbsent), sweep.Count(framework.VerdictShort)
+	t.Logf("of %d records written without an fsync across a server process kill: %d correct, %d absent, "+
+		"%d a correct prefix. All three are acceptable. A SIGKILL of the server process does not drop "+
+		"the host page cache underneath it, so a run where nothing was lost is the ordinary result and "+
+		"says nothing is wrong",
+		len(attempted), sweep.Count(framework.VerdictCorrect), absent, short)
 }

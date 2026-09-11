@@ -37,10 +37,19 @@ type chaosSetup struct {
 	budget   time.Duration
 }
 
-// startChaosCase builds that setup, and skips rather than fails when the
-// cluster gives it nothing to injure. A cluster whose server pods were never
-// discovered is a configuration gap, not a storage defect.
+// startChaosCase builds that setup with a workload that commits every record,
+// which is what every case except the negative durability one wants.
 func startChaosCase(ctx context.Context, t *testing.T, f *framework.Framework, id string) chaosSetup {
+	t.Helper()
+	return startChaosCaseWith(ctx, t, f, id, framework.WriteLoadSpec{})
+}
+
+// startChaosCaseWith builds it with a workload the caller shapes, and skips
+// rather than fails when the cluster gives it nothing to injure. A cluster
+// whose server pods were never discovered is a configuration gap, not a storage
+// defect.
+func startChaosCaseWith(ctx context.Context, t *testing.T, f *framework.Framework, id string,
+	load framework.WriteLoadSpec) chaosSetup {
 	t.Helper()
 	requireCap(t, f.Caps.MultiNode, "verifying committed data from a second client needs two schedulable workers")
 	target, err := chaos.ServerTarget(ctx, f)
@@ -60,15 +69,16 @@ func startChaosCase(ctx context.Context, t *testing.T, f *framework.Framework, i
 	f.MustPod(ctx, toolsPod("verifier", pvc.Name, nodeB))
 
 	dir := fileIn(id)
-	load, err := f.StartWriteLoad(ctx, "writer", dir, id)
+	load.Pod, load.Dir, load.ID = "writer", dir, id
+	running, err := f.StartWriteLoadSpec(ctx, load)
 	if err != nil {
 		t.Fatalf("starting the workload on %s: %v", nodeA, err)
 	}
-	f.Defer(func(ctx context.Context) { _, _ = load.Stop(ctx) })
+	f.Defer(func(ctx context.Context) { _, _ = running.Stop(ctx) })
 	// A few records before the fault, so that the case is measuring an
 	// interruption to something rather than a cold start.
 	if err := framework.Poll(ctx, framework.PollInterval, 2*time.Minute, func(ctx context.Context) (bool, error) {
-		rep, err := load.Report(ctx)
+		rep, err := running.Report(ctx)
 		if err != nil {
 			return false, err
 		}
@@ -76,7 +86,7 @@ func startChaosCase(ctx context.Context, t *testing.T, f *framework.Framework, i
 	}); err != nil {
 		t.Fatalf("the workload never got going before the fault: %v", err)
 	}
-	return chaosSetup{f: f, target: target, load: load, dir: dir,
+	return chaosSetup{f: f, target: target, load: running, dir: dir,
 		writer: "writer", verifier: "verifier", budget: budget}
 }
 
@@ -167,18 +177,10 @@ func assertLoadHealthy(ctx context.Context, t *testing.T, s chaosSetup, committe
 	}
 
 	// Durability, read from the other node so the check crosses the server
-	// rather than the writer's own page cache.
-	missing, err := s.f.MissingRecords(ctx, s.verifier, s.dir, committed)
-	if err != nil {
-		t.Fatalf("checking committed records from the second client: %v", err)
-	}
-	if len(missing) > slo.MaxCommittedWritesLost {
-		t.Errorf("%d of %d writes the server had already committed before the fault are gone: %v. "+
-			"Post-COMMIT durability is a protocol guarantee, so this is data loss, not a slow recovery",
-			len(missing), len(committed), missing)
-	} else {
-		t.Logf("all %d writes committed before the fault survived it", len(committed))
-	}
+	// rather than the writer's own page cache. By content, not by existence: a
+	// record that is there and says something else is worse than one that is
+	// gone, and an existence check reports the two the same way.
+	assertCommittedRecordsIntact(ctx, t, s.f, s.verifier, s.dir, committed)
 }
 
 // observeGrace reads what the server's log stream said about grace since a

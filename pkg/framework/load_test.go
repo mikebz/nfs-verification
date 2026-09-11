@@ -6,7 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
-	"strings"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -103,7 +103,8 @@ func TestWriteLoadScriptRuns(t *testing.T) {
 	// goes through shell quoting on the way to the pod.
 	dir := filepath.Join(base, "records here")
 
-	cmd := exec.Command(sh, materializeScript(t, "write-load.sh"), dir, run, log)
+	cmd := exec.Command(sh, materializeScript(t, "write-load.sh"), dir, run, log,
+		strconv.Itoa(RecordBytes), "fsync")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("launching the workload: %v\n%s", err, out)
 	}
@@ -139,42 +140,110 @@ func TestWriteLoadScriptRuns(t *testing.T) {
 			t.Errorf("record %d was logged as committed but is not there: %v", i, err)
 			continue
 		}
-		if info.Size() != 4096 {
-			t.Errorf("record %d is %d bytes, want 4096", i, info.Size())
+		if info.Size() != RecordBytes {
+			t.Errorf("record %d is %d bytes, want %d", i, info.Size(), RecordBytes)
 		}
+	}
+	// And each record holds the pattern derived from its own index. An all-zero
+	// record would make the sweep afterwards unable to tell a torn write from a
+	// hole, and every record would verify against every other record's expected
+	// bytes, which is a sweep that cannot fail.
+	scratch := filepath.Join(base, "expected")
+	indices := rep.Committed()
+	args := append([]string{materializeScript(t, "verify-records.sh"), dir, strconv.Itoa(RecordBytes), scratch},
+		intsAsArgs(indices)...)
+	out, err := exec.Command(sh, args...).Output()
+	if err != nil {
+		t.Fatalf("sweeping what the workload wrote: %v", err)
+	}
+	sweep := ParseRecordSweep(string(out))
+	if n := sweep.Count(VerdictCorrect); n != len(indices) {
+		t.Errorf("%d of %d records the workload committed verify as correct: %s. The workload and the "+
+			"sweep have to agree on the pattern, or every durability verdict is meaningless",
+			n, len(indices), sweep)
 	}
 }
 
-// TestMissingRecordsScript checks the record sweep under a real shell, with a
-// present record, an absent one and an empty one. An empty record counts as
-// missing: a zero-length file is not a committed 4KiB write.
-// TestMissingRecordsScript covers the sweep that checks committed writes
-// survived a failover, under a real shell and in a path with a space in it.
+// TestVerifyRecordsScript covers the content-verifying sweep under a real
+// shell, in a path with a space in it, over all four verdicts.
+//
+// The four have to be distinguishable, because the durability pair fails on
+// different subsets of them: one fails on anything but correct, the other only
+// on wrong. A sweep that collapsed short into wrong would fail the negative
+// case on lawful behaviour, and one that collapsed wrong into short would let
+// corruption pass.
 //
 // Steps:
-//  1. Lay down one full record, no second record, and an empty third.
-//  2. Sweep all three.
-//  3. Assert the absent and the empty are both reported: a zero-length file is
-//     not a committed 4KiB write.
-func TestMissingRecordsScript(t *testing.T) {
-	sh := lookOrSkip(t, "sh")
+//  1. Lay down a correct record, an absent one, an empty one, a truncated one,
+//     one with a flipped byte, and one that is longer than a record should be.
+//  2. Sweep all six.
+//  3. Assert the verdict of each, and that the flipped byte's offset is
+//     reported so a defect can be filed against a specific byte.
+func TestVerifyRecordsScript(t *testing.T) {
+	sh := lookOrSkip(t, "sh", "cmp", "yes")
 	dir := filepath.Join(t.TempDir(), "records here")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("preparing the record directory: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "rec-1"), make([]byte, 4096), 0o644); err != nil {
-		t.Fatalf("writing a record: %v", err)
+	// The pattern the workload writes, derived from the index, so the sweep can
+	// recompute any byte from its offset without a copy of the original.
+	pattern := func(index, size int) []byte {
+		unit := []byte("rec-" + strconv.Itoa(index) + "\n")
+		out := make([]byte, 0, size+len(unit))
+		for len(out) < size {
+			out = append(out, unit...)
+		}
+		return out[:size]
 	}
-	if err := os.WriteFile(filepath.Join(dir, "rec-3"), nil, 0o644); err != nil {
-		t.Fatalf("writing an empty record: %v", err)
+	write := func(index int, body []byte) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, "rec-"+strconv.Itoa(index)), body, 0o644); err != nil {
+			t.Fatalf("writing rec-%d: %v", index, err)
+		}
 	}
-	cmd := exec.Command(sh, materializeScript(t, "missing-records.sh"), dir, "1", "2", "3")
-	out, err := cmd.Output()
+	const size = 4096
+	write(1, pattern(1, size))  // correct
+	write(3, nil)               // empty, which is absent
+	write(4, pattern(4, 1024))  // a correct prefix
+	corrupt := pattern(5, size) // a byte that differs at an offset that was written
+	corrupt[100] = 'X'
+	write(5, corrupt)
+	write(6, append(pattern(6, size), 'Z')) // longer than a record should be
+	// rec-2 is never written at all.
+
+	scratch := filepath.Join(t.TempDir(), "expected")
+	out, err := exec.Command(sh, materializeScript(t, "verify-records.sh"),
+		dir, strconv.Itoa(size), scratch, "1", "2", "3", "4", "5", "6").Output()
 	if err != nil {
 		t.Fatalf("running the record sweep: %v", err)
 	}
-	if got, want := strings.Fields(string(out)), []string{"2", "3"}; !equalStrings(got, want) {
-		t.Errorf("the sweep reported %v missing, want %v", got, want)
+	sweep := ParseRecordSweep(string(out))
+	if len(sweep.Unparsed) > 0 {
+		t.Fatalf("the sweep produced unreadable lines: %q", sweep.Unparsed)
+	}
+	want := map[int]RecordVerdict{
+		1: VerdictCorrect, 2: VerdictAbsent, 3: VerdictAbsent,
+		4: VerdictShort, 5: VerdictWrong, 6: VerdictWrong,
+	}
+	if len(sweep.Results) != len(want) {
+		t.Fatalf("the sweep answered for %d of %d records: %s", len(sweep.Results), len(want), out)
+	}
+	for _, r := range sweep.Results {
+		if r.Verdict != want[r.Index] {
+			t.Errorf("rec-%d came back %s, want %s", r.Index, r.Verdict, want[r.Index])
+		}
+	}
+
+	// The offset is what makes a corruption finding filable: an index alone
+	// says a record is wrong, and an offset says which byte to look at. cmp
+	// counts from 1, so the byte at index 100 is char 101.
+	wrong, ok := sweep.FirstWrong()
+	if !ok {
+		t.Fatal("no wrong record was reported")
+	}
+	if wrong.Index != 5 || wrong.Offset != 101 {
+		t.Errorf("the first wrong byte was reported at record %d offset %d, want record 5 offset 101",
+			wrong.Index, wrong.Offset)
 	}
 }
 
@@ -191,14 +260,11 @@ func equalInts(a, b []int) bool {
 	return true
 }
 
-func equalStrings(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
+// intsAsArgs renders record indices as command-line arguments.
+func intsAsArgs(indices []int) []string {
+	out := make([]string, len(indices))
+	for i, n := range indices {
+		out[i] = strconv.Itoa(n)
 	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
+	return out
 }
