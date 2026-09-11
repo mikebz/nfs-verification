@@ -46,7 +46,7 @@ These land in `artifacts/<run-id>/environment.json` and are attached to every fa
 | Secondary platform | Bare metal |
 | Portability rule | No distro-specific APIs. Kubernetes API plus portable Linux binaries (fio, dd, flock, stat) in test containers. |
 | Harness | Go, `client-go`, standard `testing` package. No Ginkgo. |
-| Execution | Local `make` targets. No CI wiring in v1. |
+| Execution | Local `make` targets with GitHub Actions CI for hermetic checks (fmt, vet, unit, build). |
 | Topology | 3 control plane, >= 2 workers. CNodes and DNodes colocated. No dedicated storage network. |
 | Upgrade testing | Out of scope, deferred to v2 |
 | Multi-cluster | Out of scope |
@@ -124,119 +124,119 @@ Explicitly **not** archetypes C or D. There is no distributed lock manager, no c
 
 ## Section 3: Coverage
 
-Case ID scheme: `VECTOR-NN`. Gate column: `P` presubmit, `N` nightly, `W` weekly soak, `M` manual.
+Case ID scheme: `CATEGORY-NN`, matching the test category (`PROV`, `DATA`, `CHAOS`, `SCALE`, `OBS`, `SEC`, `SKEW`).
 
 ### 3.1 Provisioning and lifecycle (PROV)
 
-| ID | Case | Expected | Gate |
-|---|---|---|---|
-| PROV-01 | Dynamic provision RWX PVC, bind, mount, write, delete | PV created and removed; backing directory or volume reclaimed | P |
-| PROV-02 | Provision 20 RWX PVCs concurrently | All bind; no duplicate export IDs; no server restart | N |
-| PROV-03 | Delete PVC while a pod still has it mounted | PVC stays Terminating; deletion completes only after unmount | P |
-| PROV-04 | Volume expansion, if the driver advertises it | Capacity visible in pod; existing data intact; if unsupported, API rejects cleanly | P |
-| PROV-05 | Snapshot and restore, if advertised | Restored volume mounts RWX and content matches; if unsupported, clean rejection | N |
-| PROV-06 | Reclaim policy Retain | PV persists after PVC deletion; data readable when rebound | N |
-| PROV-07 | Provision while the server pod is down | PVC stays Pending; binds after recovery; no orphaned export | N |
-| PROV-08 | Delete PVC while the server pod is down | No orphaned export or leaked backing storage after recovery | N |
-| PROV-09 | Rapid create/delete churn, 100 cycles | No export ID exhaustion, no fd leak, no server RSS growth beyond ceiling | W |
-| PROV-10 | Provision with a 1000-character volume name or unusual characters | Clean rejection or correct handling; no malformed export config | N |
-| PROV-11 | Two-stage expansion under active I/O: grow the backing block volume, then grow the share | Client `df` reflects new capacity with no unmount, no server restart, and no I/O error. **Shape depends on fan-out**: with one server per volume this is a block resize plus filesystem grow; with a shared server it is a quota or export change and the block device may not move at all. Preflight decides which assertion applies. | N |
+| ID | Case | Expected |
+|---|---|---|
+| PROV-01 | Dynamic provision RWX PVC, bind, mount, write, delete | PV created and removed; backing directory or volume reclaimed |
+| PROV-02 | Provision 20 RWX PVCs concurrently | All bind; no duplicate export IDs; no server restart |
+| PROV-03 | Delete PVC while a pod still has it mounted | PVC stays Terminating; deletion completes only after unmount |
+| PROV-04 | Volume expansion, if the driver advertises it | Capacity visible in pod; existing data intact; if unsupported, API rejects cleanly |
+| PROV-05 | Snapshot and restore, if advertised | Restored volume mounts RWX and content matches; if unsupported, clean rejection |
+| PROV-06 | Reclaim policy Retain | PV persists after PVC deletion; data readable when rebound |
+| PROV-07 | Provision while the server pod is down | PVC stays Pending; binds after recovery; no orphaned export |
+| PROV-08 | Delete PVC while the server pod is down | No orphaned export or leaked backing storage after recovery |
+| PROV-09 | Rapid create/delete churn, 100 cycles | No export ID exhaustion, no fd leak, no server RSS growth beyond ceiling |
+| PROV-10 | Provision with a 1000-character volume name or unusual characters | Clean rejection or correct handling; no malformed export config |
+| PROV-11 | Two-stage expansion under active I/O: grow the backing block volume, then grow the share | Client `df` reflects new capacity with no unmount, no server restart, and no I/O error. **Shape depends on fan-out**: with one server per volume this is a block resize plus filesystem grow; with a shared server it is a quota or export change and the block device may not move at all. Preflight decides which assertion applies. |
 
 ### 3.2 Concurrency and data integrity (DATA)
 
 Assertions here are calibrated to the protocol claim in 2.3. Do not tighten them.
 
-| ID | Case | Expected | Gate |
-|---|---|---|---|
-| DATA-01 | N pods, N files, partitioned by file, checksummed | All checksums match; no cross-contamination | P |
-| DATA-02 | N pods append to one file with `O_APPEND` | No lost or interleaved records; byte count exact | P |
-| DATA-03 | Close-to-open: pod A writes and closes, pod B opens and reads | B sees A's data | P |
-| DATA-04 | Negative: pod A writes without closing, pod B reads | B may see stale data. Test asserts this is **not a failure**. Documents the boundary. | P |
-| DATA-05 | `flock` and `fcntl` byte-range locks across pods on different nodes | Mutual exclusion holds; second acquirer blocks | P |
-| DATA-06 | Lock held by a pod that is force-deleted | Lock released within one lease period; new acquirer succeeds | N |
-| DATA-07 | Same file opened `O_DIRECT` by two pods | Writes land; no corruption; reads reflect committed data | N |
-| DATA-08 | `noac` mount variant, cross-pod visibility without close | Immediate visibility, confirming the difference from DATA-04 | N |
-| DATA-09 | Rename, unlink, and re-create while another pod holds the file open | Open fd remains valid; silly-rename behavior correct | N |
-| DATA-10 | Large directory (100k entries) readdir concurrent with deletes | Listing completes, no server crash, no use-after-free. Derived from a documented directory-chunk reuse crash in READDIR under cache pressure. | N |
-| DATA-11 | Sparse file write, hole punch, read back | Correct zero regions; reported size consistent | N |
-| DATA-12 | fsync and COMMIT durability: write, fsync, kill server | Post-recovery data present | N |
-| DATA-13 | Negative durability: write without fsync, kill server | Data may be absent. Asserted as acceptable, documented. | N |
-| DATA-14 | Mixed 70/30 read/write, 4KiB to 1GiB files, 20 pods, 1h | Zero checksum mismatches | W |
+| ID | Case | Expected |
+|---|---|---|
+| DATA-01 | N pods, N files, partitioned by file, checksummed | All checksums match; no cross-contamination |
+| DATA-02 | N pods append to one file with `O_APPEND` | No lost or interleaved records; byte count exact |
+| DATA-03 | Close-to-open: pod A writes and closes, pod B opens and reads | B sees A's data |
+| DATA-04 | Negative: pod A writes without closing, pod B reads | B may see stale data. Test asserts this is **not a failure**. Documents the boundary. |
+| DATA-05 | `flock` and `fcntl` byte-range locks across pods on different nodes | Mutual exclusion holds; second acquirer blocks |
+| DATA-06 | Lock held by a pod that is force-deleted | Lock released within one lease period; new acquirer succeeds |
+| DATA-07 | Same file opened `O_DIRECT` by two pods | Writes land; no corruption; reads reflect committed data |
+| DATA-08 | `noac` mount variant, cross-pod visibility without close | Immediate visibility, confirming the difference from DATA-04 |
+| DATA-09 | Rename, unlink, and re-create while another pod holds the file open | Open fd remains valid; silly-rename behavior correct |
+| DATA-10 | Large directory (100k entries) readdir concurrent with deletes | Listing completes, no server crash, no use-after-free. Derived from a documented directory-chunk reuse crash in READDIR under cache pressure. |
+| DATA-11 | Sparse file write, hole punch, read back | Correct zero regions; reported size consistent |
+| DATA-12 | fsync and COMMIT durability: write, fsync, kill server | Post-recovery data present |
+| DATA-13 | Negative durability: write without fsync, kill server | Data may be absent. Asserted as acceptable, documented. |
+| DATA-14 | Mixed 70/30 read/write, 4KiB to 1GiB files, 20 pods, 1h | Zero checksum mismatches |
 
 ### 3.3 Resiliency and chaos (CHAOS)
 
 Every case in this section runs with active I/O and asserts against the SLO table in Section 3.8.
 
-| ID | Case | Expected | Gate |
-|---|---|---|---|
-| CHAOS-01 | SIGKILL the server process during active write | I/O blocks, does not error; resumes within restart SLO; committed data intact | N |
-| CHAOS-02 | Delete the server pod during active write | As above, plus locks reclaimed | N |
-| CHAOS-03 | Hard-stop the node hosting the server | I/O resumes within node-loss SLO; backing volume re-attaches | N |
-| CHAOS-04 | Network partition the server from clients, then heal | Clients block, then recover; no data loss | N |
-| CHAOS-05 | Repeated failover, 5 cycles inside 10 minutes | Each cycle recovers; grace does not enter a re-entry loop. Derived from reports of clients stalled for hours after repeated grace entry during address takeover. | N |
-| CHAOS-06 | Failover while a client holds byte-range locks | All locks reclaimed; no conflicting lock granted to a different client during grace | N |
-| CHAOS-07 | Failover while a second client attempts a *new* lock | New acquisition rejected during grace with a retryable error, then succeeds after grace ends. Never granted during grace. | N |
-| CHAOS-08 | Client-side: server restarts with new state | Client handles stale handles without permanent EIO; no manual remount required | N |
-| CHAOS-09 | kubelet restart on a client node with mounts active | Mounts survive; I/O resumes | N |
-| CHAOS-10 | CSI node plugin pod eviction with mounts active | Existing mounts unaffected; new mounts queue and succeed after recovery | N |
-| CHAOS-11 | CNI restart on a client node | I/O blocks then resumes; no unmount | N |
-| CHAOS-12 | NetworkPolicy applied that blocks the data path, then removed | Clients block, then recover cleanly | N |
-| CHAOS-13 | Backing block volume disconnect during write | Errors surface as retryable; no silent corruption | N |
-| CHAOS-14 | **Colocation deadlock**: server pod scheduled on the same node as its clients, under memory pressure | No reclaim deadlock. Specific to hyperconverged CNode/DNode topology: the local client blocks in page reclaim waiting on a local server that needs memory to progress. | N |
-| CHAOS-15 | Client node OOM with dirty pages on the NFS mount | Bounded failure; no node-level hang | W |
-| CHAOS-16 | 24h chaos soak: randomized kills, partitions, evictions | Zero data corruption; zero unrecovered mounts; zero core dumps | W |
-| CHAOS-17 | Recovery state store lost or corrupted, then server restarts | Bounded, honest failure: clients fail to reclaim and locks are lost, but no file data corruption, no permanent client hang, and the loss is observable in metrics or logs. Silently granting conflicting locks after state loss is the failure being hunted. | N |
-| CHAOS-18 | Delegation held by client A, client B opens the same file conflicting | Delegation recalled and returned within the recall timeout; B proceeds; A sees no corruption. **Skipped, not failed, when delegations are disabled**, which is a common default. Ties to a reported crash on the delegation return path. | N |
+| ID | Case | Expected |
+|---|---|---|
+| CHAOS-01 | SIGKILL the server process during active write | I/O blocks, does not error; resumes within restart SLO; committed data intact |
+| CHAOS-02 | Delete the server pod during active write | As above, plus locks reclaimed |
+| CHAOS-03 | Hard-stop the node hosting the server | I/O resumes within node-loss SLO; backing volume re-attaches |
+| CHAOS-04 | Network partition the server from clients, then heal | Clients block, then recover; no data loss |
+| CHAOS-05 | Repeated failover, 5 cycles inside 10 minutes | Each cycle recovers; grace does not enter a re-entry loop. Derived from reports of clients stalled for hours after repeated grace entry during address takeover. |
+| CHAOS-06 | Failover while a client holds byte-range locks | All locks reclaimed; no conflicting lock granted to a different client during grace |
+| CHAOS-07 | Failover while a second client attempts a *new* lock | New acquisition rejected during grace with a retryable error, then succeeds after grace ends. Never granted during grace. |
+| CHAOS-08 | Client-side: server restarts with new state | Client handles stale handles without permanent EIO; no manual remount required |
+| CHAOS-09 | kubelet restart on a client node with mounts active | Mounts survive; I/O resumes |
+| CHAOS-10 | CSI node plugin pod eviction with mounts active | Existing mounts unaffected; new mounts queue and succeed after recovery |
+| CHAOS-11 | CNI restart on a client node | I/O blocks then resumes; no unmount |
+| CHAOS-12 | NetworkPolicy applied that blocks the data path, then removed | Clients block, then recover cleanly |
+| CHAOS-13 | Backing block volume disconnect during write | Errors surface as retryable; no silent corruption |
+| CHAOS-14 | **Colocation deadlock**: server pod scheduled on the same node as its clients, under memory pressure | No reclaim deadlock. Specific to hyperconverged CNode/DNode topology: the local client blocks in page reclaim waiting on a local server that needs memory to progress. |
+| CHAOS-15 | Client node OOM with dirty pages on the NFS mount | Bounded failure; no node-level hang |
+| CHAOS-16 | 24h chaos soak: randomized kills, partitions, evictions | Zero data corruption; zero unrecovered mounts; zero core dumps |
+| CHAOS-17 | Recovery state store lost or corrupted, then server restarts | Bounded, honest failure: clients fail to reclaim and locks are lost, but no file data corruption, no permanent client hang, and the loss is observable in metrics or logs. Silently granting conflicting locks after state loss is the failure being hunted. |
+| CHAOS-18 | Delegation held by client A, client B opens the same file conflicting | Delegation recalled and returned within the recall timeout; B proceeds; A sees no corruption. **Skipped, not failed, when delegations are disabled**, which is a common default. Ties to a reported crash on the delegation return path. |
 
 Blanket rule: any core dump on any server pod fails the run. Cores are collected into run artifacts.
 
 ### 3.4 Scale and performance (SCALE)
 
-| ID | Case | Expected | Gate |
-|---|---|---|---|
-| SCALE-01 | Max RWX mounts per node, ramp to failure | Documented ceiling; failures are clean, not kernel hangs | N |
-| SCALE-02 | 50 RWX volumes per cluster | All mountable; server RSS below ceiling | N |
-| SCALE-03 | Pod fan-out 1, 10, 50, 100 on one volume | Throughput degradation curve recorded; no cliff or timeout | N |
-| SCALE-04 | Small-file write storm (1M files, 1-64KiB) | Server RSS bounded, no OOMKill. Derived from repeated production reports of unbounded memory growth under small-file write load. | W |
-| SCALE-05 | Metadata-heavy: 100k stat/create/unlink per minute | No server restart; latency recorded | N |
-| SCALE-06 | Noisy neighbor across exports on a shared server (**enabled only if fan-out > 1**) | One export's load does not starve another beyond a stated bound | N |
-| SCALE-07 | Sustained 8h throughput soak | No degradation trend beyond 10%; no leak | W |
+| ID | Case | Expected |
+|---|---|---|
+| SCALE-01 | Max RWX mounts per node, ramp to failure | Documented ceiling; failures are clean, not kernel hangs |
+| SCALE-02 | 50 RWX volumes per cluster | All mountable; server RSS below ceiling |
+| SCALE-03 | Pod fan-out 1, 10, 50, 100 on one volume | Throughput degradation curve recorded; no cliff or timeout |
+| SCALE-04 | Small-file write storm (1M files, 1-64KiB) | Server RSS bounded, no OOMKill. Derived from repeated production reports of unbounded memory growth under small-file write load. |
+| SCALE-05 | Metadata-heavy: 100k stat/create/unlink per minute | No server restart; latency recorded |
+| SCALE-06 | Noisy neighbor across exports on a shared server (**enabled only if fan-out > 1**) | One export's load does not starve another beyond a stated bound |
+| SCALE-07 | Sustained 8h throughput soak | No degradation trend beyond 10%; no leak |
 
 ### 3.5 Observability (OBS)
 
-| ID | Case | Expected | Gate |
-|---|---|---|---|
-| OBS-01 | Server unavailable | Alert fires within SLO; correct severity and target | N |
-| OBS-02 | Failover event | Event is observable in metrics or logs with a timestamp; measurable duration | N |
-| OBS-03 | Grace period entry and exit | Both observable; duration measurable. Required to make CHAOS-05 diagnosable. | N |
-| OBS-04 | Mount failure on a client | Surfaced as a Kubernetes Event on the pod with an actionable reason | P |
-| OBS-05 | Server memory approaching ceiling | Alert fires before OOMKill | N |
-| OBS-06 | Volume near capacity | Alert fires; `df` inside the pod agrees with the control plane | N |
-| OBS-07 | Metrics survive server restart | Counters either reset cleanly or persist; no gaps that hide an outage | N |
+| ID | Case | Expected |
+|---|---|---|
+| OBS-01 | Server unavailable | Alert fires within SLO; correct severity and target |
+| OBS-02 | Failover event | Event is observable in metrics or logs with a timestamp; measurable duration |
+| OBS-03 | Grace period entry and exit | Both observable; duration measurable. Required to make CHAOS-05 diagnosable. |
+| OBS-04 | Mount failure on a client | Surfaced as a Kubernetes Event on the pod with an actionable reason |
+| OBS-05 | Server memory approaching ceiling | Alert fires before OOMKill |
+| OBS-06 | Volume near capacity | Alert fires; `df` inside the pod agrees with the control plane |
+| OBS-07 | Metrics survive server restart | Counters either reset cleanly or persist; no gaps that hide an outage |
 
 ### 3.6 Security and identity (SEC)
 
-| ID | Case | Expected | Gate |
-|---|---|---|---|
-| SEC-01 | UID/GID preservation across pods | Ownership as written. Derived from reports of v4 clients mapping local IDs to `nobody` on modern kernels. | P |
-| SEC-02 | `root_squash` enabled: root-owned pod writes | Squashed to anonymous as configured | P |
-| SEC-03 | Pod `securityContext.fsGroup` interaction | Group access correct; no unexpected chown storm on large volumes | N |
-| SEC-04 | Export access rules through the cluster Service path | Per-client rules still apply. Derived from an open report that connections carrying no client identity are treated as the proxy host, degrading per-IP rules to the global access type. **High priority: Kubernetes always inserts a Service.** | N |
-| SEC-05 | Denied client attempts mount | Rejected, not silently granted | N |
-| SEC-06 | Dual-stack client identity (**skipped unless both IP families present**) | Client identity consistent. Derived from an open report of inconsistent normalization between IPv4 and IPv4-mapped IPv6. | N |
-| SEC-07 | Two pods with identical client identity after restart | No state collision; no lost locks | N |
-| SEC-08 | Data path confidentiality, stated | Records whether NFS traffic on the shared pod network is cleartext, and whether any transport encryption is in effect. This is a **finding, not a pass/fail**: with no dedicated storage network, cleartext NFS shares a fabric with tenant traffic, and that fact belongs in the record whether or not it is acceptable. | N |
-| SEC-09 | Server pod under the platform's admission policy | Server runs with the capability set it actually needs and no more. A file-handle-based backend needs `CAP_DAC_READ_SEARCH` for `open_by_handle_at(2)`; if the policy strips it, file handle operations fail with EPERM. Conditional on the backend using that path. | N |
+| ID | Case | Expected |
+|---|---|---|
+| SEC-01 | UID/GID preservation across pods | Ownership as written. Derived from reports of v4 clients mapping local IDs to `nobody` on modern kernels. |
+| SEC-02 | `root_squash` enabled: root-owned pod writes | Squashed to anonymous as configured |
+| SEC-03 | Pod `securityContext.fsGroup` interaction | Group access correct; no unexpected chown storm on large volumes |
+| SEC-04 | Export access rules through the cluster Service path | Per-client rules still apply. Derived from an open report that connections carrying no client identity are treated as the proxy host, degrading per-IP rules to the global access type. **High priority: Kubernetes always inserts a Service.** |
+| SEC-05 | Denied client attempts mount | Rejected, not silently granted |
+| SEC-06 | Dual-stack client identity (**skipped unless both IP families present**) | Client identity consistent. Derived from an open report of inconsistent normalization between IPv4 and IPv4-mapped IPv6. |
+| SEC-07 | Two pods with identical client identity after restart | No state collision; no lost locks |
+| SEC-08 | Data path confidentiality, stated | Records whether NFS traffic on the shared pod network is cleartext, and whether any transport encryption is in effect. This is a **finding, not a pass/fail**: with no dedicated storage network, cleartext NFS shares a fabric with tenant traffic, and that fact belongs in the record whether or not it is acceptable. |
+| SEC-09 | Server pod under the platform's admission policy | Server runs with the capability set it actually needs and no more. A file-handle-based backend needs `CAP_DAC_READ_SEARCH` for `open_by_handle_at(2)`; if the policy strips it, file handle operations fail with EPERM. Conditional on the backend using that path. |
 
 ### 3.7 Version skew (SKEW, conditional)
 
 Enabled only when preflight determines the server and CSI driver are independently versioned.
 
-| ID | Case | Expected | Gate |
-|---|---|---|---|
-| SKEW-01 | CSI driver N with server N-1 | Provision, mount, I/O all work, or fail with an explicit compatibility error | M |
-| SKEW-02 | CSI driver N-1 with server N | As above | M |
-| SKEW-03 | Server restarted into a different minor version with clients mounted | Clients recover; state reclaimed or cleanly re-established | M |
+| ID | Case | Expected |
+|---|---|---|
+| SKEW-01 | CSI driver N with server N-1 | Provision, mount, I/O all work, or fail with an explicit compatibility error |
+| SKEW-02 | CSI driver N-1 with server N | As above |
+| SKEW-03 | Server restarted into a different minor version with clients mounted | Clients recover; state reclaimed or cleanly re-established |
 
 ### 3.8 SLO table
 
@@ -246,10 +246,10 @@ Referenced by every CHAOS case. Values live in `pkg/slo/slo.go` and are changed 
 
 Failover SLOs are meaningless without pinned lease and grace values, because grace is the dominant term. Common defaults are a 60s lease and a 90s grace period, which is *above* the 60s restart target: on stock settings the plan fails its own SLO with no defect present. Two configurations are therefore run, both recorded in `environment.json`:
 
-| Config | Lease | Grace | SLO applied | Gate |
-|---|---|---|---|---|
-| `tuned` | 20s | 30s | 60s restart, 90s node loss | N |
-| `default` | 60s | 90s | grace + 30s | N |
+| Config | Lease | Grace | SLO applied |
+|---|---|---|---|
+| `tuned` | 20s | 30s | 60s restart, 90s node loss |
+| `default` | 60s | 90s | grace + 30s |
 
 The `default` config is not a formality. It documents what a customer who changes nothing actually experiences, and it is the configuration most escalations will arrive on. Preflight reads the live values and fails if they are unset or outside both profiles, rather than letting a third value silently invalidate every timing assertion.
 
@@ -294,18 +294,19 @@ If either is absent, CHAOS-03 is reported as **blocked on cluster configuration*
 - No distro-specific APIs. Chaos is expressed as Kubernetes operations (pod delete, node cordon and drain, NetworkPolicy apply, node shutdown via whatever the platform provides) behind an interface with a GKE implementation and a bare-metal implementation.
 - Every case is skippable by capability, never by platform name. `if !caps.CanKillNode { t.Skip() }`, never `if platform == "gke"`.
 
-### 4.2 Gates
+### 4.2 Execution by Category
 
 | Target | Contents | Budget |
 |---|---|---|
 | `make preflight` | Section 0 only | < 3 min |
-| `make test-presubmit` | All `P` cases | < 15 min, 2 nodes |
-| `make test-nightly` | All `P` and `N` cases | < 3 h, 4 nodes |
-| `make test-chaos` | CHAOS-01 through CHAOS-16 | < 4 h, 4 nodes |
-| `make test-soak` | All `W` cases | 24 h, 4 nodes |
-| `make test-all` | Everything except `M` | Overnight |
+| `make test-prov` | All PROV cases | < 45 min, 2 nodes |
+| `make test-data` | All DATA cases | < 45 min, 2 nodes |
+| `make test-chaos` | All CHAOS cases | < 4 h, 4 nodes |
+| `make test-obs` | All OBS cases | < 45 min, 2 nodes |
+| `make test-sec` | All SEC cases | < 30 min, 2 nodes |
+| `make test-e2e` | All categories end to end | < 5 h, 4 nodes |
 
-Presubmit deliberately holds no chaos cases. Chaos is slow and its failures need human triage; putting it in the fast gate trains people to ignore red.
+E2E tests are organized strictly by category. Each category has its own test file, Makefile target, and corresponding `Test<Category>...` function prefix.
 
 ### 4.3 Triage runbook
 

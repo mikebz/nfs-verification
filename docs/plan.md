@@ -50,8 +50,9 @@ what keeps a workstation kernel out of the result.
 ### Structure
 
 Go, `client-go`, the standard `testing` package, table-driven where the case has
-a table. No Ginkgo. One test function per plan case, named for its plan ID
-(`TestPROV01_...`), so a failure in CI names the case a human can look up.
+a table. No Ginkgo. One test function per plan case, named for what the case does
+(with the plan ID in the comment above it), so a failure in CI names what actually
+failed.
 
 ### Discovery over declaration
 
@@ -88,12 +89,10 @@ cluster.
 
 ### Categories and skipping
 
-- The plan sorts cases into presubmit, nightly, soak and manual. Until there is
-  more than one category of case in the repository, that lives in the comment
-  above each test and in `go test -run`, not in harness machinery. The rule the
-  categories exist to enforce still holds: the fast path holds no chaos, because
-  chaos is slow, its failures need human triage, and red in the fast path trains
-  people to ignore red.
+- All E2E tests are organized strictly by category (`PROV`, `DATA`, `CHAOS`,
+  `OBS`, `SEC`, and later `SCALE`, `SKEW`). Each category lives in its own test
+  file, has its own target (`make test-prov`, `make test-data`, etc.), and
+  corresponds to a `Test<Category>...` function prefix.
 - Cases skip **by capability, never by platform name**:
   `if !f.Caps.CanStopNode`, never `if platform == "gke"`. Capabilities are
   discovered at preflight and recorded in `environment.json`.
@@ -146,8 +145,8 @@ Each step is one pull request. Later steps depend only on earlier ones.
 | 2b | The three presubmit cases held back from step 2: DATA-02, OBS-04, SEC-02 | done, [PR #4](https://github.com/mikebz/nfs-verification/pull/4) |
 | 3 | Chaos operations package plus CHAOS-01 and CHAOS-02, the SLO measurement path, fault timelines | done, [PR #4](https://github.com/mikebz/nfs-verification/pull/4) |
 | 4 | Grace and lock reclaim: CHAOS-05, CHAOS-06, CHAOS-07, OBS-02, OBS-03, designed in [`03-grace-and-lock-reclaim-design.md`](03-grace-and-lock-reclaim-design.md) | done, [PR #8](https://github.com/mikebz/nfs-verification/pull/8) |
-| 5 | Close out Provisioning (PROV): PROV-02, PROV-05 to PROV-11 | in progress, branch `prov-step5-cases` |
-| 6 | Close out Concurrency and Data Integrity (DATA): DATA-06 to DATA-14, locktool helper | |
+| 5 | Close out Provisioning (PROV): PROV-02, PROV-05 to PROV-11 | done, [PR #10](https://github.com/mikebz/nfs-verification/pull/10) |
+| 6 | Close out Concurrency and Data Integrity (DATA): DATA-06 to DATA-14, locktool helper | next |
 | 7 | Close out Observability (OBS): OBS-01, OBS-05, OBS-06, OBS-07 | |
 | 8 | Close out Security and Identity (SEC): SEC-03 to SEC-09 | |
 | 9 | Close out Scale and Performance (SCALE): SCALE-01 to SCALE-07 | |
@@ -320,10 +319,10 @@ pod, and a kill that matched nothing is an error rather than a fault. A case
 that measures recovery from a fault that never happened passes for the wrong
 reason, which is worse than a case that does not run.
 
-**Gates.** There are now slow cases to keep out of the fast path, so the
-Section 4.2 split exists: `make test-presubmit` skips `TestChaos...` and
-`make test-chaos` runs only those. The category lives in the test name and a
-`go test` pattern, not in harness machinery.
+**Category targets.** E2E tests are split cleanly by category: `make test-prov`,
+`make test-data`, `make test-chaos`, `make test-obs`, `make test-sec`, and
+`make test-e2e`. The category lives in the test name (`Test<Category>...`) and a
+`go test` pattern, not in complex harness machinery.
 
 **Still not here**: node power operations, the locktool image, fio, snapshots.
 Grace and reclaim (CHAOS-05 to CHAOS-07) are step 4, and they are where lock
@@ -401,7 +400,7 @@ and volume expansion under active I/O:
   orphaned exports or leaked backing block volumes once the server returns.
 - PROV-09: rapid create/delete churn (100 cycles). Asserts no export ID
   exhaustion, no file descriptor leaks, and server RSS remains bounded under
-  the ceiling. Gated in weekly soak (`Gate: W`).
+  the ceiling.
 - PROV-10: provision with a 1000-character volume name or unusual characters.
   Asserts clean rejection or correct handling without malformed export configuration.
 - PROV-11: two-stage expansion under active I/O. Grows the backing block volume,

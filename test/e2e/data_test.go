@@ -24,7 +24,7 @@ import (
 //  2. Write and close a file on the writer, using a redirect, since the close
 //     is what makes the content visible.
 //  3. Read it on the reader and compare.
-func TestCloseToOpen(t *testing.T) {
+func TestDataCloseToOpen(t *testing.T) {
 	f := framework.New(t, "DATA-03")
 	requireCap(t, f.Caps.MultiNode, "cross-node close-to-open needs two schedulable workers")
 	ctx, cancel := caseCtx(t, 10*time.Minute)
@@ -56,7 +56,7 @@ func TestCloseToOpen(t *testing.T) {
 //  4. Release the lock in the holder.
 //  5. The contender must then be granted it, inside a bound that has nothing
 //     to do with lease expiry, since this was a clean release.
-func TestLocksAcrossNodes(t *testing.T) {
+func TestDataLocksAcrossNodes(t *testing.T) {
 	f := framework.New(t, "DATA-05")
 	requireCap(t, f.Caps.MultiNode, "cross-node locking needs two schedulable workers")
 	ctx, cancel := caseCtx(t, 15*time.Minute)
@@ -109,7 +109,7 @@ func TestLocksAcrossNodes(t *testing.T) {
 //  4. Assert the four checksums are distinct, so two writers landing on one
 //     content cannot read as a pass.
 //  5. Assert the directory holds exactly four entries.
-func TestConcurrentWritersDistinctFiles(t *testing.T) {
+func TestDataConcurrentWritersDistinctFiles(t *testing.T) {
 	f := framework.New(t, "DATA-01")
 	ctx, cancel := caseCtx(t, 20*time.Minute)
 	defer cancel()
@@ -201,7 +201,7 @@ func TestConcurrentWritersDistinctFiles(t *testing.T) {
 //     recorded as the documented boundary. Anything else is corruption.
 //  4. Close the descriptor.
 //  5. The reader must then see the whole payload, and the delay is logged.
-func TestNoVisibilityBeforeClose(t *testing.T) {
+func TestDataNoVisibilityBeforeClose(t *testing.T) {
 	f := framework.New(t, "DATA-04")
 	requireCap(t, f.Caps.MultiNode, "the cross-node visibility boundary needs two schedulable workers")
 	ctx, cancel := caseCtx(t, 15*time.Minute)
@@ -284,7 +284,7 @@ const appendCaveat = "\n\nNote before filing: NFSv4.1 has no append operation. A
 //     A torn record is corruption under any reading of the protocol.
 //  5. Assert the line count is exactly what was written. This is the flagged
 //     assertion, so a mismatch carries the note that routes it.
-func TestConcurrentAppendToOneFile(t *testing.T) {
+func TestDataConcurrentAppendToOneFile(t *testing.T) {
 	f := framework.New(t, "DATA-02")
 	ctx, cancel := caseCtx(t, 20*time.Minute)
 	defer cancel()

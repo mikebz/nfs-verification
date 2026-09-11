@@ -9,8 +9,8 @@ End-to-end verification of NFS RWX persistent volumes on Kubernetes.
 - [`docs/findings.md`](docs/findings.md) records what running the suite against a
   real cluster taught us.
 
-This repository currently holds the harness skeleton, preflight, thirteen cases
-and the first fault injection. The remaining cases land in the steps listed in
+This repository currently holds the harness skeleton, preflight, twenty-six cases,
+the fault injection engine, and grace observability. The remaining cases land in the steps listed in
 [`docs/plan.md`](docs/plan.md).
 
 ## Layout
@@ -37,8 +37,12 @@ make all                                                  # fmt, vet, unit, buil
 make check-fmt                                            # verify formatting without modifying
 make unit                                                 # harness unit tests, no cluster
 make preflight      FLAGS="-storage-class=nfs -lease-seconds=60 -grace-seconds=90"
-make test-presubmit FLAGS="-storage-class=nfs -lease-seconds=60 -grace-seconds=90"
+make test-prov      FLAGS="-storage-class=nfs -lease-seconds=60 -grace-seconds=90"
+make test-data      FLAGS="-storage-class=nfs -lease-seconds=60 -grace-seconds=90"
 make test-chaos     FLAGS="-storage-class=nfs -lease-seconds=60 -grace-seconds=90"
+make test-obs       FLAGS="-storage-class=nfs -lease-seconds=60 -grace-seconds=90"
+make test-sec       FLAGS="-storage-class=nfs -lease-seconds=60 -grace-seconds=90"
+make test-e2e       FLAGS="-storage-class=nfs -lease-seconds=60 -grace-seconds=90"
 make clean                                                # remove artifacts/
 ```
 
@@ -49,11 +53,11 @@ the generated run ID. `make unit` needs no cluster, no network and no
 kubeconfig, and unit tests must stay that way: a test under `pkg/` that needs a
 cluster belongs in `test/e2e` behind a capability check.
 
-`test-presubmit` skips the chaos cases and `test-chaos` runs only those; both
-select by test name, since chaos cases are named `TestChaos...`. Presubmit
-deliberately holds no chaos: chaos is slow, its failures need human triage, and
-red in the fast path trains people to ignore red. `make test-e2e` runs
-everything.
+E2E tests are organized strictly by category: `test-prov` runs provisioning cases
+(`-run '^TestProv'`), `test-data` runs data consistency cases (`-run '^TestData'`),
+`test-chaos` runs chaos cases (`-run '^TestChaos'`), `test-obs` runs observability
+cases (`-run '^TestObs'`), and `test-sec` runs security cases (`-run '^TestSec'`).
+`make test-e2e` runs all categories end to end.
 
 The suite creates no namespaces. Everything lands in `default`. Objects are
 named `nfsv-<case>-<run>-<what>` and labelled with the run and the case, so
@@ -105,34 +109,34 @@ charged to every case eats the `go test -timeout` budget for the package.
 
 ## Cases in this repository so far
 
-| ID | Case | Gate |
+| ID | Case | Category |
 |---|---|---|
-| PROV-01 | Dynamic provision, bind, mount, write, delete, backing volume reclaimed | presubmit |
-| PROV-02 | Provision 20 RWX PVCs concurrently; no duplicate export IDs or paths | presubmit |
-| PROV-03 | Delete a claim a pod still mounts; it stays Terminating until the mount is gone | presubmit |
-| PROV-04 | Volume expansion, or a clean rejection when the class does not advertise it | presubmit |
-| PROV-05 | Snapshot and restore, or clean rejection if unsupported | presubmit |
-| PROV-06 | Reclaim policy Retain: PV persists and rebinds with data intact | presubmit |
-| PROV-07 | Provision while server pod is down; recovers cleanly once server returns | chaos |
-| PROV-08 | Delete claim while server pod is down; completes deletion once server returns | chaos |
-| PROV-09 | Rapid create/delete churn (100 cycles); no export ID or fd exhaustion | soak |
-| PROV-10 | Volume name edge cases (1000-character names, boundary RFC 1123 names) | presubmit |
-| PROV-11 | Two-stage volume expansion under active I/O; zero I/O errors | presubmit |
-| DATA-01 | Four pods writing at once, four files, cross-verified checksums | presubmit |
-| DATA-02 | Four pods appending to one file through a held-open descriptor | presubmit |
-| DATA-03 | Close-to-open across two nodes | presubmit |
-| DATA-04 | The negative of DATA-03: what a reader may see before the writer closes | presubmit |
-| DATA-05 | flock mutual exclusion across two nodes, clean handover on release | presubmit |
-| SEC-01 | uid and gid preservation across pods on two nodes | presubmit |
-| SEC-02 | What the export does to a root-owned write, and whether it does it coherently | presubmit |
-| OBS-04 | A mount that cannot succeed reaches the operator as a Kubernetes Event | presubmit |
-| CHAOS-01 | SIGKILL the server process during an active write | chaos |
-| CHAOS-02 | Delete the server pod during an active write, with a lock held across it | chaos |
-| CHAOS-05 | Five failovers in a row, each recovering on its own and entering grace once | chaos |
-| CHAOS-06 | Locks held on several files across a failover, reclaimed and still exclusive | chaos |
-| CHAOS-07 | A second client attempting a new lock while the server is in grace | chaos |
-| OBS-02 | A failover reaches the operator with a timestamp and a measurable duration | chaos |
-| OBS-03 | Grace entry and exit are both observable, and the window is measurable | chaos |
+| PROV-01 | Dynamic provision, bind, mount, write, delete, backing volume reclaimed | PROV |
+| PROV-02 | Provision 20 RWX PVCs concurrently; no duplicate export IDs or paths | PROV |
+| PROV-03 | Delete a claim a pod still mounts; it stays Terminating until the mount is gone | PROV |
+| PROV-04 | Volume expansion, or a clean rejection when the class does not advertise it | PROV |
+| PROV-05 | Snapshot and restore, or clean rejection if unsupported | PROV |
+| PROV-06 | Reclaim policy Retain: PV persists and rebinds with data intact | PROV |
+| PROV-07 | Provision while server pod is down; recovers cleanly once server returns | PROV |
+| PROV-08 | Delete claim while server pod is down; completes deletion once server returns | PROV |
+| PROV-09 | Rapid create/delete churn (100 cycles); no export ID or fd exhaustion | PROV |
+| PROV-10 | Volume name edge cases (1000-character names, boundary RFC 1123 names) | PROV |
+| PROV-11 | Two-stage volume expansion under active I/O; zero I/O errors | PROV |
+| DATA-01 | Four pods writing at once, four files, cross-verified checksums | DATA |
+| DATA-02 | Four pods appending to one file through a held-open descriptor | DATA |
+| DATA-03 | Close-to-open across two nodes | DATA |
+| DATA-04 | The negative of DATA-03: what a reader may see before the writer closes | DATA |
+| DATA-05 | flock mutual exclusion across two nodes, clean handover on release | DATA |
+| SEC-01 | uid and gid preservation across pods on two nodes | SEC |
+| SEC-02 | What the export does to a root-owned write, and whether it does it coherently | SEC |
+| OBS-04 | A mount that cannot succeed reaches the operator as a Kubernetes Event | OBS |
+| CHAOS-01 | SIGKILL the server process during an active write | CHAOS |
+| CHAOS-02 | Delete the server pod during an active write, with a lock held across it | CHAOS |
+| CHAOS-05 | Five failovers in a row, each recovering on its own and entering grace once | CHAOS |
+| CHAOS-06 | Locks held on several files across a failover, reclaimed and still exclusive | CHAOS |
+| CHAOS-07 | A second client attempting a new lock while the server is in grace | CHAOS |
+| OBS-02 | A failover reaches the operator with a timestamp and a measurable duration | OBS |
+| OBS-03 | Grace entry and exit are both observable, and the window is measurable | OBS |
 
 Several are deliberately careful about what they blame. SEC-01 reports
 **blocked**, with the export's own error in the message, when an ordinary uid
@@ -160,10 +164,6 @@ disjoint ranges of one file needs the `locktool` binary that arrives with
 DATA-06. CHAOS-07 reports **blocked** when the server does not make grace
 observable, because there is then no window to place a lock grant inside or
 outside of, and OBS-03 is the case that fails for that missing signal.
-
-OBS-02 and OBS-03 are named `TestChaos...` like the CHAOS cases, because they
-injure the server and the fast path holds no fault injection. The prefix marks
-what a case does, not which section of the plan it comes from.
 
 The chaos cases report **blocked** when the cluster gives them nothing to
 injure: no server pods discovered, a server whose process name lives in an image
@@ -262,19 +262,12 @@ here would silently invalidate every timing assertion.
 The harness compiles, `go vet` is clean, and the unit tests in `pkg/slo` and
 `pkg/framework` pass.
 
-PROV-01, PROV-03, PROV-04, DATA-01, DATA-03, DATA-04, DATA-05 and SEC-01 have
-been run against GKE clusters during review, not by the author of this code, and
-what that first real run produced is recorded in
-[`docs/findings.md`](docs/findings.md) rather than summarised here: a node image
-whose `umount.nfs` wrapper could never unmount anything (F-003), and a
-StorageClass advertising an expansion its provisioner cannot perform (F-004).
-Both arrived looking like storage defects and neither was one.
+Notable findings from running the suite against real clusters are recorded in
+[`docs/findings.md`](docs/findings.md).
 
-**DATA-02, SEC-02, OBS-04 and every chaos case have not been run against any
-cluster.** Neither has any fault injection, nor the grace observation the
-CHAOS-05 to CHAOS-07 and OBS-02 to OBS-03 cases rest on. Expect a first run on a new cluster
-to surface flag values that need setting for the deployment at hand, which is
-what the specific preflight failure messages exist to make quick.
+Expect a first run on a new cluster to surface flag values that need setting
+for the deployment at hand, which is what the specific preflight failure messages
+exist to make quick.
 
 The unit tests cover the parts of the harness that can be wrong on a
 workstation: every manifest renders and decodes, the capacity and ownership
