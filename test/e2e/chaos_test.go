@@ -500,20 +500,34 @@ type lockUnderTest struct {
 // 100% reclaimed, so the case takes several locks from two clients rather than
 // one from one: a case that checks a single lock cannot report a fraction.
 //
-// The locks here are whole-file. A Linux NFSv4 client sends one to the server
-// as a lock over the whole byte range, so reclaim and exclusivity travel the
-// same protocol path a sub-file range would. What is not covered yet is two
-// clients holding disjoint ranges of one file, which needs the locktool binary
-// arriving with DATA-06 in step 6.
+// Two lock shapes, because they fail differently. The whole-file locks reach
+// the server as a lock over the whole byte range, which is the reclaim path
+// most applications take. The disjoint ranges are what only a byte range can
+// show: two clients holding different parts of one file, each of which has to
+// come back attached to the client that had it. A reclaim that merged them, or
+// gave one client the other's range, would look like a pass on whole-file locks
+// alone.
+//
+// Both ends of every lock are read afterwards, and that is the point. A holder
+// still believing it holds a lock proves nothing on its own: a client does not
+// find out it lost one until it uses it, and the failure this case exists to
+// catch is one range granted to two clients at once. The client's own
+// /proc/locks is read next to what the server says, because a lock the client
+// thinks it holds and the server has forgotten is visible only as the
+// disagreement between them.
 //
 // Steps:
-//  1. Start a workload, and take locks on several files: three held by the
-//     writer, one by the client on the other node.
-//  2. Confirm every lock excludes the other client before anything is injured,
+//  1. Start a workload, and take whole-file locks on several files: three held
+//     by the writer, one by the client on the other node.
+//  2. Take disjoint byte ranges of one further file, one from each client.
+//  3. Confirm every lock excludes the other client before anything is injured,
 //     so a case that was broken from the start cannot pass.
-//  3. Delete the server pod and assert the ordinary recovery.
-//  4. Assert every holder still holds its lock, and every probe from the other
-//     node is still refused. Report the reclaimed fraction against the SLO.
+//  4. Delete the server pod and assert the ordinary recovery.
+//  5. Assert every whole-file holder still holds its lock, and every probe from
+//     the other node is still refused. Report the reclaimed fraction.
+//  6. Assert each byte range is still held by its own client, read from the
+//     other side with F_GETLK rather than by acquiring, that a third client is
+//     refused on both, and that each holder's node agrees.
 func TestChaosLockReclaimAcrossFailover(t *testing.T) {
 	f := framework.New(t, "CHAOS-06")
 	ctx, cancel := caseCtx(t, 45*time.Minute)
@@ -523,6 +537,8 @@ func TestChaosLockReclaimAcrossFailover(t *testing.T) {
 	if s.target.Controller == "" {
 		t.Skipf("blocked: server pod %s has no controller, so deleting it would not bring it back", s.target.Pod)
 	}
+	// The same two the setup pinned its pods to, in the same order.
+	nodeA, nodeB := f.TwoNodes(ctx)
 
 	// Three locks from the writer and one from the client on the other node, so
 	// the reclaim path is exercised from both clients rather than from one.
@@ -553,6 +569,18 @@ func TestChaosLockReclaimAcrossFailover(t *testing.T) {
 		locks = append(locks, lockUnderTest{holder: holder, held: w.held, probe: w.probe, path: path})
 	}
 	t.Logf("%d locks held across two clients, each excluding the other client", len(locks))
+
+	// The byte-range half. Deliberately on one further file, so that a reclaim
+	// that lost track of which client held which part of it has somewhere to
+	// show itself.
+	ranges := disjointRanges{
+		holderPod: s.writer, holderNode: nodeA, otherPod: s.verifier, otherNode: nodeB,
+		claim: "chaos06", path: s.dir + "/chaos06-ranges.dat", id: "chaos06r",
+	}
+	assertDisjointRangesAreIndependent(ctx, t, f, ranges)
+	if err := f.RecordNodeLocks(ctx, "before-failover", nodeA, nodeB); err != nil {
+		t.Logf("recording the client lock tables before the failover: %v", err)
+	}
 
 	faultAt, err := f.PodNow(ctx, s.writer)
 	if err != nil {
@@ -603,8 +631,131 @@ func TestChaosLockReclaimAcrossFailover(t *testing.T) {
 			"held before a restart is still held after it",
 			reclaimed, len(locks), fraction*100, slo.LockReclaimFraction*100)
 	} else {
-		t.Logf("all %d locks survived the failover, still held and still exclusive", len(locks))
+		t.Logf("all %d whole-file locks survived the failover, still held and still exclusive", len(locks))
 	}
+
+	assertRangesSurvivedFailover(ctx, t, f, ranges)
+}
+
+// assertRangesSurvivedFailover asks both ends about each byte range after a
+// failover: the server, through a query that takes nothing, and the client,
+// through its own lock table.
+//
+// F_GETLK rather than an acquire, because the question is whether the range is
+// *still held by its original holder*. A probe that answered by acquiring would
+// change the state every later question observes, and could not distinguish a
+// range that came back to the right client from one that came back to nobody.
+func assertRangesSurvivedFailover(ctx context.Context, t *testing.T, f *framework.Framework,
+	d disjointRanges) {
+	t.Helper()
+	rangeA := framework.WriteRange(rangeALow, rangeWidth)
+	rangeB := framework.WriteRange(rangeBLow, rangeWidth)
+
+	// Each range is asked about from the other client, so the question crosses
+	// the server rather than being answered out of the holder's own client.
+	for _, q := range []struct {
+		askedBy, askedOn string
+		r                framework.LockRange
+		heldBy, heldOn   string
+	}{
+		{d.otherPod, d.otherNode, rangeA, d.holderPod, d.holderNode},
+		{d.holderPod, d.holderNode, rangeB, d.otherPod, d.otherNode},
+	} {
+		ans, err := f.GetLock(ctx, q.askedBy, d.path, q.r)
+		if err != nil {
+			t.Fatalf("asking %s on %s who holds %s: %v", q.askedBy, q.askedOn, q.r, err)
+		}
+		if ans.Free {
+			t.Errorf("after the failover the server reports %s as free, and %s on %s never released it. "+
+				"A range whose owner still believes it holds it, while the server believes nobody does, "+
+				"is one acquire away from two clients writing the same bytes. The recovery state backend "+
+				"recorded at preflight is %q",
+				q.r, q.heldBy, q.heldOn, f.Env.RecoveryStateBackend)
+			continue
+		}
+		if c := ans.Conflict; c.Known && (c.Start != q.r.Start || c.Len != q.r.Len) {
+			t.Errorf("after the failover %s came back as %s: the range the server reclaimed is not the "+
+				"range that was taken, so reclaim merged or moved it", q.r, c)
+		}
+	}
+
+	// A third client, on neither holder's range. On a cluster with a spare node
+	// it sits on one, so both refusals cross the server; on a two-node cluster
+	// it shares a node with one holder, and that refusal is the client's own
+	// lock manager rather than the server's. Said out loud, because a refusal
+	// that never reached the server proves less.
+	nodes, err := f.WorkerNodes(ctx)
+	if err != nil {
+		t.Fatalf("listing worker nodes: %v", err)
+	}
+	thirdNode := d.holderNode
+	if len(nodes) > 2 {
+		for _, n := range nodes {
+			if n != d.holderNode && n != d.otherNode {
+				thirdNode = n
+				break
+			}
+		}
+	}
+	if thirdNode == d.holderNode {
+		t.Logf("this cluster has %d workers, so the third client shares %s with %s: its refusal on %s "+
+			"is the client's own lock manager, and only its refusal on %s crosses the server",
+			len(nodes), thirdNode, d.holderPod, rangeA, rangeB)
+	}
+	const third = "thirdclient"
+	f.MustPod(ctx, toolsPod(third, d.claim, thirdNode))
+	for _, r := range []framework.LockRange{rangeA, rangeB} {
+		ans, err := f.TryLock(ctx, third, d.path, r)
+		if err != nil {
+			t.Fatalf("probing %s from the third client on %s: %v", r, thirdNode, err)
+		}
+		if ans.Free {
+			t.Errorf("after the failover a third client on %s was granted %s, which neither holder "+
+				"released. Either the range was not reclaimed or a conflicting lock was granted, and "+
+				"neither is acceptable", thirdNode, r)
+		}
+	}
+
+	// And the client's own belief, next to the server's answer above. This is
+	// the half no acquire can see: a client holding a range the server has
+	// forgotten shows up here and nowhere else.
+	if err := f.RecordNodeLocks(ctx, "after-failover", d.holderNode, d.otherNode); err != nil {
+		t.Logf("recording the client lock tables after the failover: %v", err)
+	}
+	assertClientHoldsRange(ctx, t, f, d.holderNode, rangeA, d.holderPod)
+	assertClientHoldsRange(ctx, t, f, d.otherNode, rangeB, d.otherPod)
+}
+
+// assertClientHoldsRange checks a node's own lock table carries a POSIX lock
+// over exactly the range its pod took.
+//
+// The node agent reads /proc/mounts and /proc/locks in the host namespaces, so
+// this is every lock on the node, not only the case's. Matching is on the exact
+// range, and the ranges these cases use are at offsets no other case takes.
+func assertClientHoldsRange(ctx context.Context, t *testing.T, f *framework.Framework,
+	node string, r framework.LockRange, pod string) {
+	t.Helper()
+	agent, err := framework.NodeAgent(ctx, f.C)
+	if err != nil {
+		t.Logf("the node agent is unavailable, so what %s believes it holds was not read: %v", node, err)
+		return
+	}
+	locks, err := agent.Locks(ctx, node)
+	if err != nil {
+		t.Logf("reading /proc/locks on %s: %v", node, err)
+		return
+	}
+	wantEnd := r.Start + r.Len - 1
+	for _, l := range locks {
+		if l.Kind == "POSIX" && !l.Waiting && l.Start == r.Start && !l.EndsAtEOF && l.End == wantEnd {
+			t.Logf("%s still believes it holds %s for %s: %s", node, r, pod, l)
+			return
+		}
+	}
+	t.Errorf("after the failover the client on %s has no POSIX lock over %s, which %s took and never "+
+		"released. The server was asked separately; a disagreement between the two is the failure this "+
+		"case exists for, and a client that has quietly dropped a lock lets the next acquirer in",
+		node, r, pod)
 }
 
 // CHAOS-07: a second client attempting a lock it has never held, while the

@@ -23,6 +23,7 @@ type Config struct {
 	PVCSize      string
 
 	ToolsImage string
+	FioImage   string
 
 	ServerNamespace string
 	ServerSelector  string
@@ -70,6 +71,10 @@ func init() {
 	flag.StringVar(&cfg.PVCSize, "pvc-size", "1Gi", "size for test PVCs; small on purpose, since a backing volume that cannot satisfy it fails every case")
 
 	flag.StringVar(&cfg.ToolsImage, "tools-image", "alpine:3.20", "image with dd, sha256sum, flock, stat")
+	// No default. A suite that pulls an image nobody named is a supply chain
+	// the operator did not agree to, and the one case that needs fio costs an
+	// hour, so skipping it costs nothing on the days nobody has an image.
+	flag.StringVar(&cfg.FioImage, "fio-image", "", "image carrying fio, for the mixed soak (DATA-14); the case is skipped when empty")
 
 	flag.StringVar(&cfg.ServerNamespace, "server-namespace", "", "namespace of the NFS server pods; discovered when empty")
 	flag.StringVar(&cfg.ServerSelector, "server-selector", "", "label selector for NFS server pods; discovered when empty")

@@ -300,13 +300,18 @@ If either is absent, CHAOS-03 is reported as **blocked on cluster configuration*
 |---|---|---|
 | `make preflight` | Section 0 only | < 3 min |
 | `make test-prov` | All PROV cases | < 45 min, 2 nodes |
-| `make test-data` | All DATA cases | < 45 min, 2 nodes |
+| `make test-data` | All DATA cases except DATA-14 | < 45 min, 2 nodes |
+| `make test-data-soak` | DATA-14 alone; needs `-fio-image` | < 2 h, 2 nodes |
 | `make test-chaos` | All CHAOS cases | < 4 h, 4 nodes |
 | `make test-obs` | All OBS cases | < 45 min, 2 nodes |
 | `make test-sec` | All SEC cases | < 30 min, 2 nodes |
 | `make test-e2e` | All categories end to end | < 5 h, 4 nodes |
 
 E2E tests are organized strictly by category. Each category has its own test file, Makefile target, and corresponding `Test<Category>...` function prefix.
+
+DATA-14 is the one case split out of its category's target. It runs for an hour across 20 pods, which `make test-data` cannot hold inside a 45 minute budget, so it keeps the `TestData` prefix and the DATA file and gets its own target. The split is inside a category rather than across them, so one prefix still means one category.
+
+`make test-data` injects faults: DATA-12 and DATA-13 kill the NFS server process. `make test-prov` and `make test-obs` are already in that position.
 
 ### 4.3 Triage runbook
 

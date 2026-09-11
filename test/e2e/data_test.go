@@ -48,9 +48,16 @@ func TestDataCloseToOpen(t *testing.T) {
 	}
 }
 
-// DATA-05: mutual exclusion across nodes. Locks are advisory, and they are
-// visible across clients only because every client serializes through the one
-// server. The byte-range half of this case lands with the locktool image.
+// DATA-05: mutual exclusion across nodes, in both the shapes an application
+// can ask for. Locks are advisory, and they are visible across clients only
+// because every client serializes through the one server.
+//
+// The two halves are not the same test twice. A flock lock reaches the server
+// as a lock over the whole range, so the first half exercises the wire
+// operation without ever expressing a range. What only a byte range can show is
+// two clients holding *different* parts of one file at the same time, and a
+// whole-file lock silently standing in for a range would grant neither or both.
+// That is the assertion the second half carries.
 //
 // Steps:
 //  1. Pin a holder to one node and a contender to another, on one claim.
@@ -59,6 +66,9 @@ func TestDataCloseToOpen(t *testing.T) {
 //  4. Release the lock in the holder.
 //  5. The contender must then be granted it, inside a bound that has nothing
 //     to do with lease expiry, since this was a clean release.
+//  6. Take disjoint ranges of one file from both pods: both must be granted.
+//  7. Probe each pod on the other's range, and on a range overlapping it: both
+//     must be refused, and the refusal must name the range actually held.
 func TestDataLocksAcrossNodes(t *testing.T) {
 	f := framework.New(t, "DATA-05")
 	requireCap(t, f.Caps.MultiNode, "cross-node locking needs two schedulable workers")
@@ -96,6 +106,110 @@ func TestDataLocksAcrossNodes(t *testing.T) {
 	}
 	t.Logf("lock changed hands across nodes %s and %s under the one server (profile %s)",
 		nodeA, nodeB, profile(t).Name)
+
+	assertDisjointRangesAreIndependent(ctx, t, f, disjointRanges{
+		holderPod: "holder", holderNode: nodeA,
+		otherPod: "contender", otherNode: nodeB,
+		claim: "data05", path: fileIn("data05.ranges"), id: "data05",
+	})
+}
+
+// disjointRanges names the two clients a byte-range assertion runs between.
+type disjointRanges struct {
+	holderPod, holderNode string
+	otherPod, otherNode   string
+	claim, path, id       string
+}
+
+// The two ranges. Disjoint, adjacent, and at offsets no other case uses, so a
+// /proc/locks line can be matched to the client that took it.
+const (
+	rangeALow  = 0
+	rangeBLow  = 8192
+	rangeWidth = 4096
+)
+
+// assertDisjointRangesAreIndependent is the byte-range assertion shared by
+// DATA-05 and the extension to CHAOS-06: two clients hold different parts of
+// one file at the same time, and neither can have the other's.
+//
+// It returns the two holders, still held, so a caller can injure the server
+// underneath them and ask the same questions afterwards.
+func assertDisjointRangesAreIndependent(ctx context.Context, t *testing.T, f *framework.Framework,
+	d disjointRanges) (*framework.LockHolder, *framework.LockHolder) {
+	t.Helper()
+	pv, err := f.PVForClaim(ctx, d.claim)
+	if err != nil {
+		t.Fatalf("finding the volume behind claim %s: %v", d.claim, err)
+	}
+	requireServerSideLocking(ctx, t, f, pv.Name, framework.PosixLock, d.holderNode, d.otherNode)
+
+	rangeA := framework.WriteRange(rangeALow, rangeWidth)
+	rangeB := framework.WriteRange(rangeBLow, rangeWidth)
+
+	holderA, err := f.HoldLock(ctx, d.holderPod, d.path, d.id+"ra", rangeA)
+	if err != nil {
+		t.Fatalf("taking %s on %s in %s: %v", rangeA, d.path, d.holderNode, err)
+	}
+	f.Defer(func(ctx context.Context) { _ = holderA.Release(ctx) })
+
+	// The one a whole-file lock would get wrong. If this is refused, the first
+	// lock covered more than it was asked for.
+	holderB, err := f.HoldLock(ctx, d.otherPod, d.path, d.id+"rb", rangeB)
+	if err != nil {
+		t.Fatalf("taking %s on %s in %s while %s held %s on the same file: %v. Two clients holding "+
+			"different parts of one file is the only thing a byte range adds over a whole-file lock, "+
+			"and it is what this half exists to show", rangeB, d.path, d.otherNode, d.holderNode, rangeA, err)
+	}
+	f.Defer(func(ctx context.Context) { _ = holderB.Release(ctx) })
+	t.Logf("%s on %s holds %s and %s on %s holds %s, on one file, at once",
+		d.holderPod, d.holderNode, rangeA, d.otherPod, d.otherNode, rangeB)
+
+	assertRangesExcludeEachOther(ctx, t, f, d, rangeA, rangeB)
+	return holderA, holderB
+}
+
+// assertRangesExcludeEachOther probes each client on the other's range and on a
+// range overlapping it. Both must be refused.
+func assertRangesExcludeEachOther(ctx context.Context, t *testing.T, f *framework.Framework,
+	d disjointRanges, rangeA, rangeB framework.LockRange) {
+	t.Helper()
+	probes := []struct {
+		by, node string
+		want     framework.LockRange
+		held     framework.LockRange
+		heldBy   string
+	}{
+		{d.otherPod, d.otherNode, rangeA, rangeA, d.holderPod},
+		{d.holderPod, d.holderNode, rangeB, rangeB, d.otherPod},
+		// Overlapping rather than identical: a lock that covered only its own
+		// first byte would refuse the exact range and grant this one.
+		{d.otherPod, d.otherNode, framework.WriteRange(rangeALow+rangeWidth/2, rangeWidth), rangeA, d.holderPod},
+		{d.holderPod, d.holderNode, framework.WriteRange(rangeBLow+rangeWidth/2, rangeWidth), rangeB, d.otherPod},
+	}
+	for _, p := range probes {
+		ans, err := f.TryLock(ctx, p.by, d.path, p.want)
+		if err != nil {
+			t.Fatalf("probing %s from %s on %s: %v", p.want, p.by, p.node, err)
+		}
+		if ans.Free {
+			t.Errorf("%s on %s was granted %s, which overlaps %s held by %s. Two clients believing they "+
+				"hold the same bytes is the failure byte-range locking exists to prevent",
+				p.by, p.node, p.want, p.held, p.heldBy)
+			continue
+		}
+		// The refusal must name the range actually held. A whole-file lock
+		// standing in for a range would refuse with a range to end of file, and
+		// the assertion above would pass while the case measured nothing.
+		if c := ans.Conflict; c.Known && (c.Start != p.held.Start || c.Len != p.held.Len) {
+			t.Errorf("%s on %s was refused %s by a lock over %s, but %s holds %s. A refusal naming a "+
+				"different range means the lock covers more than it was asked for, which is a whole-file "+
+				"lock wearing a range's arguments",
+				p.by, p.node, p.want, c, p.heldBy, p.held)
+		}
+	}
+	t.Logf("each client is refused on the other's range and on a range overlapping it, by the range " +
+		"actually held")
 }
 
 // DATA-01: N pods, N files, partitioned by file. Every checksum must match, and
@@ -1426,4 +1540,159 @@ func TestDataDurabilityWithoutFsync(t *testing.T) {
 		"the host page cache underneath it, so a run where nothing was lost is the ordinary result and "+
 		"says nothing is wrong",
 		len(attempted), sweep.Count(framework.VerdictCorrect), absent, short)
+}
+
+// The soak's shape. Every one of these is fixed rather than a flag: each is a
+// property of the measurement and each is stated in Section 3.2 of the plan.
+// The one a real run may argue with is the hour, and the design carries that as
+// an open question rather than pre-emptively adding a flag for it.
+const (
+	soakPods        = 20
+	soakRuntime     = time.Hour
+	soakFilesPerPod = 4
+	soakSizeRange   = "4k-1g"
+	soakMaxFileSize = 1 << 30
+	soakReadPercent = 70
+)
+
+// DATA-14: a mixed read/write soak across twenty pods for an hour, verified by
+// checksum. The expected result is zero mismatches.
+//
+// Each pod owns a directory. Two pods writing one file with verification on
+// would report mismatches that are the harness's fault rather than the
+// storage's, which DATA-01 already established; cross-pod interference is
+// DATA-01's and SCALE-06's job.
+//
+// verify_fatal stops a job at the mismatch, so the offending offset is in the
+// output. Without it fio continues and the report is a count with no location.
+//
+// Throughput is recorded and asserted on by nobody. A performance bound here
+// would be a SCALE case wearing a DATA number.
+//
+// This case has its own target, `make test-data-soak`. An hour does not fit
+// inside `make test-data`, which is budgeted at under 45 minutes, and a target
+// that cannot execute its own documented contents is worse than one that does
+// less. Section 5.14 of the design has the alternatives that were weighed.
+//
+// Steps:
+//  1. Skip without -fio-image. The case cannot run, and no image is assumed:
+//     pulling one nobody named is a supply chain the operator did not agree to.
+//  2. Size a claim from the job set and report blocked if the export cannot
+//     hold it. An hour of soak that dies on ENOSPC at minute fifty is an hour
+//     spent to learn nothing.
+//  3. Start one fio job per pod, each in its own directory, spread round robin
+//     across the worker nodes.
+//  4. Wait the hour out and read each job's JSON report.
+//  5. Assert no job ended with an error, which under verify_fatal is how a
+//     checksum mismatch surfaces. Record the bytes moved.
+func TestDataMixedSoak(t *testing.T) {
+	f := framework.New(t, "DATA-14")
+	image := framework.Cfg().FioImage
+	if image == "" {
+		t.Skip("no -fio-image was given, and this case needs fio. No image is assumed: pulling one " +
+			"nobody named is a supply chain the operator did not agree to")
+	}
+	// The hour, plus room for twenty pods to schedule and pull an image, plus
+	// the reports.
+	ctx, cancel := caseCtx(t, soakRuntime+40*time.Minute)
+	defer cancel()
+
+	nodes, err := f.WorkerNodes(ctx)
+	if err != nil {
+		t.Fatalf("listing worker nodes: %v", err)
+	}
+	if len(nodes) == 0 {
+		t.Fatalf("no schedulable worker nodes")
+	}
+
+	// The worst case, not the average: fio picks each file's size at random
+	// within the range, so a claim sized for the mean fills up on an unlucky
+	// draw halfway through the hour.
+	required := int64(soakPods) * int64(soakFilesPerPod) * int64(soakMaxFileSize)
+	size := fmt.Sprintf("%dGi", (required>>30)+1)
+	t.Logf("%d pods x %d files x up to %d bytes needs %d bytes at worst; claiming %s",
+		soakPods, soakFilesPerPod, soakMaxFileSize, required, size)
+
+	pvc, err := f.CreatePVC(ctx, framework.PVCSpec{Name: "data14", Size: size})
+	if err != nil {
+		t.Fatalf("creating the soak claim at %s: %v", size, err)
+	}
+	// The first pod both binds a WaitForFirstConsumer class and is where the
+	// capacity is read from, since df inside a pod is what the workload sees.
+	pods := make([]string, soakPods)
+	for i := range pods {
+		pods[i] = fmt.Sprintf("soak%d", i)
+		f.MustPod(ctx, fioPod(pods[i], pvc.Name, nodes[i%len(nodes)], image))
+	}
+	t.Logf("%d soak pods across %d nodes on image %s", soakPods, len(nodes), image)
+
+	space, err := f.MountSpace(ctx, pods[0], mountPath)
+	if err != nil {
+		t.Fatalf("reading the export's free space: %v", err)
+	}
+	if space.FreeBytes < required {
+		blocked(t, "the export reports %d bytes free and this soak needs %d at worst. The claim's size "+
+			"is not the limit here: an export may be directory-backed with no per-volume quota. An hour "+
+			"of soak that dies on ENOSPC at minute fifty is an hour spent to learn nothing",
+			space.FreeBytes, required)
+	}
+
+	runs := make([]*framework.FioRun, soakPods)
+	for i, pod := range pods {
+		// One directory per pod, named for the pod, so a mismatch names the
+		// writer that produced it.
+		run, err := f.StartFio(ctx, framework.FioSpec{
+			Pod: pod, Dir: fmt.Sprintf("%s/data14/%s", mountPath, pod), ID: fmt.Sprintf("data14-%d", i),
+			Runtime: soakRuntime, Files: soakFilesPerPod, SizeRange: soakSizeRange,
+			ReadPercent: soakReadPercent,
+		})
+		if err != nil {
+			t.Fatalf("starting the soak job in %s: %v", pod, err)
+		}
+		runs[i] = run
+	}
+	t.Logf("%d soak jobs running for %s at %d%% reads over files of %s",
+		len(runs), soakRuntime, soakReadPercent, soakSizeRange)
+
+	var totalRead, totalWritten int64
+	failed := 0
+	for i, run := range runs {
+		// Each job's own wait, generously past the runtime: a job that is late
+		// is a finding, and one that never reports is a worse one.
+		report, err := run.Wait(ctx, soakRuntime+20*time.Minute)
+		if err != nil {
+			t.Errorf("the soak job in %s: %v", pods[i], err)
+			continue
+		}
+		if raw, err := run.Raw(ctx); err == nil {
+			if err := f.WriteArtifact("fio-"+pods[i]+".json", []byte(raw)); err != nil {
+				t.Logf("writing the report of %s: %v", pods[i], err)
+			}
+		}
+		read, written := report.Bytes()
+		totalRead, totalWritten = totalRead+read, totalWritten+written
+		for _, job := range report.Failed() {
+			failed++
+			t.Errorf("the soak job %q in %s ended with fio error %d. With verify_fatal=1 a crc32c "+
+				"mismatch ends the job at the mismatch, so this is a checksum mismatch until the "+
+				"report in the bundle says otherwise, and the expected result for this case is zero",
+				job.Name, pods[i], job.Error)
+		}
+	}
+	// Recorded, asserted on by nobody. A bound here would be a SCALE case
+	// wearing a DATA number.
+	t.Logf("the soak moved %d bytes read and %d written across %d pods in %s, with %d failed jobs",
+		totalRead, totalWritten, soakPods, soakRuntime, failed)
+	if totalRead == 0 && totalWritten == 0 {
+		t.Errorf("the soak moved no bytes at all in %s, so whatever the jobs reported, nothing was "+
+			"verified and this case has not exercised the data path", soakRuntime)
+	}
+}
+
+// fioPod is a soak pod: the named fio image holding the mount open, driven
+// through exec like every other client pod.
+func fioPod(name, claim, node, image string) framework.PodSpec {
+	spec := toolsPod(name, claim, node)
+	spec.Image = image
+	return spec
 }

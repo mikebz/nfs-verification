@@ -146,7 +146,7 @@ Each step is one pull request. Later steps depend only on earlier ones.
 | 3 | Chaos operations package plus CHAOS-01 and CHAOS-02, the SLO measurement path, fault timelines | done, [PR #4](https://github.com/mikebz/nfs-verification/pull/4) |
 | 4 | Grace and lock reclaim: CHAOS-05, CHAOS-06, CHAOS-07, OBS-02, OBS-03, designed in [`03-grace-and-lock-reclaim-design.md`](03-grace-and-lock-reclaim-design.md) | done, [PR #8](https://github.com/mikebz/nfs-verification/pull/8) |
 | 5 | Close out Provisioning (PROV): PROV-02, PROV-05 to PROV-11 | done, [PR #10](https://github.com/mikebz/nfs-verification/pull/10) |
-| 6 | Close out Concurrency and Data Integrity (DATA): DATA-06 to DATA-14, locktool helper, designed in [`04-data-path-and-locktool-design.md`](04-data-path-and-locktool-design.md) | in progress, MVP landed: locktool, its delivery path and DATA-06 |
+| 6 | Close out Concurrency and Data Integrity (DATA): DATA-06 to DATA-14, locktool helper, designed in [`04-data-path-and-locktool-design.md`](04-data-path-and-locktool-design.md) | code complete, not yet run against a cluster |
 | 7 | Close out Observability (OBS): OBS-01, OBS-05, OBS-06, OBS-07 | |
 | 8 | Close out Security and Identity (SEC): SEC-03 to SEC-09 | |
 | 9 | Close out Scale and Performance (SCALE): SCALE-01 to SCALE-07 | |
@@ -450,9 +450,22 @@ sparse file hole punches, and fsync/COMMIT durability:
   section 5.14.
 
 **Harness added**: `locktool`, a small static Go binary for `fcntl` byte-range
-locks and lease-period observation; `noac` mount option injection in PVC/PV
-specifications; directory population and hole-punching exec helpers; and `fio`
-orchestration (`-fio-image`) for DATA-14.
+locks, built by `make locktool` and streamed into an existing pod over
+`pods/exec`; stdin on the exec helper; a per-lock-kind mount-option gate and a
+`/proc/locks` reader on the node agent; a force-delete helper that waits for the
+node to release the mount and a teardown guard that keeps a claim whose unmount
+was never observed; clone volumes over an export a dynamic claim already owns,
+for the `noac` contrast; `O_DIRECT`, hole-punch and free-inode probes; directory
+population, deletion and census helpers; a content-verifying record sweep
+returning four verdicts, which replaced the existence check everywhere; and
+`fio` orchestration (`-fio-image`) for DATA-14 behind `make test-data-soak`.
+
+**Also landed**: the byte-range half of DATA-05 and the disjoint-range extension
+of CHAOS-06, both deferred here by
+[`03-grace-and-lock-reclaim-design.md`](03-grace-and-lock-reclaim-design.md)
+section 5.5; the upgrade of CHAOS-01, CHAOS-02 and PROV-11 from an existence
+check to a content check; and the fix for `scripts/lock-probe.sh` passing
+`flock -w`, recorded as F-005 in [`findings.md`](findings.md).
 
 ---
 

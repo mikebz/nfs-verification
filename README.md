@@ -41,6 +41,7 @@ make locktool                                             # build bin/locktool-l
 make preflight      FLAGS="-storage-class=nfs -lease-seconds=60 -grace-seconds=90"
 make test-prov      FLAGS="-storage-class=nfs -lease-seconds=60 -grace-seconds=90"
 make test-data      FLAGS="-storage-class=nfs -lease-seconds=60 -grace-seconds=90"
+make test-data-soak FLAGS="-storage-class=nfs -fio-image=<image>"    # DATA-14, one hour
 make test-chaos     FLAGS="-storage-class=nfs -lease-seconds=60 -grace-seconds=90"
 make test-obs       FLAGS="-storage-class=nfs -lease-seconds=60 -grace-seconds=90"
 make test-sec       FLAGS="-storage-class=nfs -lease-seconds=60 -grace-seconds=90"
@@ -59,6 +60,12 @@ cluster belongs in `test/e2e` behind a capability check.
 process, because the suite sorts strictly by category and they are DATA cases;
 `test-prov` and `test-obs` are already in the same position. Only `make unit`
 and `make preflight` leave the cluster alone.
+
+DATA-14 is the one case split out of its category's target. It runs for an hour
+across 20 pods, which `make test-data` cannot hold inside its 45 minute budget,
+so it keeps the `TestData` prefix and gets `make test-data-soak`. It needs
+`-fio-image` and skips without it; no image is assumed, because pulling one
+nobody named is a supply chain the operator did not agree to.
 
 E2E tests are organized strictly by category: `test-prov` runs provisioning cases
 (`-run '^TestProv'`), `test-data` runs data consistency cases (`-run '^TestData'`),
@@ -141,7 +148,7 @@ charged to every case eats the `go test -timeout` budget for the package.
 | DATA-02 | Four pods appending to one file through a held-open descriptor | DATA |
 | DATA-03 | Close-to-open across two nodes | DATA |
 | DATA-04 | The negative of DATA-03: what a reader may see before the writer closes | DATA |
-| DATA-05 | flock mutual exclusion across two nodes, clean handover on release | DATA |
+| DATA-05 | flock and byte-range mutual exclusion across two nodes | DATA |
 | DATA-06 | A byte-range lock held by a force-deleted pod, released inside one lease | DATA |
 | DATA-07 | One file written and read O_DIRECT by two pods on two nodes | DATA |
 | DATA-08 | The same export mounted twice, once with noac: visibility without a close | DATA |
@@ -150,13 +157,14 @@ charged to every case eats the `go test -timeout` budget for the package.
 | DATA-11 | Sparse write and read back; the hole punch recorded, not asserted, on 4.1 | DATA |
 | DATA-12 | fsync durability: every committed record intact after a server kill | DATA |
 | DATA-13 | Negative durability: un-fsynced records may be absent, never wrong | DATA |
+| DATA-14 | A 70/30 mixed soak across 20 pods for an hour, verified by crc32c | DATA |
 | SEC-01 | uid and gid preservation across pods on two nodes | SEC |
 | SEC-02 | What the export does to a root-owned write, and whether it does it coherently | SEC |
 | OBS-04 | A mount that cannot succeed reaches the operator as a Kubernetes Event | OBS |
 | CHAOS-01 | SIGKILL the server process during an active write | CHAOS |
 | CHAOS-02 | Delete the server pod during an active write, with a lock held across it | CHAOS |
 | CHAOS-05 | Five failovers in a row, each recovering on its own and entering grace once | CHAOS |
-| CHAOS-06 | Locks held on several files across a failover, reclaimed and still exclusive | CHAOS |
+| CHAOS-06 | Whole-file and disjoint byte-range locks across a failover, read from both ends | CHAOS |
 | CHAOS-07 | A second client attempting a new lock while the server is in grace | CHAOS |
 | OBS-02 | A failover reaches the operator with a timestamp and a measurable duration | OBS |
 | OBS-03 | Grace entry and exit are both observable, and the window is measurable | OBS |
@@ -180,11 +188,13 @@ CHAOS-05 records the wall clock over its five cycles and does not assert on it:
 on the default profile grace alone is ninety seconds, so five lawful recoveries
 do not fit inside the ten minutes the plan names, and a case that asserted it
 would fail with no defect present. Each cycle is asserted against the restart
-SLO instead. CHAOS-06 takes whole-file locks, which a Linux NFSv4 client sends
-to the server as a lock over the whole byte range, so reclaim and exclusivity
-travel the same protocol path a sub-file range would; two clients holding
-disjoint ranges of one file needs the `locktool` binary that arrives with
-DATA-06. CHAOS-07 reports **blocked** when the server does not make grace
+SLO instead. CHAOS-06 takes locks in both shapes: whole-file, which a Linux
+NFSv4 client sends to the server as a lock over the whole byte range, and
+disjoint sub-file ranges from two clients on one file, which is the only thing a
+byte range adds. It reads both ends of every lock afterwards, the server through
+`F_GETLK` and the client through `/proc/locks`, because a client that believes
+it holds a range the server has forgotten is visible only as the disagreement
+between them. CHAOS-07 reports **blocked** when the server does not make grace
 observable, because there is then no window to place a lock grant inside or
 outside of, and OBS-03 is the case that fails for that missing signal.
 
@@ -250,7 +260,8 @@ answer them:
 | `-storage-class` | pinning the class under test | optional: preflight otherwise probes each class by asking it for an RWX volume and mounting it from two nodes |
 | `-pvc-size` | claim size | defaults to 1Gi: a backing volume that cannot satisfy the request fails every case, and no case here needs more |
 | `-refresh-preflight` | forcing rediscovery | the cached result is reused until it ages out |
-| `-tools-image` | client pods and the node agent | needs `dd`, `sha256sum`, `flock`, `stat` and `nsenter`; defaults to `alpine:3.20`, whose busybox carries all five |
+| `-tools-image` | client pods and the node agent | needs `dd`, `sha256sum`, `flock`, `stat` and `nsenter`; defaults to `alpine:3.20`, whose busybox carries all five. DATA-07 and DATA-11 probe two things this image may not have, `dd`'s `oflag=direct` and `fallocate`'s `-p`, and report blocked naming this flag rather than filing a tool gap as a protocol gap |
+| `-fio-image` | DATA-14 | nothing in the cluster names an image carrying `fio`, and no default is assumed: pulling one nobody named is a supply chain the operator did not agree to. The case skips when it is empty |
 | `-server-process` | CHAOS-01 | derived from the server container's command; a server started through a shell wrapper or an image entrypoint hides it, and the case reports blocked rather than signalling the wrong process |
 | `-grace-enter-pattern`, `-grace-exit-pattern` | OBS-03, CHAOS-05, CHAOS-07 | nothing in the Kubernetes API states how a server words grace entry and exit; the built-in rule covers the common wordings, and these state it for a server it does not. Set both or neither: one alone would report every failover as a grace re-entry loop |
 | `-root-squash` | SEC-02 | nothing in the Kubernetes API states the export's squash setting; without it the case records what the export does instead of asserting a value nobody stated |
