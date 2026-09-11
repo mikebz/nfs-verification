@@ -7,6 +7,9 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	dynamicfake "k8s.io/client-go/dynamic/fake"
 )
 
 // TestCheckObjectNameEdgeCases covers boundary conditions on Kubernetes object names:
@@ -142,5 +145,61 @@ func TestRunPVCLifecycleChurnContextCancel(t *testing.T) {
 	}
 	if res.Completed != 0 {
 		t.Errorf("completed cycles = %d, want 0", res.Completed)
+	}
+}
+
+// TestMatchingVolumeSnapshotClass asserts that MatchingVolumeSnapshotClass filters
+// classes by the driver attribute and ignores classes belonging to other drivers.
+//
+// Steps:
+//  1. Create fake dynamic client with VolumeSnapshotClasses for driver A and driver B.
+//  2. Query for driver A; assert driver A class is returned.
+//  3. Query for driver C (non-existent); assert empty string is returned.
+func TestMatchingVolumeSnapshotClass(t *testing.T) {
+	scheme := runtime.NewScheme()
+	classA := &unstructured.Unstructured{
+		Object: map[string]any{
+			"apiVersion": "snapshot.storage.k8s.io/v1",
+			"kind":       "VolumeSnapshotClass",
+			"metadata": map[string]any{
+				"name": "snapclass-a",
+			},
+			"driver": "driver-a.csi.k8s.io",
+		},
+	}
+	classB := &unstructured.Unstructured{
+		Object: map[string]any{
+			"apiVersion": "snapshot.storage.k8s.io/v1",
+			"kind":       "VolumeSnapshotClass",
+			"metadata": map[string]any{
+				"name": "snapclass-b",
+			},
+			"driver": "driver-b.csi.k8s.io",
+		},
+	}
+
+	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
+		scheme,
+		map[schema.GroupVersionResource]string{
+			VolumeSnapshotClassGVR: "VolumeSnapshotClassList",
+		},
+		classA, classB,
+	)
+	c := &Client{Dynamic: dyn}
+
+	matchA, err := c.MatchingVolumeSnapshotClass(context.Background(), "driver-a.csi.k8s.io")
+	if err != nil {
+		t.Fatalf("unexpected error finding class for driver A: %v", err)
+	}
+	if matchA != "snapclass-a" {
+		t.Errorf("got %q, want snapclass-a", matchA)
+	}
+
+	matchNone, err := c.MatchingVolumeSnapshotClass(context.Background(), "driver-c.csi.k8s.io")
+	if err != nil {
+		t.Fatalf("unexpected error finding class for driver C: %v", err)
+	}
+	if matchNone != "" {
+		t.Errorf("got %q, want empty string", matchNone)
 	}
 }

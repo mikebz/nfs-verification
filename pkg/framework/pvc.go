@@ -443,6 +443,24 @@ func (c *Client) VolumeSnapshotClasses(ctx context.Context) ([]string, error) {
 	return names, nil
 }
 
+// MatchingVolumeSnapshotClass returns the name of a VolumeSnapshotClass configured for the given driver, if any.
+func (c *Client) MatchingVolumeSnapshotClass(ctx context.Context, driver string) (string, error) {
+	if c.Dynamic == nil {
+		return "", fmt.Errorf("dynamic client not configured")
+	}
+	list, err := c.Dynamic.Resource(VolumeSnapshotClassGVR).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return "", err
+	}
+	for _, item := range list.Items {
+		d, _, _ := unstructured.NestedString(item.Object, "driver")
+		if d == driver {
+			return item.GetName(), nil
+		}
+	}
+	return "", nil
+}
+
 // CreateVolumeSnapshot creates a VolumeSnapshot resource targeting a PVC.
 func (f *Framework) CreateVolumeSnapshot(ctx context.Context, snapName, pvcName, className string) (*unstructured.Unstructured, error) {
 	if f.C.Dynamic == nil {

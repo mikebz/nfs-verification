@@ -419,21 +419,25 @@ func TestProvConcurrentProvisioning(t *testing.T) {
 //
 // Steps:
 //  1. Provision an RWX claim and mount it in a pod.
-//  2. Write known data and compute checksum.
+//  2. Write known data and compute checksum, then delete the pod so the volume is unmounted.
 //  3. If snapshots are not advertised (no CRD or no VolumeSnapshotClass),
 //     assert creation is cleanly rejected, and return.
 //  4. If advertised, create a VolumeSnapshot targeting the claim.
 //  5. Wait for the VolumeSnapshot to become readyToUse.
 //  6. Provision a new claim with DataSource set to the VolumeSnapshot.
-//  7. Mount the restored claim in a new pod and verify the data matches.
+//  7. Mount the restored claim from two nodes simultaneously (asserting RWX) and verify the data matches.
 //  8. Delete pods and claims.
 func TestProvSnapshotAndRestore(t *testing.T) {
 	f := framework.New(t, "PROV-05")
+	requireCap(t, f.Caps.MultiNode, "PROV-05 requires two worker nodes to assert RWX mount")
+
 	ctx, cancel := caseCtx(t, 20*time.Minute)
 	defer cancel()
 
+	nodeA, nodeB := f.TwoNodes(ctx)
+
 	pvc := f.MustRWXPVC(ctx, "prov05")
-	pod := f.MustPod(ctx, toolsPod("writer", pvc.Name, ""))
+	pod := f.MustPod(ctx, toolsPod("writer", pvc.Name, nodeA))
 	if _, err := f.WaitPVCBound(ctx, pvc.Name, framework.BindTimeout); err != nil {
 		t.Fatalf("claim did not bind once a pod consumed it: %v", err)
 	}
@@ -441,6 +445,14 @@ func TestProvSnapshotAndRestore(t *testing.T) {
 	want, err := f.WriteFile(ctx, pod.Name, fileIn("prov05.dat"), 1<<20, "prov05")
 	if err != nil {
 		t.Fatalf("writing to share: %v", err)
+	}
+
+	// Delete writer pod so volume unmounts before snapshot, avoiding live snapshot races.
+	if err := f.DeletePod(ctx, pod.Name); err != nil {
+		t.Fatalf("deleting writer pod: %v", err)
+	}
+	if err := f.WaitPodGone(ctx, pod.Name, framework.DeleteTimeout); err != nil {
+		t.Fatalf("waiting for writer pod to delete: %v", err)
 	}
 
 	if !f.Caps.CanSnapshot {
@@ -463,13 +475,13 @@ func TestProvSnapshotAndRestore(t *testing.T) {
 		return
 	}
 
-	classes, err := f.C.VolumeSnapshotClasses(ctx)
+	snapClass, err := f.C.MatchingVolumeSnapshotClass(ctx, f.Env.CSIDriver)
 	if err != nil {
 		t.Fatalf("listing VolumeSnapshotClasses: %v", err)
 	}
-	if len(classes) == 0 {
-		t.Logf("VolumeSnapshot CRD is served but no VolumeSnapshotClass is configured for StorageClass %s", f.Env.StorageClass)
-		// Assert clean rejection or unready status when no class is configured.
+	if snapClass == "" {
+		t.Logf("VolumeSnapshot CRD is served but no VolumeSnapshotClass matches driver %q", f.Env.CSIDriver)
+		// Assert clean rejection or unready status when no matching class is configured.
 		_, snapErr := f.CreateVolumeSnapshot(ctx, "prov05-snap", pvc.Name, "")
 		if snapErr != nil {
 			t.Logf("VolumeSnapshot creation without class rejected cleanly: %v", snapErr)
@@ -483,7 +495,6 @@ func TestProvSnapshotAndRestore(t *testing.T) {
 		return
 	}
 
-	snapClass := classes[0]
 	t.Logf("using VolumeSnapshotClass %s for snapshot test", snapClass)
 	_, err = f.CreateVolumeSnapshot(ctx, "prov05-snap", pvc.Name, snapClass)
 	if err != nil {
@@ -507,17 +518,39 @@ func TestProvSnapshotAndRestore(t *testing.T) {
 		t.Fatalf("creating restored PVC from snapshot: %v", err)
 	}
 
-	restoredPod := f.MustPod(ctx, toolsPod("reader", restoredPVC.Name, ""))
-	if _, err := f.WaitPVCBound(ctx, restoredPVC.Name, framework.BindTimeout); err != nil {
+	// Mount restored claim on two nodes simultaneously to assert RWX.
+	restoredPodA := f.MustPod(ctx, toolsPod("reader-a", restoredPVC.Name, nodeA))
+	restoredPodB := f.MustPod(ctx, toolsPod("reader-b", restoredPVC.Name, nodeB))
+
+	boundPVC, err := f.WaitPVCBound(ctx, restoredPVC.Name, framework.BindTimeout)
+	if err != nil {
 		t.Fatalf("restored claim did not bind: %v", err)
 	}
-
-	got, err := f.Sha256(ctx, restoredPod.Name, fileIn("prov05.dat"))
-	if err != nil {
-		t.Fatalf("reading from restored volume: %v", err)
+	hasRWX := false
+	for _, mode := range boundPVC.Status.AccessModes {
+		if mode == corev1.ReadWriteMany {
+			hasRWX = true
+			break
+		}
 	}
-	if got != want {
-		t.Fatalf("data mismatch on restored volume: got %s want %s", got, want)
+	if !hasRWX {
+		t.Fatalf("restored claim %s status.accessModes does not include ReadWriteMany: %v", boundPVC.Name, boundPVC.Status.AccessModes)
+	}
+
+	gotA, err := f.Sha256(ctx, restoredPodA.Name, fileIn("prov05.dat"))
+	if err != nil {
+		t.Fatalf("reading from restored volume on node A: %v", err)
+	}
+	if gotA != want {
+		t.Fatalf("data mismatch on restored volume on node A: got %s want %s", gotA, want)
+	}
+
+	gotB, err := f.Sha256(ctx, restoredPodB.Name, fileIn("prov05.dat"))
+	if err != nil {
+		t.Fatalf("reading from restored volume on node B: %v", err)
+	}
+	if gotB != want {
+		t.Fatalf("data mismatch on restored volume on node B: got %s want %s", gotB, want)
 	}
 }
 
