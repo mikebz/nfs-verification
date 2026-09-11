@@ -14,7 +14,12 @@ represents NFS at all. Cadence: three pull requests, following
 [`03-grace-and-lock-reclaim-design.md`](03-grace-and-lock-reclaim-design.md),
 [`04-data-path-and-locktool-design.md`](04-data-path-and-locktool-design.md).
 This is the next phase of 03, which built the log channel and left the metrics
-channel open in its section 11.
+channel open in its section 11. It supersedes one line of that document: doc 03
+section 3 lists "asserting that an alert fired" as OBS-01's requirement, needing
+a monitoring stack the suite does not deploy. That is no longer the boundary,
+for the reasons in section 1 here. Doc 03 itself is not edited, since a numbered
+design doc records what was decided at the time; this paragraph is where the
+change is recorded.
 
 ---
 
@@ -60,10 +65,11 @@ Observable outcomes that define done:
 Requirements: Section 3.5 of [`01-test-plan.md`](01-test-plan.md) for the four
 cases, whose wording this phase changes in the same pull request (5.13);
 Section 4.2 for the category budget; Section 4.3 for where a failure gets
-routed. Findings that constrain this phase: F-008 (a deployment that publishes
-nothing fails the case rather than skipping it), F-002 (node sizing, which
-bounds what the memory case may do), F-001 and F-003 (ordering around anything
-that unmounts).
+routed. Findings that constrain this phase: F-008, which is about grace signals and not
+about metrics, cited here only for the rule it established, that a case whose
+signal the deployment does not publish fails rather than skips so the finding
+lands where an operator sees it; F-002 (node sizing, which bounds what the
+memory case may do); F-001 and F-003 (ordering around anything that unmounts).
 
 Cases served: **OBS-01** (server unavailable), **OBS-05** (memory approaching a
 ceiling), **OBS-06** (volume near capacity), **OBS-07** (metrics survive a
@@ -79,8 +85,10 @@ Each line is testable, and a reviewer can accept or reject the phase from this
 section without reading code.
 
 1. The suite deploys no monitoring stack and takes no dependency on a hosted
-   one. Everything read here comes through the Kubernetes API server with the
-   kubeconfig the suite already uses.
+   one. Every control-plane reading comes through the Kubernetes API server with
+   the kubeconfig the suite already uses. The one workload-side reading, `df`
+   inside a pod, comes from the existing exec path, because the point of it is to
+   be what the workload sees rather than what the control plane says.
 2. No case asserts that an alert fired, and no case reads an alert rule, a
    threshold or a severity. Those are the operator's.
 3. **One verdict rule, used in every case.** A source the suite cannot reach for
@@ -120,8 +128,9 @@ section without reading code.
   the Prometheus text format it would serve.
 - Reads of objects the suite already uses: the server pod's spec, its container
   statuses, and the endpoints of the Service in front of it.
-- A bounded write that moves a volume's usage, and a bounded small-file storm
-  that moves the server's working set.
+- A bounded write that moves a volume's usage, and bounded metadata churn from
+  the phase 6 helper, which creates empty entries, to move the server's working
+  set.
 - The four cases, and the artifacts each writes before teardown.
 
 **Out of scope (explicit non-goals)**
@@ -145,8 +154,9 @@ section without reading code.
 - Server pod discovery from phase 3.
 - The directory population and deletion helpers from phase 6, which are the
   bounded storm OBS-05 uses.
-- Read access to the kubelet through the API server's node proxy. This is the
-  only access this phase needs that the suite does not already exercise.
+- Read access through the API server's node proxy, for the kubelet, and through
+  its pod proxy, for the server's own endpoint. The suite exercises neither
+  today, so both are new access and both are named in 5.4 and section 8.
 
 ---
 
@@ -168,7 +178,8 @@ it.
 | `Pod`, `Container` | string | The server pod and the container serving NFS. |
 | `ReadinessProbe` | struct or absent | The probe as declared: its kind, its target port, its period, timeout and failure threshold. Absent is the interesting value. |
 | `ProbeTargetsNFS` | bool | Whether the probe's target is the NFS service rather than something incidental. A probe on a sidecar's health port says nothing about whether NFS answers. |
-| `ServicePorts` | []int32 | The ports the Service in front of the server exposes, so the case can say which of them readiness is gating. |
+| `Service` | string or absent | The Service in front of the server. Discovery records server pods and exports today and no Service, so this case defines it: among Services in the server's namespace, the ones whose selector matches the server pod's labels, and of those the one exposing the NFS port. None matching is recorded rather than guessed at, and the case then reports on the probe alone. |
+| `ServicePorts` | []int32 | The ports that Service exposes, so the case can say which of them readiness is gating. |
 | `EndpointsDrivenByReadiness` | bool | Whether the Service's endpoints follow the pod's readiness, which is what makes the signal reach a client's connection rather than only a dashboard. |
 | `BlindWindow` | duration or unknown | Period times failure threshold: how long a server that stops answering stays marked Ready. Unknown when no probe is declared, which is the point. |
 
@@ -290,10 +301,13 @@ Every absence in this phase gets the same treatment. The failure message routes
 it per Section 4.3: it names the deployment and its configuration, not the NFS
 server's code.
 
-One case that is deliberately not in the table: an export whose reported total
-is not the claim's capacity (5.8). The data is published and it agrees; what it
-describes is the backing filesystem rather than the claim. That is a finding
-about interpretation, not absence, so it is recorded and the case continues.
+There is no exception to this table. An earlier revision carved one out for an
+export whose reported total is not the claim's capacity, on the grounds that the
+data is published and the two sources still agree. That was the rule bending
+around an awkward case: OBS-06 is about a **volume** near capacity, and a number
+describing the backing filesystem is not a measurement of this claim. It is row
+two, it fails, and the agreement comparison is still run and recorded so the
+failure arrives with everything a reader needs.
 
 ### 5.3 What the outside channel covers, and what it cannot
 
@@ -430,10 +444,13 @@ What the case asserts:
    ceiling it would be monitored against, and this chart declares none by
    default (5.3).
 2. Its working set is readable against that limit, with a timestamp.
-3. The reading tracks reality: a bounded small-file storm through the export,
-   using the phase 6 population helper, moves the working set by a measurable
-   margin. A reading pinned at a constant while the server is being worked is a
-   broken input.
+3. The reading tracks reality: a bounded workload through the export moves the
+   working set by a measurable margin. What the stimulus is must be stated
+   precisely, because an earlier revision called it a write storm and it is not
+   one. The phase 6 population helper creates empty entries, so this is metadata
+   churn, and what it exercises is the server's handle and export caches rather
+   than its data path. SCALE-04 in step 9 is the case built around small-file
+   writes, and this one does not duplicate it.
 4. No OOMKill occurred. If one did anyway, it is reported with its timestamp and
    the reading that preceded it, which is the ordering the plan cares about,
    observed rather than manufactured.
@@ -444,14 +461,16 @@ reaches the claim.
 
 If the reading does not move inside the budget, the case reports **blocked**
 with the delta it saw, and the reason it is not a failure is worth stating,
-because the neighbouring case answers the same shape differently. The suite does
-not know how much memory this server should use for the writes it made. A static
-reading here is either a broken input or a server whose memory is not
-workload-driven, and nothing in the case distinguishes them, so failing would be
-asserting the first without evidence. The heavier load in SCALE-04 at step 9 is
-what tells them apart. OBS-06 is the contrasting case: there the suite knows
-exactly how many bytes it wrote and has `df` confirming they landed, so a
-control plane that does not move is unambiguously wrong and fails.
+because the neighbouring case answers the same shape differently. Three things
+produce a flat reading and this case cannot tell them apart: a broken input, a
+server whose memory is not driven by metadata churn, and a working set that grew
+and was reclaimed between two samples, which is lawful for a reclaimable gauge
+sampled asynchronously. Failing would assert the first without evidence.
+SCALE-04's heavier and longer load in step 9 is what distinguishes them.
+
+OBS-06 is the contrasting case, and the contrast is the point: there the suite
+knows exactly how many bytes it wrote and has `df` confirming they landed, so a
+control plane reading that did not move is unambiguously wrong and fails.
 
 ### 5.8 OBS-06: two sources, one quantity, and a write to prove they track [decided: no threshold fill, and no volume stats fails]
 
@@ -472,19 +491,28 @@ disagreement beyond tolerance fails, and the message prints both rows, both
 timestamps and the delta in bytes, because the failure that matters is a control
 plane reporting a volume as nearly empty while the workload is getting ENOSPC.
 
-Then a bounded write, sized well outside the tolerance and nothing like a fill,
-and the comparison is repeated. Two sources that agree on a static number prove
+Then a bounded write and the comparison is repeated. Its size is an absolute
+number of bytes in `pkg/slo`, not a fraction of the claim: a fraction is tens of
+gigabytes on a multi-terabyte claim and below the tolerance on a small one, so it
+would be neither bounded nor meaningful across deployments. The comparison is
+against the bytes actually written, which the write reports, rather than against
+the size that was asked for. Two sources that agree on a static number prove
 less than two that move together. A control plane reading that did not move
 **fails**: `df` confirms the bytes landed and the suite knows how many it wrote,
 so there is no second reading of a number that stayed put.
 
-The quota precheck is recorded, not a gate. `df`'s reported total is compared
-against the claim's capacity; a directory-backed export with no per-volume quota
-reports the backing filesystem's size. The cause is nameable on this
-provisioner, whose XFS quota option is off by default, so an export is a
-subdirectory with no per-volume limit. The data exists and the two sources still
-agree, so the case continues (5.2, last paragraph); what is recorded is that a
-capacity number here describes the filesystem rather than the claim.
+The quota check **fails** the case, and it runs last so that everything above it
+is measured and recorded first. `df`'s reported total is compared against the
+claim's capacity; a directory-backed export with no per-volume quota reports the
+backing filesystem's size instead, and no threshold on that number says anything
+about this claim. The cause is nameable on this provisioner, whose XFS quota
+option is off by default, so an export is a subdirectory with no per-volume
+limit at all.
+
+Two readings that agree with each other about the wrong filesystem is exactly
+the shape a passing case would hide, which is why this is row two of 5.2 and not
+a note. The agreement table is still written, so the failure says both that the
+sources agree and that what they agree about is not the volume.
 
 ### 5.9 OBS-07: the server's own metrics, and nothing standing in for them [decided: a server that publishes nothing fails]
 
@@ -617,9 +645,11 @@ Three pull requests, smallest runnable slice first.
 
 **MVP, PR 1: the kubelet reader, and OBS-06.** The stats summary reader, the
 volume usage rows, the quota precheck as a recorded finding, the agreement
-assertion and the bounded write. It needs no fault, produces a result on any
-cluster running nothing but Kubernetes, and is the case in this phase that is
-most directly about storage. Validated outside a unit test by running it against
+assertion, the bounded write and the quota check. It needs no fault and is the
+case in this phase most directly about storage. It produces a result on any
+cluster already meeting the suite's Section 0 preconditions, an RWX class and a
+reachable server, which it needs in order to have a claim to measure; what it
+does not need on top of those is any monitoring component. Validated outside a unit test by running it against
 the GKE cluster in F-008 and reading the table it writes.
 
 **PR 2: OBS-05.** The memory reading from the same reader, the declared-limit
@@ -652,7 +682,8 @@ adding one for a shape nobody has met.
 
 Intentionally not configurable: alert names, thresholds and severities, which
 are not read at all; the agreement tolerance, the freshness requirement, the two
-movement deltas and the resume bound, which are bounds and live in `pkg/slo`;
+movement deltas, the absolute write size and the resume bound, which are bounds
+and live in `pkg/slo`;
 and the sampling interval for the storm, which is fixed until something needs it
 to vary.
 
@@ -741,7 +772,7 @@ One check per rule in section 2, observable from a run.
 | 4. No case passes on a signal its own fault produced | OBS-01 injects no fault and asserts configuration. OBS-07's assertion is on the server's own series, which a pod delete does not produce. Reviewable from the two cases |
 | 5. A live reading is shown to move | OBS-05, OBS-06 and OBS-07 each write a before and after into their table. OBS-06 fails on a control plane reading that did not move, since the bytes written are known and `df` confirms them; OBS-05 blocks with its delta, since no expected memory delta is known, and 5.7 says why the two differ; OBS-07 fails on a series that did not answer after the restart. OBS-01 is the exempt case and records configuration only |
 | 6. Only what a case asserts on is built | The phase adds two readers. The 5.11 table lists what was removed and what would have used it; a reviewer can check no code lands for any row of it |
-| 7. No ceiling chase | Neither case has a path that writes toward a capacity threshold or a memory limit. Both write a fixed bounded delta from `pkg/slo` and stop |
+| 7. No ceiling chase | Neither case has a path that writes toward a capacity threshold or a memory limit. OBS-06 writes an absolute byte count from `pkg/slo`, not a fraction of the claim, and OBS-05's churn is bounded by its budget |
 | 8. Agreement has a stated tolerance | OBS-06 compares against a kubelet reading whose timestamp is later, within a tolerance from `pkg/slo`. Unit tests: fresh but outside tolerance fails, inside tolerance but stale fails on freshness, inside both passes |
 | 9. No bound that cannot fail | No timing assertion is made in this phase and no row is added to Section 3.8. The step 10 bound arrives with the fault that can violate it |
 | 10. Phases 3 and 4 still hold | `make test-chaos` and `make test-data` pass unchanged across the three PRs, and OBS-02, OBS-03 and OBS-04 are not modified |
