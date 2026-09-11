@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -541,5 +542,723 @@ func TestDataLockReleasedAfterForcedPodLoss(t *testing.T) {
 			"node did not notice the pod had gone and the lease expired instead. On a cluster behaving this "+
 			"way, losing a node takes every pod's locks on it out together, for a lease, not one "+
 			"application's for a second", rng, interval.Round(time.Second), p.Lease)
+	}
+}
+
+// DATA-07: one file opened O_DIRECT by two pods on two nodes. Direct I/O
+// bypasses the page cache on both ends, so a read that returns the other pod's
+// bytes crossed the server, and one that returns zeros did not.
+//
+// The image has to be able to do this and may not be able to. busybox dd does
+// carry iflag=direct and oflag=direct, but both live behind the
+// FEATURE_DD_IBS_OBS build option, so whether a given image has them is a
+// property of that image's build. The case probes rather than assuming, and
+// reports blocked naming -tools-image if the flag does not parse: an image
+// without it is not a storage defect and must not read as one.
+//
+// Steps:
+//  1. Pin two pods to two nodes on one claim.
+//  2. Probe oflag=direct on the share, and report blocked if it is absent.
+//  3. Each pod writes a 4KiB block of its own pattern, direct, at its own
+//     offset in one file.
+//  4. Each pod reads the other's block back, direct, and compares checksums.
+//  5. Assert each block holds what its writer wrote, so neither a stale cache
+//     nor a lost write can read as a pass.
+func TestDataDirectIOFromTwoPods(t *testing.T) {
+	f := framework.New(t, "DATA-07")
+	requireCap(t, f.Caps.MultiNode, "contrasting two clients' direct I/O needs two schedulable workers")
+	ctx, cancel := caseCtx(t, 15*time.Minute)
+	defer cancel()
+
+	nodeA, nodeB := f.TwoNodes(ctx)
+	pvc := f.MustRWXPVC(ctx, "data07")
+	const podA, podB = "directa", "directb"
+	f.MustPod(ctx, toolsPod(podA, pvc.Name, nodeA))
+	f.MustPod(ctx, toolsPod(podB, pvc.Name, nodeB))
+
+	if probe := f.ProbeDirectIO(ctx, podA, fileIn("data07.probe")); !probe.OK {
+		blocked(t, "this tools image's dd cannot open a file with O_DIRECT, so there is no direct I/O to "+
+			"contrast: %q. busybox builds it behind FEATURE_DD_IBS_OBS. Pass -tools-image naming an image "+
+			"whose dd carries oflag=direct", probe.Output)
+	}
+
+	path := fileIn("data07.dat")
+	// 4KiB blocks at disjoint offsets in one file. Disjoint on purpose: two
+	// clients writing one region with no coordination would report a mismatch
+	// that is the harness's fault, which is DATA-01's finding and not this one.
+	const block = 4096
+	writers := []struct {
+		pod, node, seed string
+		offset          int
+	}{
+		{podA, nodeA, "data07-a", 0},
+		{podB, nodeB, "data07-b", 1},
+	}
+	sums := make([]string, len(writers))
+	for i, w := range writers {
+		sum, err := f.WriteDirect(ctx, w.pod, path, w.seed, block, w.offset)
+		if err != nil {
+			t.Fatalf("%s on %s writing block %d with O_DIRECT: %v", w.pod, w.node, w.offset, err)
+		}
+		sums[i] = sum
+	}
+
+	// Each block is read by the pod that did not write it. Direct on both ends,
+	// so the comparison crosses the server rather than either page cache.
+	for i, w := range writers {
+		reader := writers[(i+1)%len(writers)]
+		got, err := f.ReadDirect(ctx, reader.pod, path, block, w.offset)
+		if err != nil {
+			t.Errorf("%s on %s reading block %d with O_DIRECT: %v", reader.pod, reader.node, w.offset, err)
+			continue
+		}
+		if got != sums[i] {
+			t.Errorf("%s on %s read block %d as %s, but %s on %s wrote %s. Both ends bypassed the page "+
+				"cache, so this is what the server holds: either the write never landed or the read "+
+				"returned something else",
+				reader.pod, reader.node, w.offset, got, w.pod, w.node, sums[i])
+		}
+	}
+	t.Logf("two clients wrote and read back disjoint 4KiB blocks of one file with O_DIRECT on both ends")
+}
+
+// DATA-08: the same export mounted twice, once with noac, and the visibility
+// that buys. This is the other side of DATA-04: there a reader on another node
+// may see nothing before the writer closes, and that is the protocol behaving
+// as specified. Here, with attribute caching off, the reader must see it.
+//
+// Mount options belong to the volume and Kubernetes has no per-pod override, so
+// the two mounts are two volumes over one export: the dynamically provisioned
+// claim gives the export, and a static clone PV points at the same server and
+// path with noac.
+//
+// The option is read back from /proc/mounts on the reader's node before
+// anything is asserted on it. Without that, a driver or a node that dropped the
+// option would turn this into a second, slower DATA-04 that passes whenever the
+// timing is kind. A dropped option fails the case and names the node.
+//
+// Steps:
+//  1. Provision a claim and read the export out of the bound volume, reporting
+//     blocked if its server and path cannot be read.
+//  2. Create a clone PV over that export with noac, and a claim bound to it.
+//  3. Pin a writer to one node on the dynamic claim and a reader to another on
+//     the clone.
+//  4. Assert the reader's mount actually carries noac.
+//  5. Write through a descriptor the writer holds open, and assert the reader
+//     sees the bytes before the writer closes.
+func TestDataNoacVisibilityWithoutClose(t *testing.T) {
+	f := framework.New(t, "DATA-08")
+	requireCap(t, f.Caps.MultiNode, "contrasting two mounts of one export needs two schedulable workers")
+	ctx, cancel := caseCtx(t, 20*time.Minute)
+	defer cancel()
+
+	nodeA, nodeB := f.TwoNodes(ctx)
+	pvc := f.MustRWXPVC(ctx, "data08")
+	const writer, reader = "writer", "noacreader"
+	f.MustPod(ctx, toolsPod(writer, pvc.Name, nodeA))
+
+	pv, err := f.PVForClaim(ctx, "data08")
+	if err != nil {
+		t.Fatalf("finding the volume behind the claim: %v", err)
+	}
+	source, err := framework.ExtractNFSSource(pv)
+	if err != nil {
+		blocked(t, "%v", err)
+	}
+	t.Logf("the dynamic claim is backed by %s; cloning it with noac", source)
+
+	// vers=4.1 and hard to match what preflight pinned, and noac, which is the
+	// whole point of the second mount.
+	if _, _, err := f.CloneVolume(ctx, framework.CloneVolumeSpec{
+		Name: "data08noac", Source: source, Options: []string{"vers=4.1", "hard", "noac"},
+	}); err != nil {
+		t.Fatalf("creating the noac clone over %s: %v", source, err)
+	}
+	f.MustPod(ctx, toolsPod(reader, "data08noac", nodeB))
+
+	// Read back, not assumed. noac is what this case is measuring, and a mount
+	// that does not carry it measures nothing.
+	m, err := f.PodVolumeMount(ctx, nodeB, f.Name("data08noac"))
+	if err != nil {
+		t.Fatalf("reading the reader's mount on %s: %v", nodeB, err)
+	}
+	t.Logf("the reader's mount on %s carries %s", nodeB, m.Options)
+	if !m.HasOption("noac") {
+		t.Fatalf("the clone was created with noac and the mount on %s does not carry it (%s). Without "+
+			"the option this case is a second, slower DATA-04 that passes whenever the timing is kind, "+
+			"so it fails here rather than asserting on a mount it did not get",
+			nodeB, m.Options)
+	}
+
+	path := fileIn("data08.txt")
+	readerPath := "/mnt/share/data08.txt"
+	// Well under a page, so a partial flush cannot produce a file whose size is
+	// final while an earlier region still reads as zeros.
+	const payload = "data08-visible-without-a-close"
+	w, err := f.HoldOpenWrite(ctx, writer, path, payload, "data08")
+	if err != nil {
+		t.Fatalf("holding %s open on %s: %v", path, nodeA, err)
+	}
+	f.Defer(func(ctx context.Context) { _ = w.Close(ctx) })
+
+	// The bound is short on purpose. noac turns off attribute caching, so the
+	// reader revalidates on every access; a deployment that needs tens of
+	// seconds here has not delivered what the option promises, even though the
+	// bytes arrive eventually.
+	var got string
+	err = framework.Poll(ctx, framework.FastPoll, 30*time.Second, func(ctx context.Context) (bool, error) {
+		got = f.MustShf(ctx, reader, "cat %s 2>/dev/null || true", framework.Quote(readerPath))
+		return got == payload, fmt.Errorf("the noac reader on %s sees %q", nodeB, got)
+	})
+	if err != nil {
+		t.Errorf("the reader on %s never saw the writer's bytes before the close, through a mount "+
+			"carrying noac: it sees %q, want %q. That is the documented boundary on an ordinary mount "+
+			"(DATA-04) and is what noac exists to remove: %v", nodeB, got, payload, err)
+		return
+	}
+	t.Logf("the noac reader on %s saw the writer's bytes before the writer closed, which an ordinary "+
+		"mount does not promise", nodeB)
+}
+
+// DATA-09: rename, unlink and re-create while another pod holds the file open.
+// Two halves, asserting different things, because silly rename is a property of
+// one client rather than of the protocol.
+//
+// The Linux client implements unlink of an open file by renaming it to
+// .nfsXXXXXXXX and removing it when the last descriptor closes. That can only
+// happen when the client doing the unlinking is the client holding the file
+// open, and the client is the node. When another node unlinks it, the server
+// removes it and the holder's next operation gets ESTALE. Both outcomes are
+// correct, and a case that ran the cross-node shape while asserting the
+// same-node expectation would file an NFS-conformant client as a defect.
+//
+// Steps:
+//  1. Same node: pod A holds a descriptor; pod B on the same node unlinks the
+//     file. Assert a .nfs* entry appears, that A's descriptor still reads what
+//     was written, and that the entry is gone once A closes.
+//  2. Cross node: pod A holds a descriptor; pod C on another node unlinks and
+//     re-creates the name with different content. Record whether A sees the old
+//     file or ESTALE, and fail only if A reads the new file's content, which
+//     would mean a file handle was reused.
+//  3. Rename, in both shapes: a descriptor must follow the file, not the name.
+func TestDataSillyRenameAndOpenDescriptors(t *testing.T) {
+	f := framework.New(t, "DATA-09")
+	requireCap(t, f.Caps.MultiNode, "the cross-node half needs two schedulable workers")
+	ctx, cancel := caseCtx(t, 20*time.Minute)
+	defer cancel()
+
+	nodeA, nodeB := f.TwoNodes(ctx)
+	pvc := f.MustRWXPVC(ctx, "data09")
+	const (
+		holder   = "holder"
+		sameNode = "samenode"
+		otherOne = "othernode"
+	)
+	f.MustPod(ctx, toolsPod(holder, pvc.Name, nodeA))
+	f.MustPod(ctx, toolsPod(sameNode, pvc.Name, nodeA))
+	f.MustPod(ctx, toolsPod(otherOne, pvc.Name, nodeB))
+
+	dir := fileIn("data09")
+	f.MustShf(ctx, holder, "mkdir -p %s", framework.Quote(dir))
+
+	t.Run("same-node-unlink-silly-renames", func(t *testing.T) {
+		path := dir + "/same-node.dat"
+		first, second := writeTwoChunks(ctx, t, f, holder, path)
+
+		r, err := f.HoldOpenRead(ctx, holder, path, chunkBytes, "data09same")
+		if err != nil {
+			t.Fatalf("holding %s open on %s: %v", path, nodeA, err)
+		}
+		f.Defer(func(ctx context.Context) { _ = r.Close(ctx) })
+		if got := mustReadChunk(ctx, t, r); got != first {
+			t.Fatalf("the first read through the held descriptor returned %q, want %q", got, first)
+		}
+
+		f.MustShf(ctx, sameNode, "rm -f %s", framework.Quote(path))
+
+		// The silly-rename entry is the client keeping the file alive for the
+		// descriptor. Polled, because the rename is the client's own work.
+		var silly []string
+		if err := framework.Poll(ctx, framework.FastPoll, 30*time.Second, func(ctx context.Context) (bool, error) {
+			var err error
+			if silly, err = f.SillyRenames(ctx, holder, dir); err != nil {
+				return false, err
+			}
+			return len(silly) > 0, fmt.Errorf("no .nfs* entry under %s yet", dir)
+		}); err != nil {
+			t.Errorf("a pod on %s unlinked a file another pod on the same node held open, and no .nfs* "+
+				"entry appeared under %s. The Linux client renames rather than removing so the open "+
+				"descriptor keeps working; without it the descriptor is the thing to check next: %v",
+				nodeA, dir, err)
+		} else {
+			t.Logf("the client on %s kept the file as %v while the descriptor was open", nodeA, silly)
+		}
+
+		if got := mustReadChunk(ctx, t, r); got != second {
+			t.Errorf("the read after the same-node unlink returned %q, want %q: the descriptor stopped "+
+				"working, which is what silly rename exists to prevent", got, second)
+		}
+
+		if err := r.Close(ctx); err != nil {
+			t.Fatalf("closing the descriptor: %v", err)
+		}
+		// The leftover check. A .nfs* file outliving its holder is a leak: it
+		// consumes space nobody can find and nobody will remove.
+		if err := framework.Poll(ctx, framework.PollInterval, time.Minute, func(ctx context.Context) (bool, error) {
+			left, err := f.SillyRenames(ctx, holder, dir)
+			if err != nil {
+				return false, err
+			}
+			return len(left) == 0, fmt.Errorf("%v is still there", left)
+		}); err != nil {
+			t.Errorf("a .nfs* entry under %s outlived the descriptor that caused it: %v. That is a leak: "+
+				"the space is held by a file with no name anyone will look for", dir, err)
+		}
+	})
+
+	t.Run("cross-node-unlink-and-recreate", func(t *testing.T) {
+		path := dir + "/cross-node.dat"
+		first, second := writeTwoChunks(ctx, t, f, holder, path)
+
+		r, err := f.HoldOpenRead(ctx, holder, path, chunkBytes, "data09cross")
+		if err != nil {
+			t.Fatalf("holding %s open on %s: %v", path, nodeA, err)
+		}
+		f.Defer(func(ctx context.Context) { _ = r.Close(ctx) })
+		if got := mustReadChunk(ctx, t, r); got != first {
+			t.Fatalf("the first read through the held descriptor returned %q, want %q", got, first)
+		}
+
+		// Another node unlinks and re-creates the name, with content the holder
+		// must never see through its old descriptor.
+		replacement := strings.Repeat("R", chunkBytes*2)
+		f.MustShf(ctx, otherOne, "rm -f %s && printf %%s %s > %s",
+			framework.Quote(path), framework.Quote(replacement), framework.Quote(path))
+
+		got := mustReadChunk(ctx, t, r)
+		switch {
+		case got == second:
+			t.Logf("after a pod on %s unlinked and re-created the name, the descriptor held on %s still "+
+				"reads the old file. Both that and ESTALE are correct here: the unlinking client is not "+
+				"the one holding it open, so there is no silly rename to protect it", nodeB, nodeA)
+		case strings.HasPrefix(got, framework.ReadFailedPrefix):
+			t.Logf("after a pod on %s unlinked the file, the descriptor held on %s failed, which is the "+
+				"other correct answer and is how an application finds out: %s", nodeB, nodeA, got)
+		case strings.HasPrefix(got, "R"):
+			// The only failure in this half, and a serious one.
+			t.Errorf("the descriptor held on %s read the *new* file's content (%q) after a pod on %s "+
+				"unlinked and re-created the name. A descriptor must refer to the file it was opened on; "+
+				"reading the replacement means a file handle was reused", nodeA, got, nodeB)
+		default:
+			t.Errorf("the descriptor held on %s returned %q, which is neither the old file, nor the new "+
+				"one, nor an error", nodeA, got)
+		}
+	})
+
+	t.Run("rename-does-not-move-a-descriptor", func(t *testing.T) {
+		// A rename is not an unlink. The descriptor stays valid through it on
+		// any client, and one that followed the name rather than the file would
+		// be a failure in either shape.
+		path := dir + "/renamed.dat"
+		first, second := writeTwoChunks(ctx, t, f, holder, path)
+		moved := dir + "/renamed-elsewhere.dat"
+
+		r, err := f.HoldOpenRead(ctx, holder, path, chunkBytes, "data09rename")
+		if err != nil {
+			t.Fatalf("holding %s open on %s: %v", path, nodeA, err)
+		}
+		f.Defer(func(ctx context.Context) { _ = r.Close(ctx) })
+		if got := mustReadChunk(ctx, t, r); got != first {
+			t.Fatalf("the first read through the held descriptor returned %q, want %q", got, first)
+		}
+
+		f.MustShf(ctx, otherOne, "mv %s %s", framework.Quote(path), framework.Quote(moved))
+		// A different file at the old name, so a descriptor following the name
+		// fails the comparison rather than passing by coincidence.
+		decoy := strings.Repeat("D", chunkBytes*2)
+		f.MustShf(ctx, otherOne, "printf %%s %s > %s", framework.Quote(decoy), framework.Quote(path))
+
+		if got := mustReadChunk(ctx, t, r); got != second {
+			t.Errorf("after the file was renamed out from under it, the descriptor read %q, want %q. "+
+				"A rename moves a name, not a file, and a descriptor that follows the name is reading "+
+				"whatever happens to be there now", got, second)
+		}
+	})
+}
+
+// chunkBytes is how much of a file one read through a held descriptor returns.
+// Small and printable, because the assertion is on identity rather than on
+// volume, and the chunk travels back through an exec's stdout.
+const chunkBytes = 16
+
+// writeTwoChunks writes a file of two distinguishable chunks and returns them,
+// so that a read after a rename or an unlink has a second chunk to be correct
+// about rather than repeating the first.
+func writeTwoChunks(ctx context.Context, t *testing.T, f *framework.Framework, pod, path string) (string, string) {
+	t.Helper()
+	first := strings.Repeat("A", chunkBytes)
+	second := strings.Repeat("B", chunkBytes)
+	f.MustShf(ctx, pod, "printf %%s %s > %s", framework.Quote(first+second), framework.Quote(path))
+	return first, second
+}
+
+// mustReadChunk reads the next chunk through a held descriptor.
+func mustReadChunk(ctx context.Context, t *testing.T, r *framework.OpenReader) string {
+	t.Helper()
+	got, err := r.Next(ctx, 30*time.Second)
+	if err != nil {
+		t.Fatalf("reading through the held descriptor: %v", err)
+	}
+	return got
+}
+
+// dirEntries is how many entries DATA-10 creates. Fixed, not configurable: it
+// is a property of the measurement, and the plan states it. Section 3.2.
+const dirEntries = 100000
+
+// DATA-10: a large directory listed while another pod deletes from it. The
+// listing may miss entries. It may never return a name that was never created.
+//
+// The defect this is derived from is a use-after-free on directory chunk reuse
+// during READDIR under cache pressure. From a client that surfaces as a listing
+// returning a name that is not in the directory: a fragment of a reused page
+// decoded as an entry. It does not surface as a count being off, because a
+// listing racing deletes is supposed to have a count that is off, so asserting
+// one would fail on lawful behaviour.
+//
+// Steps:
+//  1. Check free space and inodes before starting, and report blocked if the
+//     export cannot hold the set. Failing on ENOSPC halfway through would point
+//     at the server for a sizing problem.
+//  2. Populate the directory from one pod, split across shells inside it.
+//  3. Start a second pod deleting the back half.
+//  4. List the directory from a third pod, streamed, while the deletes run.
+//  5. Assert the listing completed, and that every name it returned is one the
+//     populate step created.
+//  6. Assert the server pod did not restart, and that no node logged an oops or
+//     an NFS error over the window. The counts go in the bundle.
+func TestDataLargeDirectoryReaddirUnderDeletes(t *testing.T) {
+	f := framework.New(t, "DATA-10")
+	requireCap(t, f.Caps.MultiNode, "listing from a pod that is not deleting needs two schedulable workers")
+	ctx, cancel := caseCtx(t, 40*time.Minute)
+	defer cancel()
+
+	nodeA, nodeB := f.TwoNodes(ctx)
+	pvc := f.MustRWXPVC(ctx, "data10")
+	const (
+		populator = "populator"
+		deleter   = "deleter"
+		lister    = "lister"
+	)
+	f.MustPod(ctx, toolsPod(populator, pvc.Name, nodeA))
+	f.MustPod(ctx, toolsPod(deleter, pvc.Name, nodeA))
+	f.MustPod(ctx, toolsPod(lister, pvc.Name, nodeB))
+
+	dir := fileIn("data10")
+	// Checked before starting rather than discovered during. An hour of
+	// population that dies on ENOSPC teaches nothing, and the failure would
+	// name the server for what is a sizing problem.
+	space, err := f.MountSpace(ctx, populator, mountPath)
+	if err != nil {
+		t.Fatalf("reading the export's free space: %v", err)
+	}
+	if space.InodesKnown && space.FreeInodes < int64(dirEntries) {
+		blocked(t, "the export reports %d free inodes and this case needs %d. The claim's size is not "+
+			"the limit here: an export may be directory-backed with no per-volume quota, and the real "+
+			"limit is the backing filesystem's inode table", space.FreeInodes, dirEntries)
+	}
+	t.Logf("the export reports %d bytes free and %d free inodes (known %v) before %d entries",
+		space.FreeBytes, space.FreeInodes, space.InodesKnown, dirEntries)
+
+	restartsBefore := serverRestarts(ctx, t, f)
+	kernelBefore := readKernelLog(ctx, t, f, nodeA, nodeB)
+
+	created, err := f.PopulateDir(ctx, populator, dir, dirEntries, 16, 30*time.Minute)
+	if err != nil {
+		t.Fatalf("populating %s: %v", dir, err)
+	}
+	if created != dirEntries {
+		t.Fatalf("the populate step created %d of %d entries, so the case would assert against entries "+
+			"that were never there", created, dirEntries)
+	}
+	t.Logf("%d entries created under %s from %s on %s", created, dir, populator, nodeA)
+
+	// The back half, so the listing is racing deletes over a region it has not
+	// necessarily reached yet.
+	del, err := f.StartDeletingEntries(ctx, deleter, dir, dirEntries/2+1, dirEntries, "data10")
+	if err != nil {
+		t.Fatalf("starting the deleter: %v", err)
+	}
+
+	listing, listErr := f.ListDirEntries(ctx, lister, dir, 20*time.Minute)
+	listed, unknown := framework.ClassifyEntries(dir, created, listing)
+	removed, delErr := del.Removed(ctx, 20*time.Minute)
+	if delErr != nil {
+		t.Errorf("the deleter never finished: %v", delErr)
+	}
+
+	census := framework.DirCensus{Created: created, Listed: listed, Deleted: removed, Unknown: unknown}
+	if err := f.WriteArtifact("directory-census.txt", []byte(census.String()+"\n"+
+		strings.Join(unknown, "\n")+"\n")); err != nil {
+		t.Logf("writing the directory census: %v", err)
+	}
+	t.Logf("directory census: %s", census)
+
+	if listErr != nil {
+		t.Errorf("the listing of %s did not complete while %s was deleting from it: %v",
+			dir, deleter, listErr)
+	}
+	// The assertion. A name nobody created is a directory chunk read after it
+	// was reused.
+	if len(unknown) > 0 {
+		show := unknown
+		if len(show) > 10 {
+			show = show[:10]
+		}
+		t.Errorf("the listing returned %d names the populate step never created: %q. A listing racing "+
+			"deletes is allowed to miss entries and is not allowed to invent one; a name that was never "+
+			"there is a directory chunk decoded after it was reused, which is the defect this case exists "+
+			"for", len(unknown), show)
+	}
+	// A count below what was created is lawful and is recorded, not asserted.
+	if listed < created {
+		t.Logf("the listing returned %d of %d entries, which is lawful: it was racing %d deletions",
+			listed, created, removed)
+	}
+
+	if after := serverRestarts(ctx, t, f); after != restartsBefore {
+		t.Errorf("the server pod restarted %d times during the listing (was %d): a readdir over a large "+
+			"directory must not be able to take the server down", after-restartsBefore, restartsBefore)
+	}
+	assertNoNewKernelErrors(ctx, t, f, kernelBefore, nodeA, nodeB)
+}
+
+// DATA-11: a sparse file written, read back, and a hole punch that this mount
+// cannot perform. What the case fails on is narrower than the plan's one-line
+// row, and the row was amended to say so.
+//
+// Hole punching is unavailable twice over here. NFSv4.1 has no operation for
+// it: ALLOCATE, DEALLOCATE and READ_PLUS arrived with NFSv4.2 in RFC 7862, and
+// preflight pins vers=4.1. And the busybox fallocate applet parses -l and -o
+// only, so on a stock image the flag is rejected by the tool whatever the mount
+// underneath it is.
+//
+// Those two refusals are not the same answer and are not reported as one. An
+// applet that cannot parse -p reports blocked, naming -tools-image, because
+// nothing about the protocol has been learned. Only a -p that parses and is
+// then refused is recorded as the protocol saying no. Without the split, every
+// run on a busybox image would file "NFSv4.1 does not support hole punching" on
+// evidence that is really "this image's applet has no -p".
+//
+// The 4.2 branch is written and unreachable until preflight accepts 4.2. It is
+// written anyway: the alternative is a case that has to be rediscovered and
+// rewritten on the day the mount changes.
+//
+// Steps:
+//  1. Write a byte at the start of a file and another past a hole.
+//  2. Assert the hole reads back as zeros and the far byte is at its offset.
+//  3. Assert the logical size is the full length; record allocated blocks
+//     without asserting, since how the backing filesystem stores a hole is not
+//     an NFS property.
+//  4. Probe whether the image's fallocate parses -p at all.
+//  5. Attempt the punch. A refusal is recorded as unsupported. Success is
+//     asserted: the region must read as zeros and the size must not change.
+func TestDataSparseFileAndHolePunch(t *testing.T) {
+	f := framework.New(t, "DATA-11")
+	ctx, cancel := caseCtx(t, 15*time.Minute)
+	defer cancel()
+
+	nodes, err := f.WorkerNodes(ctx)
+	if err != nil || len(nodes) == 0 {
+		t.Fatalf("listing worker nodes: %v", err)
+	}
+	pvc := f.MustRWXPVC(ctx, "data11")
+	const pod = "sparse"
+	f.MustPod(ctx, toolsPod(pod, pvc.Name, nodes[0]))
+
+	path := fileIn("data11.dat")
+	// One block at the start, a hole, and one block past it. The offsets are
+	// block-aligned so that a punch, where one is possible, has a whole block
+	// to work on rather than a partial one the filesystem may only zero.
+	const (
+		block     = 4096
+		holeBlock = 1
+		farBlock  = 8
+		totalSize = (farBlock + 1) * block
+	)
+	f.MustShf(ctx, pod, "rm -f %[1]s; dd if=/dev/zero of=%[1]s bs=%[2]d count=1 2>/dev/null; "+
+		"yes data11-far | head -c %[2]d | dd of=%[1]s bs=%[2]d seek=%[3]d conv=notrunc 2>/dev/null",
+		framework.Quote(path), block, farBlock)
+
+	if got := f.MustShf(ctx, pod, "stat -c %%s %s", framework.Quote(path)); got != fmt.Sprint(totalSize) {
+		t.Errorf("the sparse file reports a logical size of %s, want %d: a hole is part of the file's "+
+			"length whether or not it is stored", got, totalSize)
+	}
+	// Recorded, not asserted. Whether the backing filesystem stores the hole
+	// sparsely is a property of that filesystem, not of NFS.
+	t.Logf("the sparse file reports %s allocated blocks for %d logical bytes",
+		f.MustShf(ctx, pod, "stat -c %%b %s", framework.Quote(path)), totalSize)
+
+	if nonZero := readNonZeroBytes(ctx, t, f, pod, path, block, holeBlock); nonZero != 0 {
+		t.Errorf("the hole at block %d holds %d bytes that are not zero: a region nobody wrote must "+
+			"read as zeros", holeBlock, nonZero)
+	}
+	if got := f.MustShf(ctx, pod, "dd if=%s bs=%d count=1 skip=%d 2>/dev/null | head -c 11",
+		framework.Quote(path), block, farBlock); got != "data11-far" {
+		t.Errorf("the byte written past the hole reads back as %q at block %d: a sparse write put the "+
+			"data at the wrong offset", got, farBlock)
+	}
+
+	probe := f.ProbeHolePunch(ctx, pod)
+	if probe.Missing {
+		blocked(t, "this tools image's fallocate does not parse -p, so the punch was never requested and "+
+			"nothing about the protocol has been learned: %q. The busybox applet parses -l and -o only. "+
+			"Pass -tools-image naming an image whose fallocate carries -p", probe.Output)
+	}
+
+	punch := f.Sh(ctx, pod, fmt.Sprintf("fallocate -p -o %d -l %d %s 2>&1",
+		holeBlock*block, block, framework.Quote(path)))
+	if punch.Err != nil {
+		// Rule 9: an operation the protocol does not define is recorded, not
+		// failed. On a 4.1 mount this is the expected branch, and it is the
+		// refusal of the operation rather than of the flag, because the probe
+		// above established that -p parses.
+		t.Logf("the hole punch was refused on this %s mount, which is the documented answer: NFSv4.1 "+
+			"carries no DEALLOCATE, and ALLOCATE, DEALLOCATE and READ_PLUS arrived with NFSv4.2 in "+
+			"RFC 7862. Recorded as unsupported, not failed: %s",
+			f.Env.NFSVersion, strings.TrimSpace(punch.Combined()))
+		return
+	}
+
+	// The punch reported success, so it is asserted. This is the branch that
+	// becomes reachable the day preflight accepts 4.2, and the case does not
+	// need rewriting for it.
+	t.Logf("the hole punch succeeded on this %s mount", f.Env.NFSVersion)
+	if nonZero := readNonZeroBytes(ctx, t, f, pod, path, block, holeBlock); nonZero != 0 {
+		t.Errorf("fallocate -p reported success and the punched region still holds %d bytes that are "+
+			"not zero. A punch that reports success and does not zero is worse than one that refuses: "+
+			"an application told the data is gone can still read it", nonZero)
+	}
+	if got := f.MustShf(ctx, pod, "stat -c %%s %s", framework.Quote(path)); got != fmt.Sprint(totalSize) {
+		t.Errorf("the file reports a logical size of %s after the punch, want %d: punching a hole "+
+			"removes storage, not length", got, totalSize)
+	}
+}
+
+// readNonZeroBytes returns how many bytes of one block are not zero, which is
+// how a region nobody wrote is checked without moving a block through exec.
+func readNonZeroBytes(ctx context.Context, t *testing.T, f *framework.Framework, pod, path string, block, index int) int {
+	t.Helper()
+	out := f.MustShf(ctx, pod, "dd if=%s bs=%d count=1 skip=%d 2>/dev/null | tr -d '\\000' | wc -c",
+		framework.Quote(path), block, index)
+	n, err := strconv.Atoi(strings.TrimSpace(out))
+	if err != nil {
+		t.Fatalf("counting the non-zero bytes of block %d: the pod said %q", index, out)
+	}
+	return n
+}
+
+// serverRestarts totals the restart counts of the NFS server pods, which is how
+// a case says the server did not fall over under what it was doing. A cluster
+// where the server was never discovered reports zero and the case's own
+// assertion becomes a comparison of two zeros, which is why it is logged.
+func serverRestarts(ctx context.Context, t *testing.T, f *framework.Framework) int32 {
+	t.Helper()
+	ns := f.Env.ServerNamespace()
+	if ns == "" {
+		t.Logf("the NFS server pods were never discovered, so a restart of one cannot be noticed here")
+		return 0
+	}
+	pods, err := f.C.Kube.CoreV1().Pods(ns).List(ctx, framework.ListOptions(framework.Cfg().ServerSelector))
+	if err != nil {
+		t.Logf("reading the server pods' restart counts: %v", err)
+		return 0
+	}
+	var total int32
+	for i := range pods.Items {
+		for _, cs := range pods.Items[i].Status.ContainerStatuses {
+			total += cs.RestartCount
+		}
+	}
+	return total
+}
+
+// kernelErrorMarkers are the lines worth failing a case over. A use-after-free
+// that did not corrupt a listing still corrupts memory, and the kernel says so
+// where no assertion on file content would see it.
+var kernelErrorMarkers = []string{"oops", "kernel bug", "use-after-free", "kasan", "nfs: server"}
+
+// readKernelLog captures each node's ring buffer, for comparison afterwards.
+//
+// A window, rather than the whole buffer, because these nodes have been running
+// the rest of the suite: an NFS error logged by a chaos case an hour ago is not
+// this case's finding. Comparing two reads is the honest way to get a window
+// without parsing dmesg timestamps, whose format varies by node image.
+func readKernelLog(ctx context.Context, t *testing.T, f *framework.Framework, nodes ...string) map[string]map[string]bool {
+	t.Helper()
+	seen := map[string]map[string]bool{}
+	agent, err := framework.NodeAgent(ctx, f.C)
+	if err != nil {
+		t.Logf("the node agent is unavailable, so the kernel ring buffers were not read: %v", err)
+		return seen
+	}
+	for _, node := range nodes {
+		out, err := agent.Dmesg(ctx, node)
+		if err != nil {
+			t.Logf("reading dmesg on %s: %v", node, err)
+			continue
+		}
+		lines := map[string]bool{}
+		for _, line := range strings.Split(out, "\n") {
+			lines[strings.TrimSpace(line)] = true
+		}
+		seen[node] = lines
+	}
+	return seen
+}
+
+// assertNoNewKernelErrors fails on an oops or an NFS client error that was not
+// already in the ring buffer when the case started.
+//
+// A node with no baseline is not silently passed: it is logged, because a check
+// nobody performed must not read as a check that found nothing.
+func assertNoNewKernelErrors(ctx context.Context, t *testing.T, f *framework.Framework,
+	before map[string]map[string]bool, nodes ...string) {
+	t.Helper()
+	agent, err := framework.NodeAgent(ctx, f.C)
+	if err != nil {
+		t.Logf("the node agent is unavailable, so the kernel ring buffers were not compared: %v", err)
+		return
+	}
+	for _, node := range nodes {
+		baseline, ok := before[node]
+		if !ok {
+			t.Logf("no ring buffer was captured on %s before this case, so nothing about its kernel "+
+				"is being asserted here", node)
+			continue
+		}
+		out, err := agent.Dmesg(ctx, node)
+		if err != nil {
+			t.Logf("reading dmesg on %s: %v", node, err)
+			continue
+		}
+		if err := f.WriteArtifact("dmesg-"+node+".txt", []byte(out)); err != nil {
+			t.Logf("writing the ring buffer of %s: %v", node, err)
+		}
+		for _, line := range strings.Split(out, "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" || baseline[line] {
+				continue
+			}
+			low := strings.ToLower(line)
+			for _, marker := range kernelErrorMarkers {
+				if strings.Contains(low, marker) {
+					t.Errorf("the kernel on %s logged %q during this case, and it was not there before. "+
+						"A directory chunk read after it was reused corrupts memory whether or not it "+
+						"corrupted the listing, and that shows up here and nowhere else", node, line)
+					break
+				}
+			}
+		}
 	}
 }

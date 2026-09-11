@@ -138,6 +138,11 @@ charged to every case eats the `go test -timeout` budget for the package.
 | DATA-04 | The negative of DATA-03: what a reader may see before the writer closes | DATA |
 | DATA-05 | flock mutual exclusion across two nodes, clean handover on release | DATA |
 | DATA-06 | A byte-range lock held by a force-deleted pod, released inside one lease | DATA |
+| DATA-07 | One file written and read O_DIRECT by two pods on two nodes | DATA |
+| DATA-08 | The same export mounted twice, once with noac: visibility without a close | DATA |
+| DATA-09 | Silly rename, cross-node unlink and rename under a held descriptor | DATA |
+| DATA-10 | A 100k-entry directory listed while another pod deletes from it | DATA |
+| DATA-11 | Sparse write and read back; the hole punch recorded, not asserted, on 4.1 | DATA |
 | SEC-01 | uid and gid preservation across pods on two nodes | SEC |
 | SEC-02 | What the export does to a root-owned write, and whether it does it coherently | SEC |
 | OBS-04 | A mount that cannot succeed reaches the operator as a Kubernetes Event | OBS |

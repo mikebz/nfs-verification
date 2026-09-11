@@ -210,3 +210,38 @@ func parseDF(out string) (Capacity, error) {
 	}
 	return Capacity{TotalBytes: total * 1024, AvailBytes: avail * 1024}, nil
 }
+
+// Direct I/O bypasses the page cache on both ends, which is the only way a
+// case can say that what it read came from the server rather than from the
+// client that wrote it. A read that returns zeros never crossed.
+//
+// Both helpers assume the flags parse. Probe with ProbeDirectIO first: an image
+// whose dd was built without FEATURE_DD_IBS_OBS reports blocked rather than
+// failing, because a missing flag is a fact about the image and not a defect in
+// the storage.
+
+// WriteDirect writes one block of deterministic content at a block offset with
+// O_DIRECT, and returns the block's sha256.
+//
+// The block is built on the pod's own filesystem and copied into place, because
+// a direct write needs a whole aligned block from a file rather than a stream.
+// conv=notrunc so that a pod writing a later block does not remove an earlier
+// one written by another pod.
+func (f *Framework) WriteDirect(ctx context.Context, pod, path, seed string, block, offset int) (string, error) {
+	script := fmt.Sprintf(
+		`set -e; mkdir -p "$(dirname %[1]s)"; `+
+			`yes %[2]s | head -c %[3]d > /tmp/nfsv-direct-block; `+
+			`dd if=/tmp/nfsv-direct-block of=%[1]s bs=%[3]d count=1 seek=%[4]d oflag=direct conv=notrunc 2>/dev/null; `+
+			`sha256sum /tmp/nfsv-direct-block | cut -d' ' -f1`,
+		shellQuote(path), shellQuote(seed), block, offset)
+	return f.C.MustSh(ctx, Namespace, f.Name(pod), "main", script)
+}
+
+// ReadDirect reads one block at a block offset with O_DIRECT and returns its
+// sha256, as that pod sees it.
+func (f *Framework) ReadDirect(ctx context.Context, pod, path string, block, offset int) (string, error) {
+	script := fmt.Sprintf(
+		`set -e; dd if=%s bs=%d count=1 skip=%d iflag=direct 2>/dev/null | sha256sum | cut -d' ' -f1`,
+		shellQuote(path), block, offset)
+	return f.C.MustSh(ctx, Namespace, f.Name(pod), "main", script)
+}
