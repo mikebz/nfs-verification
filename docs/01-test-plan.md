@@ -233,13 +233,24 @@ Blanket rule: any core dump on any server pod fails the run. Cores are collected
 
 | ID | Case | Expected |
 |---|---|---|
-| OBS-01 | Server unavailable | Alert fires within SLO; correct severity and target |
+| OBS-01 | Server unavailable | The outage is visible in queryable Kubernetes state within the SLO bound: the server's readiness transitions with a timestamp and its ready endpoints reach zero. The window that data describes overlaps the outage the client measured. |
 | OBS-02 | Failover event | Event is observable in metrics or logs with a timestamp; measurable duration |
 | OBS-03 | Grace period entry and exit | Both observable; duration measurable. Required to make CHAOS-05 diagnosable. |
 | OBS-04 | Mount failure on a client | Surfaced as a Kubernetes Event on the pod with an actionable reason |
-| OBS-05 | Server memory approaching ceiling | Alert fires before OOMKill |
-| OBS-06 | Volume near capacity | Alert fires; `df` inside the pod agrees with the control plane |
-| OBS-07 | Metrics survive server restart | Counters either reset cleanly or persist; no gaps that hide an outage |
+| OBS-05 | Server memory approaching ceiling | A ceiling is declarable and readable: the server container declares a memory limit, its working set is readable against that limit with a timestamp, and the reading moves when the server is worked. An OOMKill, if one occurs, is visible in the API with a timestamp. **Not manufactured**: no case drives the server to its limit. |
+| OBS-06 | Volume near capacity | The control plane reports this volume's usage, it agrees with `df` inside the pod within a stated tolerance and freshness, and both move together when the workload writes. An export whose reported total is not the claim's capacity has no per-volume capacity to threshold, which is **recorded as a finding**. |
+| OBS-07 | Metrics survive server restart | Every reading above keeps answering across a server restart, and each series either resets cleanly or persists. A source that stops answering fails; a gap that shows the outage does not. |
+
+**Alerting rules are out of scope.** Thresholds, `for` durations, severities and
+routing are organization-specific and problem-specific, and a portable suite that
+asserted on them would fail a healthy storage system for a threshold set
+differently, and would have to find or install a monitoring stack it does not
+own. The four cases above verify the **data an alert is built on**: that it
+exists, carries a timestamp, is current, and agrees with what the workload sees.
+A deployment missing that data cannot be alerted on by anyone, whatever rules
+they write. What this does not establish is stated in
+[`05-observability-and-alerting-design.md`](05-observability-and-alerting-design.md)
+section 5.8.
 
 ### 3.6 Security and identity (SEC)
 

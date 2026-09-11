@@ -1,16 +1,16 @@
-# 05: Closing out observability: alerts, capacity, and metrics across a restart
+# 05: Closing out observability: the data an alert is built on
 
 Author: Claude Code
 Created: 2026-09-11
 Updated: 2026-09-11
 
-Phase boundary: the first cases that assert on what the *monitoring system*
-saw, rather than on what a client or a server log said. Ends when OBS-01,
-OBS-05, OBS-06 and OBS-07 run against a real cluster and each one reports an
-alert with a timestamp, a capacity agreement, a memory ceiling result and a
-metrics continuity verdict, or says precisely which channel this deployment does
-not have. Cadence: four pull requests, following [`plan.md`](plan.md) step 7, on
-top of step 6. Prior phases:
+Phase boundary: the first cases that assert on the *inputs an operator would
+build monitoring on*, rather than on what a client or a server log said. Ends
+when OBS-01, OBS-05, OBS-06 and OBS-07 run against a real cluster and each one
+reports a timestamped availability signal, a memory reading against a declared
+ceiling, a capacity agreement and a continuity verdict, or names the source this
+deployment does not serve. Cadence: three pull requests, following
+[`plan.md`](plan.md) step 7, on top of step 6. Prior phases:
 [`02-chaos-operations-design.md`](02-chaos-operations-design.md),
 [`03-grace-and-lock-reclaim-design.md`](03-grace-and-lock-reclaim-design.md),
 [`04-data-path-and-locktool-design.md`](04-data-path-and-locktool-design.md).
@@ -19,45 +19,54 @@ channel open in its section 11.
 
 ---
 
-## 1. Problem and outcomes [decided: read the monitoring system the cluster already has, never deploy one]
+## 1. Problem and outcomes [decided: verify the data, never the alert rules]
 
 Steps 3 and 4 can injure the server, time the outage and read the server's log
-stream. Nothing in the suite has ever asked the question an operator asks first:
-*did anybody get told?* OBS-02 and OBS-03 answer "was there a trace", which is
-weaker. A deployment can leave a perfect trace in a log stream nobody reads and
-still page nobody for a total storage outage.
+stream. The test plan's Section 3.5 words four of its cases as "an alert fires".
+This phase does not test that, and the distinction is the whole design.
 
-This phase adds the second channel the test plan has always named and the suite
-has never used: metrics and alerts. Four cases assert that an outage, a memory
-ceiling and a full volume each reach a human, and that the metrics record
-survives a server restart well enough to show that the outage happened.
+An alert is a rule somebody wrote: a threshold, a `for` duration, a severity and
+a routing policy. All four are organization-specific and problem-specific. A
+suite that asserted on them would be asserting on the operator's paging policy,
+would fail a healthy storage system for a threshold set differently, and would
+have to either find a monitoring stack it does not own or install one. None of
+that is a property of NFS RWX volumes on Kubernetes.
+
+What *is* a property of the system under test is whether the data those rules
+need exists at all: whether an outage is visible in queryable state with a
+timestamp, whether the server's memory can be read against a declared ceiling,
+whether a volume's usage is reported by the control plane and agrees with what
+the workload sees, and whether those readings survive a server restart. A
+deployment where the data is missing, stale, or wrong cannot be alerted on by
+anyone, whatever rules they write. That is the finding this phase exists to
+produce.
 
 Observable outcomes that define done:
 
-- A case can state that a total outage of the export produced an alert naming
-  the server, with a severity, within the SLO bound, or that it produced none.
-- A case can state the fraction of its memory limit the server reached, and
-  whether an alert fired before it got there.
+- A case can state when the server became unavailable and when it came back,
+  from data the Kubernetes API serves, with timestamps, and compare that window
+  against the outage the client actually experienced.
+- A case can state the server's memory working set, the limit it is measured
+  against, and whether the reading moves when the server is worked.
 - A case can state what a pod's `df` says about a volume, what the control plane
   says about the same volume at the same moment, and by how much they disagree.
-- A case can state whether the metrics record shows a server restart at all, and
-  which of the three lawful shapes it took.
-- Every one of the four can say "this deployment has no such channel" in a way
-  that lands on the deployment owner rather than on the server owner.
+- A case can state whether each of those readings kept answering across a server
+  restart, and which of the lawful shapes the values took.
+- Every one of the four can say "this deployment does not serve that data" in a
+  way that lands on the deployment owner rather than on the server owner.
 
 Requirements: Section 3.5 of [`01-test-plan.md`](01-test-plan.md) for the four
-cases, Section 3.8 for the alert SLO, Section 4.2 for the category budget,
-Section 4.3 for where a failure gets routed. Findings that constrain this phase:
-F-008 (a server that publishes nothing is a finding about the deployment, and
-the case fails rather than skips), F-002 (node sizing, which bounds what the
-memory case may do), F-001 and F-003 (ordering around anything that unmounts).
+cases, whose wording this phase changes in the same pull request (5.11), Section
+3.8 for the observability bound, Section 4.2 for the category budget, Section
+4.3 for where a failure gets routed. Findings that constrain this phase: F-008
+(a deployment that publishes nothing is a finding about the deployment, and the
+case fails rather than skips), F-002 (node sizing, which bounds what the memory
+case may do), F-001 and F-003 (ordering around anything that unmounts).
 
-Cases served: **OBS-01** (server unavailable, alert fires), **OBS-05** (memory
-approaching ceiling, alert fires before OOMKill), **OBS-06** (volume near
-capacity, alert fires and `df` agrees with the control plane), **OBS-07**
-(metrics survive a server restart). The metrics client is shared with SCALE-02
-and SCALE-04, which assert on server RSS and arrive in step 9. The network
-partition operation is shared with CHAOS-04, which arrives in step 10.
+Cases served: **OBS-01** (server unavailable), **OBS-05** (memory approaching a
+ceiling), **OBS-06** (volume near capacity), **OBS-07** (readings survive a
+server restart). The volume and memory readers are shared with SCALE-02 and
+SCALE-04, which assert on server RSS and arrive in step 9.
 
 ---
 
@@ -66,38 +75,35 @@ partition operation is shared with CHAOS-04, which arrives in step 10.
 Each line is testable, and a reviewer can accept or reject the phase from this
 section without reading code.
 
-1. The suite deploys no monitoring stack, ever. It reads the one the cluster
-   has. A suite that installs Prometheus to pass an observability case is
-   testing Prometheus.
-2. A monitoring API that cannot be reached is blocked, naming the flag. A
-   monitoring API that answers and has nothing to say about the server is a
-   failure. The first is a harness gap, the second is the finding the case
-   exists for. This is the F-008 rule, applied to the metrics channel.
-3. No case invents an alert name, a metric name or a threshold. Alert rules are
-   read from the monitoring system, thresholds are the deployment's own, and the
-   only thing the suite states is which severity words mean "page someone".
-4. An alert counts for a case only when it names the thing under test. An alert
-   about an unrelated workload firing in the same window is not evidence.
-5. A case that manufactures an outage restores the cluster before it asserts
-   anything, on a context that a cancelled or timed-out case cannot take away.
-   Assertions are made on collected data after the restore, never with the fault
-   still in place.
-6. No case drives the server to OOMKill on purpose. Approaching a ceiling is the
-   precondition the plan names; crossing it adds nothing to the assertion and
-   costs the cluster its storage.
-7. No case fills a filesystem it does not own. A volume whose reported capacity
-   is not the claim's capacity is not quota-enforced, and filling it fills the
-   server's disk for every other export on it.
-8. A case that could not establish its own precondition reports blocked with the
-   number it did reach. "The server never got near its limit" is not a pass.
-9. Two readings of the same quantity taken by two samplers at two moments agree
+1. The suite deploys no monitoring stack, ever, and takes no dependency on a
+   hosted one. Every reading in this phase comes from the Kubernetes API server
+   with the kubeconfig the suite already uses.
+2. No case asserts that an alert fired, and no case reads an alert rule, a
+   severity or a threshold. Those are the operator's, and they differ per
+   organization and per problem.
+3. What is asserted is that the input data exists, carries a timestamp, is
+   current, and says the same thing the workload says. A number nobody can read
+   and a number that is wrong are the same defect from an operator's chair.
+4. A data source the suite cannot reach for its own reasons (RBAC, a missing
+   optional API) is blocked, naming what was refused. A source that answers and
+   reports nothing about the server or the volume under test is a failure. The
+   first is a harness gap, the second is the finding. This is the F-008 rule.
+5. A case that could not establish its own precondition reports blocked with the
+   number it did reach. "The reading never moved because the server was never
+   worked" is not a pass.
+6. No case drives the server to OOMKill, and no case fills a filesystem it does
+   not own. Both are precondition manufacturing that costs more than the
+   assertion is worth.
+7. Two readings of one quantity taken by two samplers at two moments agree
    within a stated tolerance derived from the slower sampler's period, or the
    case says by how much they disagreed. A raw equality assertion between `df`
-   and the control plane would fail on a healthy cluster.
-10. Timing bounds come from `pkg/slo`. The alert SLO is already there; the
-    fractions and tolerances this phase adds go there too, not into a case.
-11. Every rule from phases 3 and 4 still holds. This phase adds a fault, it does
-    not amend the contract around the existing ones.
+   and the control plane fails on a healthy cluster.
+8. No case invents a fault. The pod delete from phase 3 is the only fault this
+   phase uses.
+9. Timing bounds come from `pkg/slo`. Fractions and tolerances added here go
+   there too, not into a case.
+10. Every rule from phases 3 and 4 still holds. This phase adds readers, it does
+    not amend the contract around the existing cases.
 
 ---
 
@@ -105,535 +111,425 @@ section without reading code.
 
 **In scope for this phase**
 
-- A read-only client for a Prometheus-compatible HTTP API: instant query, range
-  query, active alerts, loaded alerting rules.
-- Discovery of that endpoint, confirmed by a probe rather than by naming
-  convention alone, recorded in `environment.json` with a capability.
-- A reading of the kubelet Summary API for per-volume usage, which is the
-  control plane's own answer about a volume.
-- A reading of `metrics.k8s.io` for a pod's working set, which is how the server
-  memory case measures the thing the alert is about.
-- One new fault: a bounded ingress partition of the server pod, which is how an
-  outage is made to last long enough for an alert rule to fire.
-- A bounded capacity fill and a bounded small-file storm, both of which stop at
-  a fraction and neither of which crosses it.
+- A reader for the availability data Kubernetes serves about the server:
+  pod conditions with their transition times, container statuses and restart
+  counts, termination reasons, and the readiness of the server's endpoints.
+- A reader for the kubelet Summary API: per-volume capacity and usage with the
+  kubelet's own timestamp, and per-pod memory working set from the same call.
+- A cross-check against `metrics.k8s.io` for the memory reading, where the
+  aggregated API is served.
+- A sampler that polls those readers across a fault and classifies what happened
+  to each series.
+- A bounded write that moves a volume's usage, and a bounded small-file storm
+  that moves the server's working set. Both exist to show the readings track
+  reality, and neither approaches a ceiling.
 - The four cases, and the artifacts each writes before teardown.
 
 **Out of scope (explicit non-goals)**
 
-- Deploying, configuring or repairing any monitoring component. See rule 1.
-- Asserting the routing of an alert to a receiver. Alertmanager knows which
-  receiver a firing alert landed in; asserting on that asserts the operator's
-  paging policy, which is not a property of the storage system. Recorded, not
-  asserted. See section 10.
-- Writing alerting rules for a deployment that has none, then asserting they
-  fire. That tests the rules the suite just wrote.
-- OOMKilling the server on purpose (rule 6), which is SCALE-04's territory and
-  even there is an assertion about bounded RSS, not an objective.
-- Node-level or network-level faults beyond the single-pod ingress partition.
-  CHAOS-04 inherits the operation and widens it in step 10.
-- Any change to OBS-02 and OBS-04, which passed as written.
+- Alert rules, thresholds, severities, and routing. Rule 2.
+- Prometheus, Alertmanager, Grafana, kube-state-metrics, or any component the
+  cluster does not already run. Installing one to pass an observability case
+  tests the thing that was installed.
+- Cloud Monitoring, Managed Service for Prometheus, and any other hosted
+  backend. See 5.1: querying Google's managed collection means querying Cloud
+  Monitoring through a frontend proxy the operator deploys, which is a
+  dependency this suite will not take.
+- Filling a volume to a capacity threshold, or driving the server to its memory
+  ceiling. Rule 6, and see 5.6 and 5.7 for what replaces them.
+- Any new fault. The pod delete from phase 3 is the one this phase uses, and no
+  network partition is built here. CHAOS-04 still owns that in step 10.
+- Any change to OBS-02, OBS-03 and OBS-04, which passed as written.
 
 **Depends on**
 
-- Server pod discovery and the fault timeline from phase 3.
-- The recovery measurement from phase 3, which is how a partition is proven
-  healed before anything is torn down.
-- `Caps.CanNetworkPolicy`, which preflight already establishes by probe, and
-  which gates OBS-01 alone.
-- `pkg/slo`, which already holds `AlertSLO` and `ObservationMargin`.
+- Server pod discovery, the fault timeline and the recovery measurement from
+  phase 3.
 - The directory population and deletion helpers from phase 6, which are the
-  small-file storm OBS-05 needs.
+  bounded small-file storm OBS-05 uses.
+- `pkg/slo`, which already holds the observability bound, currently named
+  `AlertSLO` and read by nothing (5.11 renames it).
+- `get` on `nodes/proxy`, which is the only access this phase needs that the
+  suite does not already exercise.
 
 ---
 
 ## 4. Data contract
 
-Everything in this section is produced by a case, written to the artifact bundle
-before teardown, and consumed by whoever reads a failure. None of it is stored
-between runs. The system of record for every field is the cluster: the suite
-copies what a monitoring API or the kubelet said, and never computes a value it
-then presents as measured.
+Everything here is produced by a case, written to the artifact bundle before
+teardown, and consumed by whoever reads a failure. None of it is stored between
+runs. The system of record for every field is the cluster: the suite copies what
+the API server or the kubelet said, and never computes a value it then presents
+as measured.
 
-### 4.1 The alert snapshot
+### 4.1 The availability signal
 
-One row per alert active at the moment of sampling, taken from the monitoring
-system's active-alerts endpoint.
-
-| Field | Type | Meaning |
-|---|---|---|
-| `Name` | string | The `alertname` label. Empty is possible and is recorded as such. |
-| `State` | enum | `pending` or `firing`, as the API reports it. A pending alert has matched its expression but not yet outlasted its `for` duration. |
-| `Labels` | map[string]string | Verbatim. The severity and the identity assertions both read from here. |
-| `Annotations` | map[string]string | Verbatim, for the failure message only. Never asserted on: wording is the deployment's. |
-| `ActiveAt` | time.Time | When the expression first matched, from the API. This is the monitoring system's clock. |
-| `Value` | string | The sample value at evaluation, verbatim as a string. Not parsed into a float and not compared: it is a number whose units belong to someone else's expression. |
-| `SampledAt` | time.Time | The workstation's clock when the snapshot was taken, so that a snapshot can be placed against the fault timeline. |
-
-Identity: an alert is identified by its full label set, which is what the
-monitoring system itself uses. Two alerts with the same name and different
-labels are two alerts.
-
-### 4.2 The alerting rule inventory
-
-Read once per case, before any fault, from the loaded-rules endpoint. It is what
-makes "no alert fired" mean something: a deployment with no rule that could ever
-match the server has a different defect from one whose rule did not fire.
+One row per observed transition of the server's readiness, from the Kubernetes
+API. This is the data an availability rule is written against, whatever the rule
+says.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `Group` | string | Rule group name, for the report. |
-| `Name` | string | Alert name. |
-| `Query` | string | The expression, verbatim. Used for identity matching only when labels do not settle it, and never parsed. |
-| `For` | time.Duration | How long the expression must hold before the alert fires. Read, not assumed: a rule whose `For` exceeds the alert SLO cannot meet it, and that is knowable before any fault is injected. |
-| `Labels` | map[string]string | Static labels the rule attaches, including severity. |
-| `Health` | string | The API's own view of the rule, verbatim. A rule in error state is reported, since it will never fire. |
+| `Pod`, `Node` | string | Which server pod, and where. |
+| `Ready` | bool | The pod's `Ready` condition. |
+| `TransitionAt` | time.Time | The condition's `lastTransitionTime`, which is the API's own clock, not the workstation's. |
+| `Endpoints` | int | How many addresses the server Service's EndpointSlices list as ready. Zero is the shape a rule on endpoint availability fires on. |
+| `RestartCount` | int32 | From the container status. |
+| `LastTerminated` | struct | Reason, exit code, started and finished times, from `lastState.terminated`. `OOMKilled` is a reason, not a separate field. |
+| `ObservedAt` | time.Time | The workstation's clock at the poll, so a row can be placed on the fault timeline. |
 
-### 4.3 The series sample and the continuity verdict
+Identity: `(Pod, TransitionAt)` for a transition, `(Pod, ObservedAt)` for a poll.
+Both are kept: the API's timestamps are what an operator would see, and the
+poll times are what let the case say when the suite could first have seen it.
 
-Produced by a range query over a window that contains a fault.
+### 4.2 The volume usage reading
 
-| Field | Type | Meaning |
-|---|---|---|
-| `Metric` | map[string]string | The series' labels, verbatim. |
-| `Samples` | []Sample | `{At time.Time, Value float64}`, in the API's order, which is ascending by time. |
-| `Step` | time.Duration | The step the range query asked for. |
-| `Observed` | time.Duration | The median spacing between consecutive samples before the fault. This is the scrape interval as measured, and every gap bound in OBS-07 is a multiple of it. Not read from configuration: `/status/config` is not exposed on every deployment and the spacing is the ground truth anyway. |
-
-`ContinuityVerdict` is one of four values, exhaustive over what a range query can
-show across a restart:
-
-| Verdict | Shape | Meaning |
-|---|---|---|
-| `resumed-reset` | Samples on both sides, counter lower after than before | The process restarted and its counter started again. The healthy shape for a process-scoped counter. |
-| `resumed-continuous` | Samples on both sides, counter non-decreasing across | The series outlived the process. Lawful for a counter that is not process-scoped, such as one the kubelet exports about the container. |
-| `never-resumed` | Samples before, none after, past the resume bound | Metrics did not survive the restart. This is the failure the case is named for. |
-| `absent` | No samples in the window at all | The series does not exist on this deployment. Blocked, not failed: the case could not ask its question. |
-
-The gap between the last sample before the restart and the first after is
-recorded as a duration in every verdict. A gap is not itself a failure: an
-outage that leaves a hole in the series is an outage an operator can see, which
-is what the plan asks for.
-
-### 4.4 The volume usage reading
-
-Three sources, one shape, so that a disagreement is readable as a table rather
-than as prose.
+Two sources at minimum, one shape, so that a disagreement reads as a table.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `Source` | enum | `pod-df`, `kubelet-summary`, or `prometheus`. |
+| `Source` | enum | `pod-df` or `kubelet-summary`. |
+| `Claim` | string | The PVC this reading is about. |
 | `CapacityBytes` | int64 | Total, as that source reports it. |
 | `UsedBytes` | int64 | Used, as that source reports it. |
-| `AvailableBytes` | int64 | Available, as that source reports it. Recorded separately rather than derived: on a filesystem with reserved blocks, used plus available does not equal capacity, and deriving would invent agreement. |
-| `At` | time.Time | The source's own timestamp where it publishes one (the kubelet Summary API does), otherwise the workstation clock at the call. |
-| `Claim` | string | The PVC this reading is about. |
+| `AvailableBytes` | int64 | Available, as that source reports it. Recorded rather than derived: on a filesystem with reserved blocks, used plus available does not equal capacity, and deriving would invent agreement. |
+| `At` | time.Time | The kubelet publishes its own timestamp per volume; `pod-df` carries the workstation clock at the exec. |
 
-Identity: `(Claim, Source, At)`. The comparison OBS-06 makes is always between
-two rows with the same `Claim` and different `Source`.
+Identity: `(Claim, Source, At)`. Every comparison OBS-06 makes is between two
+rows with the same `Claim` and different `Source`.
 
-### 4.5 The server memory reading
+### 4.3 The memory reading
 
 | Field | Type | Meaning |
 |---|---|---|
 | `Pod`, `Container` | string | Which container. A server pod with a sidecar has more than one, and only the one running the server is the subject. |
-| `WorkingSetBytes` | int64 | From `metrics.k8s.io`, which reports working set for memory. |
-| `LimitBytes` | int64 | From the pod spec's resource limits. Zero means no limit, which is a blocked precondition, not a zero ceiling. |
+| `WorkingSetBytes` | int64 | From the kubelet Summary API, cross-checked against `metrics.k8s.io` where served. Both report working set for memory. |
+| `LimitBytes` | int64 | From the pod spec's resource limits. Zero means no limit is declared, which is a blocked precondition, not a zero ceiling. |
 | `Fraction` | float64 | `WorkingSetBytes / LimitBytes`, computed only when `LimitBytes` is non-zero. |
-| `At` | time.Time | Sample time as the metrics API reports it. |
-| `OOMKills` | int32 | Count of container terminations with reason `OOMKilled` seen so far, from the pod status. Zero is the expected value for the whole case. |
+| `At` | time.Time | The source's own sample time. |
+| `Source` | enum | `kubelet-summary` or `metrics-api`, so a disagreement between the two is visible rather than averaged. |
 
-### 4.6 Ownership and evolution
+### 4.4 The sampled series and the continuity verdict
+
+There is no time-series store in this phase, so the suite is the sampler: a
+poller reads one of the readers above on a fixed interval across a fault and
+keeps what it got.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `Reader` | string | Which reading this series is of. |
+| `Samples` | []Sample | `{At time.Time, Value float64, Err error}`. A failed read is a sample with an error, kept rather than dropped: a source that stopped answering is the result. |
+| `Interval` | time.Duration | The poll interval, which is the suite's own and therefore known rather than inferred. |
+
+`ContinuityVerdict` is one of four, exhaustive over what a poller can see across
+a restart:
+
+| Verdict | Shape | Meaning |
+|---|---|---|
+| `resumed-reset` | Reads succeed on both sides, value lower after than before | The process restarted and its counter started again. |
+| `resumed-continuous` | Reads succeed on both sides, value non-decreasing across | The reading outlived the process. Lawful for anything the kubelet reports about a container rather than the server about itself. |
+| `never-resumed` | Reads succeed before, fail or return nothing after, past the resume bound | The source did not survive the restart. The failure this case is named for. |
+| `absent` | No successful read in the whole window | The source does not serve this on this deployment. Blocked, not failed. |
+
+The gap between the last good read before the restart and the first after is
+recorded in every verdict. A gap is not a failure: an outage that leaves a hole
+is an outage an operator can see, which is what Section 3.5 asks for.
+
+### 4.5 Ownership and evolution
 
 Producer: the cases. Consumer: whoever reads the bundle. There is no schema in a
 database and no cross-run comparison, so the only compatibility question is what
 `environment.json` gains, since a cached preflight record is replayed with
 `-env-file` and must gate a rerun exactly as the original run did.
 
-Added to `Environment`:
+Added to `Capabilities`: `VolumeStats` (the kubelet Summary API returned an
+entry for a suite claim) and `PodMemoryStats` (a working set reading was
+available for the server container). Both go through `AsMap` and
+`CapabilitiesFromMap` in the same change, because a capability that does not
+round-trip gates a replayed run differently from the run it was recorded on,
+silently.
 
-- `metricsEndpoint`: the service reference the probe confirmed, or empty.
-- `metricsFlavor`: what the probe found, so a future non-Prometheus API can be
-  told apart from an absent one without changing the field's meaning.
-- `alertRuleCount` and `serverAlertRuleCount`: how many alerting rules were
-  loaded, and how many of them name the server. The second is what turns a
-  silent run into a finding.
-
-Added to `Capabilities`: `MetricsAPI` (an endpoint answered the probe) and
-`VolumeStats` (the kubelet Summary API returned an entry for a suite claim).
-Both go through `AsMap` and `CapabilitiesFromMap` in the same change, since a
-capability that does not round-trip gates a replayed run differently from the
-run it was recorded on, silently.
+Added to `Environment`: `serverMemoryLimitBytes`, recorded because a deployment
+that declares no limit is a fact about the deployment worth carrying in every
+failure report, and `volumeStatsSource`, which names the source that answered or
+says none did.
 
 Backward compatible: a record written before this phase decodes with both
-capabilities false and both counts zero, which gates the four cases off. That is
-the correct behavior for a record taken before anything was probed.
+capabilities false and both fields zero or empty, which gates the new cases off.
+That is correct for a record taken before anything was probed.
 
-Would force a breaking change: making the metrics endpoint a list, if a
-deployment ever splits alerts and metrics across two endpoints. Avoided now by
-recording one confirmed endpoint and treating Alertmanager as out of scope, so
-the field never has to mean two things at once.
+Would force a breaking change: making a reading a list of sources rather than a
+value with a source tag, if a third source ever arrives. Avoided now by putting
+`Source` on the row instead of on the reader.
 
 ---
 
 ## 5. Design and decisions
 
-### 5.1 How the harness reaches an in-cluster HTTP endpoint [decided: the API server's proxy subresource]
+### 5.1 What a GKE cluster actually serves, and why there is no Prometheus here [decided: no monitoring stack, no hosted backend]
 
-The harness runs on a workstation. Prometheus, Alertmanager and the kubelet all
-speak HTTP inside the cluster. Three ways to get there:
+The first revision of this doc assumed a Prometheus-compatible query API could
+be found in the cluster. Checked rather than assumed, that is wrong for the
+deployment this project runs against, and the correction removes a large part of
+the phase.
 
-| Way | What it costs |
-|---|---|
-| `kubectl port-forward` equivalent over SPDY | A local listener per call, a goroutine to own it, and a failure mode (port in use, forward dies mid-query) that has nothing to do with the assertion. |
-| A pod running `wget` against the endpoint | Another pod, an image that carries a usable HTTP client, and JSON parsed out of pod logs. |
-| The API server's proxy subresource | One call on the client the suite already has. |
+Google Kubernetes Engine does not run an in-cluster Prometheus server. What it
+runs is collection: the `gmp-collector` and `gke-metrics-agent` DaemonSets that
+F-002 already observed on these nodes ship metrics out of the cluster. Google
+Cloud Managed Service for Prometheus stores them in Cloud Monitoring, and the
+Prometheus-compatible query API is served by a `frontend` Deployment the
+operator installs, which is an authorizing proxy in front of Cloud Monitoring
+rather than a store in the cluster. Querying it is therefore a dependency on
+Cloud Monitoring, which this project does not have and does not want, and
+installing anything to create one violates rule 1.
 
-Decided: the proxy subresource. For a Service,
-`CoreV1().Services(ns).ProxyGet(scheme, name, port, path, params)` returns a
-response wrapper the suite reads directly. For the kubelet there is no typed
-`ProxyGet` on the node client, so the node path is built on the REST client
-(`Get().Resource("nodes").Name(n).SubResource("proxy").Suffix("stats","summary")`).
-Reason: no listener, no image, no second credential, and the same kubeconfig
-that every other call in the suite uses.
+So the design reads what Kubernetes itself serves, which is enough for every
+assertion the phase actually needs:
 
-Cost of this choice, stated because it is the one that can block a run: it needs
-`get` on `services/proxy` and on `nodes/proxy`. A kubeconfig without them gets a
-403, and the case reports blocked naming the verb rather than reporting that the
-cluster has no monitoring. Telling those two apart is the whole point of rule 2,
-so the error is classified, not passed through.
-
-`metrics.k8s.io` is an aggregated API, not a proxy: it is read with
-`RESTClient().Get().AbsPath("/apis/metrics.k8s.io/v1beta1/namespaces/<ns>/pods/<pod>")`
-and decoded into a local struct. No new module dependency for any of this:
-the Prometheus responses, the kubelet summary and the pod metrics are all JSON,
-and the suite decodes the handful of fields it uses. Pulling in
-`k8s.io/metrics` and a Prometheus client library to reach five fields each would
-add two module trees to a repository whose dependency list is currently
-client-go and nothing else.
-
-### 5.2 Finding the monitoring endpoint [decided: discover, probe to confirm, one flag to override]
-
-Discovery over declaration, with the same rule server discovery already follows:
-a heuristic that guesses wrong is worse than no heuristic, so the guess is
-confirmed before it is recorded.
-
-1. If `-prometheus=namespace/name:port` is set, that is the endpoint. No search.
-2. Otherwise list Services cluster-wide and shortlist any that carry
-   `app.kubernetes.io/name=prometheus` or `app=prometheus`, or that expose a
-   port named `web` or numbered 9090.
-3. Probe each shortlisted candidate with `GET /api/v1/status/buildinfo`, which
-   the Prometheus HTTP API answers and nothing else does. The first that answers
-   with a decodable body is the endpoint.
-4. Nothing answers: record no endpoint, set `MetricsAPI` false, and add a note
-   naming what was tried. The four cases then report blocked naming
-   `-prometheus`.
-
-The probe is what keeps a Service named `prometheus-operated` that fronts
-something else from being recorded as the monitoring system and then failing
-four cases for it.
-
-Known deployment shape worth naming here, because the first run will meet it: on
-GKE with Google Managed Prometheus, collection is managed and there is no
-query-serving Service in the cluster unless the operator deploys the query
-frontend. Discovery will find nothing, and `-prometheus` pointed at a frontend
-the operator deployed is the documented path. That is a property of the
-deployment, and the blocked message says so rather than implying the cluster has
-no monitoring.
-
-### 5.3 No endpoint is blocked, an endpoint with nothing to say is a failure [decided: F-008 rule, applied to metrics]
-
-This is the decision the phase turns on, so it is stated once and every case
-follows it.
-
-| What the run finds | Verdict | Why |
+| Source | Serves | Present without any add-on |
 |---|---|---|
-| No endpoint answers the probe | blocked, naming `-prometheus` | The suite cannot see the monitoring system. It may exist outside the cluster. Nothing was learned. |
-| RBAC refuses the proxy | blocked, naming the verb | Harness access, not deployment behavior. |
-| Endpoint answers, zero alerting rules loaded | fail | An operator on this deployment is paged for nothing, ever. |
-| Endpoint answers, rules exist, none names the server | fail | Everything else on this cluster is watched and the storage is not. |
-| Rules name the server, none fired inside the bound | fail | The case's own assertion. |
+| Kubernetes API: pod conditions, container statuses, Events, EndpointSlices | The availability signal (4.1) | Yes, it is the API server |
+| kubelet Summary API, `/stats/summary` through `nodes/proxy` | Per-volume capacity and usage, per-container memory working set | Yes, it is the kubelet |
+| `metrics.k8s.io` | Container working set | Where metrics-server or its equivalent is installed, which GKE does by default; used as a cross-check, never as the only source |
 
-F-008 is the precedent: on a server that never announces grace, OBS-03 fails
-rather than skips, precisely so that the finding lands on the record where an
-operator sees it. The metrics channel gets the same treatment. The failure
-message routes the finding: for the three failure rows above it names the
-deployment and the monitoring configuration, not the NFS server, following
-Section 4.3.
+None of the three needs a flag, a credential, or a component. That is the point.
 
-### 5.4 Which alert is about the server [decided: identity matching, not alert names]
+### 5.2 What replaces "an alert fired" [decided: assert on the input, with a bound]
 
-The suite cannot know what a deployment calls its alerts, and a
-`-availability-alert=NFSServerDown` flag would be a declaration of something the
-cluster can answer. It is answered by matching identities.
+Each case keeps the question the plan asks and changes what answers it.
 
-The identity set is built from what discovery already knows: the server
-namespace, every server pod name, the controller name, the node, the name of any
-Service that exposes port 2049 in that namespace, and for OBS-06 the claim and
-volume names the case created. An alert or a rule matches when any of its label
-*values* equals a member of the set. A rule additionally matches when its query
-string contains one, which catches a rule whose labels are generic but whose
-expression is specific.
-
-Severity is read from the `severity` label, which is the de facto convention and
-is what every rule inventory in practice carries. Two things are asserted about
-it, and only two:
-
-- It is present. An alert with no severity cannot be routed, and a total outage
-  that arrives unclassified is an alert nobody prioritizes.
-- For OBS-01 it names a paging severity. The built-in set is `critical`, `page`,
-  `sev1` and `p1`, matched case-insensitively, and `-critical-severity` states
-  it for a deployment that words it differently. This mirrors
-  `-grace-enter-pattern` exactly: a built-in rule for the common wording, a flag
-  for the deployment it does not cover, and a failure message that names the
-  flag before anyone has to go looking for it.
-
-What "correct target" means, concretely: the alert names the server by one of
-the identities above. It is not asserted that the alert reached a receiver.
-Section 10 says why.
-
-### 5.5 OBS-01: manufacturing an outage an alert can see [decided: a bounded ingress partition of the server pod]
-
-An alert rule with a `for` duration of minutes cannot fire during a pod delete,
-which the suite recovers from in under a minute. OBS-01 needs an outage that
-lasts. Two candidates:
-
-| Candidate | What happens | Why not, or why |
+| Case | Plan's wording | What this phase asserts |
 |---|---|---|
-| Scale the server's controller to zero | Total outage, for as long as we choose | Mutates a workload the suite does not own, and the scrape target disappears with the pod, so the classic `up == 0` rule never fires: the series is simply gone. If the harness dies mid-case, the storage stays down and nothing in the cluster knows the original replica count except an artifact file. |
-| Deny ingress to the server pod with a NetworkPolicy | Clients block, scrapes fail, the pod keeps running | The object is one the suite creates, labels as its own and deletes. `up` goes to 0 rather than disappearing, which is the condition availability rules are actually written against. If the harness dies, one labeled object is left, and it is deleted by name. |
+| OBS-01 | Alert fires within SLO, correct severity and target | The outage is visible in the Kubernetes API within the bound, with timestamps that name the server, and the window it describes overlaps the outage the client measured |
+| OBS-05 | Alert fires before OOMKill | The server declares a memory limit, its working set is readable against that limit with a timestamp, the reading moves when the server is worked, and an OOMKill, if one happens, is visible in the API with a timestamp |
+| OBS-06 | Alert fires, `df` agrees with the control plane | The control plane reports this volume's usage, it agrees with `df` inside the pod within tolerance, and both move together when the workload writes |
+| OBS-07 | Counters reset cleanly or persist, no gaps that hide an outage | Every reading above keeps answering across a server restart, and each series lands in one of the lawful shapes in 4.4 |
 
-Decided: the NetworkPolicy. Gated on `Caps.CanNetworkPolicy`, which preflight
-already establishes by probe rather than by asking the CNI what it claims.
+The severity and the target from OBS-01's wording are dropped, not reinterpreted.
+A severity is a property of a rule this suite does not read. "Target" survives in
+the weak sense that the data names the server pod, which is asserted.
 
-The policy denies all ingress to the server pod except from one source: the
-`ipBlock` of its own node's internal address. That exception exists for one
-reason, the kubelet's liveness and readiness probes, which originate on the node
-and which a blanket deny would fail, turning an outage into a restart and
-changing what the case measures. Kubernetes states that traffic from the node to
-a pod is not reliably governed by NetworkPolicy and that the behavior is
-implementation-defined, so this is a mitigation, not a guarantee. The case
-therefore reads the server's restart count before and after: a restart during
-the window is recorded next to the result, and the alert assertion still holds,
-because a restarting server is an outage too.
+### 5.3 How the harness reaches the kubelet [decided: the API server's proxy subresource]
 
-Bounds and ordering, in the order the case performs them:
+The harness runs on a workstation. The Summary API is served by each kubelet.
+Reaching it directly would mean the node's address, its port and its certificate,
+none of which a workstation outside the cluster should need. The API server
+already proxies it:
+`RESTClient().Get().Resource("nodes").Name(n).SubResource("proxy").Suffix("stats","summary")`.
+The typed node client carries no `ProxyGet`, so this is built on the REST client
+the suite already has.
 
-1. Read the rule inventory and the identity set. A rule whose `For` exceeds
-   `slo.AlertSLO` is reported now: it cannot meet the SLO by construction, and
-   that is knowable without a fault.
-2. Snapshot active alerts, so an alert already firing before the fault is never
-   counted as a response to it.
-3. Apply the policy. Record it on the fault timeline.
-4. Register the removal immediately, on a context derived with
-   `context.WithoutCancel` from the case context and given its own timeout. A
-   case that times out or panics with the export partitioned is the one failure
-   mode this phase must not have.
-5. Poll active alerts until one matches the server or the hold expires. The hold
-   is `slo.AlertSLO + slo.ObservationMargin`: five minutes to pass, five more to
-   measure how late a late alert was. It is never extended to make an alert
-   fire. A partition held past the bound is no longer a test, it is an outage.
-6. Remove the policy. Prove the export is healthy again with the phase 3
-   recovery measurement, which is time to first successful I/O from a client
-   pod, before anything is deleted.
-7. Assert, on what was collected.
+`metrics.k8s.io` is an aggregated API, read with `AbsPath` on the same client.
+The response is decoded into a local struct in both cases. No new module
+dependency: the suite decodes the handful of fields it reads rather than pulling
+`k8s.io/metrics` and a cAdvisor type tree into a repository whose dependency
+list is client-go and nothing else.
 
-Client pods block uninterruptibly on a hard mount for the whole hold. That is
-the intended behavior of the mount and the reason the recovery proof in step 6
-comes before any pod deletion: F-001 and F-003 are both about deleting things
-around a mount that has not come back.
+Access: `get` on `nodes/proxy`. A 403 is classified and reported as blocked
+naming the verb, never as a deployment that does not publish volume stats.
+Telling those two apart is rule 4, and it is the only place in this phase where
+a permission gap could masquerade as a finding.
 
-### 5.6 OBS-05: a ceiling that exists, a fraction that is approached [decided: stop at the fraction, never at the kill]
+### 5.4 OBS-01: an outage that is visible in queryable state [decided: reuse the pod delete, assert on the API's own timestamps]
 
-The plan's expected result is "alert fires before OOMKill". The case does not
-produce an OOMKill to prove it. Rule 6: crossing the ceiling adds nothing to the
-assertion and costs the cluster its storage, and on a 2GB worker it costs the
-node (F-002).
+No new fault. The server pod is deleted with the operation from phase 3, and the
+case reads the availability data either side of it.
 
-Preconditions, each blocked with its own message when absent:
+Steps, in order:
 
-- The server container declares a memory limit. Without one there is no ceiling
-  and no threshold an alert could sit below, and the honest report is that this
-  deployment cannot alert on a ceiling it has not set.
-- A live working-set reading is available, from `metrics.k8s.io`, or from the
-  monitoring endpoint's container working-set series where the aggregated API is
-  not served.
+1. Start a workload and record the server's readiness, endpoint count and
+   restart count as a baseline.
+2. Delete the server pod. Record it on the fault timeline.
+3. Poll the availability reader while the phase 3 recovery measurement runs, so
+   the client's outage and the API's account of it are collected over the same
+   interval.
+4. Assert that the API showed the server not ready, with a transition timestamp,
+   and that the Service's ready endpoint count reached zero. A deployment where
+   neither happened had an outage no rule could have fired on.
+5. Assert the signal arrived within the bound. The window between the fault and
+   the first not-ready observation is compared against
+   `slo.AvailabilitySignalSLO` (5.11), which is the existing five minute value
+   under a name that says what it now means.
+6. Report the API's window next to the client's measured outage. The two are
+   different clocks and different definitions, so the overlap is asserted and
+   the difference is reported, never asserted to a margin narrower than the
+   guard the suite already applies to two-clock comparisons.
 
-The pressure is the small-file storm the plan already attributes the growth to:
-repeated small writes through the export, using the directory population helper
-from phase 6, from client pods, bounded by the case budget and by the claim's
-capacity. The case samples the working set on a fixed interval and stops on the
-first of: the fraction `slo.MemoryCeilingApproach` is reached, an alert matching
-the server and firing on memory appears, or the budget expires.
+How this differs from OBS-02, since a reviewer will ask: OBS-02 asks whether a
+failover left a trace anywhere, and reads the server's log stream and pod starts
+to answer. OBS-01 asks whether the *availability state* an operator watches went
+false and came back, with timestamps, inside a bound. A deployment can pass one
+and fail the other in both directions.
 
-Assertions:
+### 5.5 OBS-05: a ceiling that is declared, a reading that moves [decided: no ceiling chase]
 
-- No OOMKill occurred at any point. If one did, it is compared against the alert:
-  an alert whose `ActiveAt` precedes the kill satisfies the plan's expected
-  result, and a kill with no preceding alert is the failure the case exists for.
-- If the fraction was reached, an alert naming the server fired within
-  `slo.AlertSLO` of the crossing.
-- If the fraction was never reached, blocked, reporting the peak fraction and
-  the bytes written. The case did not establish its own precondition, and rule 8
-  forbids calling that a pass.
+The plan's expected result is "alert fires before OOMKill". Neither half is
+this suite's to assert: the alert is a rule, and producing the OOMKill would
+mean deliberately destroying the cluster's storage to observe an ordering.
+Rule 6.
 
-Cleanup: the storm's files are deleted before teardown reaches the claim, and
-the deletion is bounded like every other node-touching operation.
+What the case asserts instead is that the ingredients exist:
 
-### 5.7 OBS-06: two halves, and why the fill half can refuse to run [decided: no fill without a quota]
+1. The server container declares a memory limit. Without one there is no
+   denominator, no fraction, and nothing for any threshold rule to sit below.
+   Blocked, naming the container, and recorded in `environment.json`: a server
+   with no declared limit cannot be alerted on for approaching one, by anyone.
+2. A working set reading is available for that container, with a timestamp,
+   from the Summary API. Where `metrics.k8s.io` also answers, both are recorded
+   and a disagreement beyond tolerance is reported, since two control-plane
+   sources that contradict each other are worth knowing about.
+3. The reading tracks reality. A bounded small-file storm through the export,
+   using the phase 6 population helper, must move the working set by a
+   measurable margin (`slo.MemoryReadingDelta`). A reading pinned at a constant
+   while the server is being worked is a broken reading, and a threshold rule on
+   it would never fire.
+4. No OOMKill occurred. If one did anyway, it is reported with its timestamp and
+   the reading that preceded it, which is the ordering the plan cares about,
+   observed rather than manufactured.
 
-The case has an agreement half and an alert half, and they have different
-preconditions. The agreement half needs nothing but a mounted claim. The alert
-half needs the volume to approach capacity, which means writing until it does.
+The storm is bounded by the case budget and by the claim's capacity, is
+nowhere near the limit by construction, and its files are deleted before
+teardown reaches the claim. If the reading does not move within the budget, the
+case reports blocked with the delta it did see: rule 5.
 
-The refusal rule first, because it is the one that protects the cluster. A
-directory-backed export with no per-volume quota reports the *backing
-filesystem's* size to `df` inside the pod. Filling 85% of what `df` reports then
-means filling 85% of the server's disk, for every export on it. The case
-therefore compares what `df` reports against the claim's own
-`status.capacity` before writing a byte, and refuses the fill when the two do not
-agree within a tolerance. Blocked, naming the export as not quota-enforced. This
-is the expected outcome on a directory-backed provisioner, and it is worth
-having on the record: an operator there cannot alert on a per-volume capacity
-threshold either, because there is no per-volume capacity.
+### 5.6 OBS-06: two sources, one quantity, and a small write to prove they track [decided: no threshold fill]
 
-The agreement half runs whatever the fill half does:
+The agreement half of this case was always the valuable half, and it is now the
+whole case.
 
 - `df` inside the pod, which is what the workload sees.
 - The kubelet Summary API entry for the same claim, matched by `pvcRef`, which
-  is what the control plane sees. Decided as the control plane source rather
-  than a Prometheus series, because `kubelet_volume_stats_*` is derived from
-  exactly this and a deployment without Prometheus can still answer the half.
-  Where the monitoring endpoint exists, the Prometheus series is recorded as a
-  third row for the table, not asserted on.
-- No entry for the claim means the CSI driver does not implement
-  `NodeGetVolumeStats`, which is optional in the CSI spec. Blocked, naming the
-  driver. A volume the control plane cannot measure cannot be alerted on, which
-  is the same class of finding as the one above.
+  is what the control plane sees. No entry means the CSI driver does not
+  implement `NodeGetVolumeStats`, which the CSI specification makes an optional
+  node capability. Blocked, naming the driver: a volume the control plane cannot
+  measure is one nobody can write a capacity rule for, and that is a finding
+  about the deployment.
 
 What "agrees" means, since two samplers at two moments never produce equal
 numbers. The kubelet aggregates volume stats on a period that defaults to one
-minute, so its answer is stale by up to that period plus a scrape delay. The
-case therefore reads `df` at a moment, waits for a kubelet reading whose own
-timestamp is after that moment, and compares used bytes with a tolerance
+minute (`--volume-stats-agg-period`), so its answer is stale by up to that
+period. The case reads `df` at a moment, waits for a kubelet reading whose own
+timestamp is after that moment, and compares used bytes within a tolerance
 expressed as a fraction of capacity (`slo.VolumeStatsAgreement`), with the
 freshness requirement stated separately (`slo.VolumeStatsFreshness`). A
-disagreement beyond the tolerance fails and the message prints the table, both
-timestamps and the delta in bytes, because the interesting failure here is a
-control plane that reports a volume as nearly empty while the workload is
-getting ENOSPC.
+disagreement beyond tolerance fails, and the message prints both rows, both
+timestamps and the delta in bytes, because the failure that matters here is a
+control plane reporting a volume as nearly empty while the workload is getting
+ENOSPC.
 
-The fill, where it is permitted, writes to `slo.CapacityAlertFraction` of the
-claim in bounded chunks, checking free space before each chunk so that the
-target is approached and never overshot, and deletes the fill file before
-teardown. Then the alert half: an alert naming the claim or the volume fired
-within `slo.AlertSLO` of the crossing.
+Then a bounded write, sized as a fraction of the claim large enough to be well
+outside the tolerance and small enough to be nothing like a fill
+(`slo.VolumeUsageDelta`), and the comparison is repeated. Two sources that agree
+on a static number prove less than two sources that move together.
 
-### 5.8 OBS-07: which series, and the three lawful shapes [decided: the server's own series when it has one, the container's when it does not]
+The quota precheck stays, with its role changed. `df`'s reported total is
+compared against the claim's `status.capacity`. A directory-backed export with
+no per-volume quota reports the backing filesystem's size, and that is recorded
+as a finding rather than used as a gate: nobody on that deployment can write a
+per-volume capacity rule, because there is no per-volume capacity to threshold.
+It no longer gates a fill, because there is no longer a fill to gate.
 
-OBS-02 already reads two channels and says which one answered. OBS-07 does the
-same thing for metrics, for the same reason: a server that exports nothing is a
-different deployment from one that does, and a result that hides the difference
-is worth less than one that names it.
+### 5.7 OBS-07: the suite is the sampler [decided: poll across the restart, classify each series]
 
-Series selection, in order:
+With no time-series store, "metrics survive a server restart" is answered by
+polling the readers across a restart and seeing which of them keep answering.
+That is a weaker claim than a retained series would support, and it is the one
+that can be made without a monitoring backend. It is also the claim that matters
+for the deployment: a reading that stops answering after a restart, or that
+comes back attached to nothing, is unusable as an alert input no matter what
+stores it.
 
-1. A series the server itself exports, if the monitoring system scrapes a target
-   whose pod is the server. Found from the targets the endpoint reports, matched
-   against the identity set from 5.4.
-2. Otherwise the kubelet's own counter for the server container
-   (`container_cpu_usage_seconds_total` for the container, with
-   `container_start_time_seconds` alongside it as the restart marker), which
-   exists wherever the kubelet is scraped and requires nothing of the server.
+Mechanism: start pollers on the availability reader, the volume reader and the
+memory reader; delete the server pod with the phase 3 operation; wait for the
+phase 3 recovery; stop the pollers and classify each series with the table in
+4.4.
 
-The case logs which channel answered. On channel 2 it is asserting something
-weaker than the plan's wording, and it says so in the log line rather than in a
-comment nobody reads at three in the morning.
+Fails on `never-resumed`, which is a source that did not survive the restart.
+Passes on `resumed-reset` and `resumed-continuous`, which are the two shapes
+Section 3.5 names as acceptable. Blocks on `absent`. The gap is recorded in
+every verdict, and a restart that left no gap and no reset anywhere is logged
+with the series named: on kubelet-reported values a continuous reading across a
+container restart is expected, and failing it would file lawful cAdvisor
+behavior as a defect.
 
-The mechanism: sample the series over a window that starts before the fault,
-delete the server pod with the existing operation from phase 3, wait for the
-phase 3 recovery, then range-query the whole window and classify with the table
-in 4.3. The scrape interval is measured from the pre-fault samples; the resume
-bound is a multiple of it, named in `pkg/slo`, and never a literal.
+### 5.8 What this phase does not claim
 
-What fails: `never-resumed`, which is metrics that did not survive the restart.
-What passes: `resumed-reset` and `resumed-continuous`, which are the two shapes
-the plan names as acceptable. What is blocked: `absent`. One extra check on
-`resumed-continuous`: if the counter continued with no gap and no restart marker
-anywhere in the window, the restart left no trace in metrics at all, and the case
-logs that as the "no gaps that hide an outage" concern in the plan's wording,
-naming the series. It is a log rather than a failure on the first landing,
-because on channel 2 a continuous node-level counter across a container restart
-is expected, and failing it would file a lawful cAdvisor behavior as a defect.
+Stated plainly so nobody reads a green OBS run as more than it is.
 
-### 5.9 Naming, gating and the category budget [decided: TestObs prefix, and the budget row is edited, not overrun]
+- It does not show that anyone is paged. No rule is read and none is evaluated.
+- It does not show that a threshold is set anywhere, or set sensibly.
+- It does not show that the data is retained. Every reading here is live, and
+  retention is a property of a backend this suite does not query.
 
-Four cases, named for what they do:
-`TestObsAlertsOnServerUnavailable`, `TestObsAlertsBeforeMemoryCeiling`,
-`TestObsAlertsOnVolumeNearCapacity`, `TestObsMetricsSurviveServerRestart`.
+What a green run does show is that an operator on this deployment has readable,
+timely, correct inputs to build all of that on, and a red or blocked run names
+exactly which input they do not have. Given that alerting policy is
+organization-specific, that is the line where a portable suite stops.
 
-The repository sorts strictly by category since PR #11, so all four are `TestObs`
-and all four run under `make test-obs`, including the two that injure the server.
-The Makefile already says this is where `test-obs` stands.
+### 5.9 Naming, gating and the category budget
 
-Section 4.2 of the test plan budgets `make test-obs` at under 45 minutes. That
-row was written when the target held OBS-02, OBS-03 and OBS-04. OBS-01 alone
-holds a partition for up to ten minutes and then proves recovery. Six cases do
-not fit 45 minutes, and a target that overruns its own stated contract is the
-thing `plan.md` already called out for DATA. The budget row is therefore edited
-in `01-test-plan.md`, in the implementation PR, against a measured runtime, not
-against an estimate. If the measured number is unreasonable for one target, the
-alternative on the table is a second target for the two fill-heavy cases, the
-same answer DATA-14 got.
+Four cases, named for what they do: `TestObsServerOutageIsVisibleInAPI`,
+`TestObsServerMemoryIsReadableAgainstLimit`,
+`TestObsVolumeUsageAgreesWithControlPlane`,
+`TestObsReadingsSurviveServerRestart`.
 
-### 5.10 What the existing OBS cases gain
+The repository sorts strictly by category, so all four are `TestObs` and run
+under `make test-obs`, including the two that delete the server pod. The
+Makefile already says this is where `test-obs` stands.
 
-Nothing in OBS-02, OBS-03 or OBS-04 changes in this phase. One thing becomes
-possible that section 11 of doc 03 left open: a server that announces grace only
-through metrics. The metrics client this phase adds is the channel that would
-read it. Wiring it into OBS-03 is deliberately not done here, because no
-deployment met so far exports such a metric, and building the second channel
-before anything publishes into it is the "helper no case calls" the repository
-rules forbid. The open item moves from "no channel exists" to "a channel exists
-and nothing publishes to it", which is a better place for it to sit.
+Section 4.2 budgets `make test-obs` at under 45 minutes. Dropping the sustained
+outage and both threshold chases takes the expensive work out of this phase:
+what remains is two pod deletes and two bounded writes, which is the shape of
+cases already in that target. The budget is expected to hold, and it is measured
+in the last pull request rather than asserted here. If it does not hold, the row
+is edited in the test plan against the measured number, not overrun in silence.
+
+### 5.10 Test plan wording, and the SLO constant [decided: edit Section 3.5 in this pull request]
+
+Requirements live in the test plan, so the four rows in Section 3.5 change with
+this design rather than in a commit message. Each keeps its case ID and its
+subject and states what is verified: the data exists, is timely, and agrees.
+A line is added under the table saying that alert rules, thresholds, severities
+and routing are organization-specific and out of scope for this suite, so that
+the next reader does not restore the old wording as a gap.
+
+`pkg/slo.AlertSLO` is currently defined, commented as the deadline for an
+availability alert to fire, and read by nothing. It is renamed
+`AvailabilitySignalSLO` with the same five minute value and a comment that says
+what it now bounds: how long after an outage the Kubernetes API may take to show
+it. Renaming a constant nothing reads costs nothing, and leaving a constant
+called `AlertSLO` in a suite that deliberately does not test alerts is exactly
+the comment-that-contradicts-the-code problem the repository rules call out.
 
 ---
 
 ## 6. Delivery phases
 
-Four pull requests, smallest runnable slice first. Each lands with the cases it
+Three pull requests, smallest runnable slice first. Each lands with the cases it
 serves, per the one-vector rule.
 
-**MVP, PR 1: the metrics reach, and OBS-07.** The proxy-based client, endpoint
-discovery with the buildinfo probe, the `environment.json` and capability
-fields, the range query and the continuity classifier, and
-`TestObsMetricsSurviveServerRestart`. Chosen as the MVP because it needs no new
-fault (the pod delete already exists), writes nothing to the export, and
-exercises the whole reach path end to end. Validated outside a unit test by
-running `make test-obs -run TestObsMetricsSurviveServerRestart` against the GKE
-cluster in F-008 and reading the verdict, whichever of the four it is. A blocked
-result there is a real result: it says the deployment has no query endpoint, and
-that is the first thing this phase needs to know.
+**MVP, PR 1: the kubelet reach, and OBS-06.** The `nodes/proxy` Summary API
+reader, the volume usage rows, the capability and environment fields, the quota
+precheck as a recorded finding, the agreement assertion and the bounded write.
+Chosen as the MVP because it needs no fault at all, exercises the whole reach
+path, and produces a result on any cluster, including one with nothing installed
+beyond Kubernetes. Validated outside a unit test by running
+`make test-obs -run TestObsVolumeUsageAgreesWithControlPlane` against the GKE
+cluster in F-008 and reading the table it writes.
 
-**PR 2: OBS-06.** The kubelet Summary API reading, the quota precheck, the
-agreement assertion, the bounded fill, the alert half. Lands second because its
-agreement half runs on a cluster with no monitoring at all, so it produces a
-result even if PR 1 comes back blocked everywhere.
+**PR 2: OBS-01 and OBS-07.** The availability reader, the pollers, the
+continuity classifier, both cases, and the SLO constant rename. They land
+together because OBS-07's pollers are the availability reader and the volume
+reader driven across the same fault OBS-01 uses, and splitting them would land a
+classifier with one caller.
 
-**PR 3: OBS-01.** The ingress partition operation in `pkg/chaos`, the
-restore-before-assert ordering, the rule inventory, severity and identity
-matching, `-critical-severity`. Lands third because it is the only one that
-makes the export unavailable for minutes, and it should go in after the reach
-path has been proven by two cases that cannot hurt anything.
+**PR 3: OBS-05.** The memory reading, the limit precondition, the
+`metrics.k8s.io` cross-check, the bounded storm and the delta assertion.
 
-**PR 4: OBS-05.** The working-set reading, the ceiling preconditions, the
-bounded storm, the ordering assertion against any OOMKill.
-
-Later phases sharpen after PR 1 reports from a real cluster. In particular, if
-no query endpoint is reachable on any cluster available to this project, PRs 2
-through 4 are still worth landing for their non-alert halves, and the alert
-halves become a documented blocked result rather than dead code. That decision
-is made on evidence from PR 1, not now.
+Later phases sharpen after PR 1 reports from a real cluster. The likely finding
+there, stated now so it is not a surprise, is that the CSI driver in use does
+not implement `NodeGetVolumeStats`, which blocks OBS-06 and tells the project
+something worth writing down.
 
 ---
 
@@ -642,60 +538,50 @@ is made on evidence from PR 1, not now.
 Source: command-line flags, as everything else in this repository. No config
 file, no environment variables beyond `KUBECONFIG`, no credentials: every call
 this phase makes goes through the API server with the kubeconfig the suite
-already uses, which is why the proxy subresource was chosen in 5.1.
+already uses.
 
-New flags, both with a README row in the same change:
-
-| Flag | Default | Why it exists |
-|---|---|---|
-| `-prometheus=namespace/name:port` | empty, discovery runs | Nothing in the Kubernetes API states which Service serves the monitoring query API, and a managed collector may have no in-cluster query endpoint at all. |
-| `-critical-severity=<value>` | empty, built-in set | Nothing states which severity value a deployment uses to mean "page someone". Same shape as `-grace-enter-pattern`. |
-
-Validation: `-prometheus` is parsed at startup and a malformed reference is a
-startup failure, not a run that quietly discovers something else.
-`-critical-severity` is lowercased and compared as a whole value.
+**No new flags.** This is a deliberate outcome of the redesign, and it is worth
+stating, because the first revision proposed two. Every input this phase needs
+is answerable by the cluster: which pod serves the export is discovered, which
+volume is measured is the claim the case created, what the memory limit is comes
+from the pod spec, and how long the kubelet's aggregation period is does not
+need to be declared because the kubelet timestamps its own readings.
 
 Intentionally not configurable:
 
-- Alert names. Matched by identity (5.4).
-- Alert thresholds and `for` durations. They are the deployment's, and read.
-- The scrape interval. Measured (4.3).
-- The ceiling fraction, the capacity fraction, the agreement tolerance, the
-  freshness requirement and the resume bound. All are bounds, and bounds live in
-  `pkg/slo` per the no-timing-literals rule. `AlertSLO` is already there.
-- The partition hold. Derived from `AlertSLO` and `ObservationMargin`.
+- Alert names, thresholds, severities. Not read at all. Rule 2.
+- The agreement tolerance, the freshness requirement, the two movement deltas
+  and the resume bound. They are bounds, and bounds live in `pkg/slo` per the
+  no-timing-literals rule.
+- The poll interval, which is the suite's own and fixed until something needs it
+  to vary.
 
 ---
 
 ## 8. Deployment decisions
 
 Runtime unit: the same `go test` binary on a workstation. Nothing is deployed
-into the cluster by this phase. The only object it creates that is not a pod or
-a claim is one NetworkPolicy, labeled with the suite's run and case labels like
-everything else, so that it is identifiable as the suite's from outside.
+into the cluster by this phase, and unlike the first revision it creates no
+object beyond the pods and claims every case already creates.
 
-Lifecycle, in the two places it matters:
+Lifecycle:
 
-- **Restore outlives the case.** The partition's removal runs on a context
-  derived with `context.WithoutCancel`, with its own timeout, registered
-  immediately after the policy is applied. A case that times out with the export
-  partitioned is the failure mode this phase must not have, and a deferred call
-  on the case's own context is exactly that failure mode.
-- **Teardown deletes the policy before it deletes pods.** A pod terminating
-  behind a partition cannot unmount, and an unmount that cannot complete is
-  F-003. Ordering: remove the policy, prove I/O works, then the existing
-  teardown path runs unchanged.
+- Pollers stop before teardown, and their samples are written to the bundle
+  before any object is deleted. A poller that outlived its case would read
+  through teardown and record a deletion as an outage.
+- Each read is individually bounded. A kubelet that has stopped answering must
+  not stall a case, and one sick node must not starve collection from the
+  healthy ones, which is the existing rule for anything that reads a node.
+- The two faults are the phase 3 pod delete, which brings its own recovery
+  assertion and its own teardown ordering. Nothing in this phase changes it.
 
-Access scope: `get` on `services/proxy` and `nodes/proxy`, read on
-`metrics.k8s.io`, and create/delete on `networkpolicies` in the test namespace.
-Each is classified on failure (5.1) so that a permission gap reports blocked
-rather than being reported as a deployment defect.
+Access scope: `get` on `nodes/proxy`, read on `metrics.k8s.io`. Both classified
+on failure so a permission gap reports blocked rather than being filed as a
+deployment defect.
 
-Cost visibility: none of this phase costs anything beyond the cluster time it
-already uses, with one exception worth naming: OBS-05 writes small files until a
-memory fraction is reached, and on a directory-backed export those files land on
-the server's disk. Bounded by the case budget and by the claim's capacity, and
-deleted before teardown.
+Cost: OBS-05 and OBS-06 each write a bounded amount of data through the export
+and delete it before teardown. Neither approaches a capacity or a memory
+ceiling, which is the difference between this revision and the first.
 
 ---
 
@@ -704,24 +590,17 @@ deleted before teardown.
 The harness's own output, written to `artifacts/<run-id>/` before teardown,
 because a case that tore down its evidence is unreproducible (Section 4.3).
 
-Per case, in the bundle:
-
 | File | Contents |
 |---|---|
-| `alert-rules.txt` | The rule inventory from 4.2, with a column saying which rules matched the identity set and which did not. This is the file that makes "no alert fired" actionable. |
-| `alerts-before.json`, `alerts-after.json` | Alert snapshots from 4.1, taken before the fault and at the end of the hold. Verbatim. |
-| `volume-usage.txt` | The three-source table from 4.4, with timestamps and deltas. Written whether OBS-06 passed or not: a run where the two sources differed by 2% is a different run from one where they agreed exactly, and the pass looks identical without it. |
-| `server-memory.txt` | The sample series from 4.5, with the limit, the fraction reached and any OOMKill. |
-| `metrics-continuity.txt` | The verdict from 4.3, the measured interval, the gap, and the first and last sample either side of the restart. |
+| `availability.txt` | The rows from 4.1 across the fault, with the API's transition times and the endpoint counts, next to the client's measured outage. |
+| `volume-usage.txt` | The table from 4.2, both sources, both timestamps, the delta in bytes, before and after the bounded write. Written whether the case passed or not: a run where the sources differed by 2% is a different run from one where they agreed exactly, and the pass looks identical without it. |
+| `server-memory.txt` | The readings from 4.3, the declared limit, the fraction, the movement under load, and any OOMKill with its timestamp. |
+| `continuity.txt` | One verdict per series from 4.4, with the interval, the gap, and the last good read either side of the restart. |
 
-Timeline: the partition apply and remove are recorded as fault events with the
-existing mechanism, so the alert's `ActiveAt` can be read against the moment the
-export went away. Those two clocks are the monitoring system's and the
-workstation's, so the durations reported from them are reported, not asserted
-against a bound narrower than the guard the suite already applies to two-clock
-comparisons.
+The fault timeline is unchanged: the pod delete records itself through the
+existing mechanism, which is what the availability window is read against.
 
-Log lines follow the existing style: what was observed, from which channel, with
+Log lines follow the existing style: what was observed, from which source, with
 the node, the pod and the profile named.
 
 ---
@@ -730,16 +609,15 @@ the node, the pod and the profile named.
 
 | Option | What it is | Why not chosen |
 |---|---|---|
-| Deploy Prometheus and alert rules for the run | Install the stack the cases need | Tests the rules the suite just wrote, and leaves a monitoring stack in someone's cluster. Rule 1. |
-| Flags naming each alert (`-availability-alert`) | Operator states the alert names | Declaration of something the cluster can answer. Identity matching (5.4) answers it, and a wrong flag value fails a case for a typo. |
-| Assert the alert reached a receiver, via Alertmanager | Read `/api/v2/alerts` and the receiver routing | Routing is the operator's paging policy, not a property of the storage system. A correct alert routed to a silenced receiver is a finding about the operator's on-call, and this suite has no business failing storage for it. Recorded as an open item instead. |
-| Scale the server controller to zero for OBS-01 | Delete the replicas for the hold | Mutates a workload the suite does not own, and the scrape target disappears rather than failing, so the rule written against `up == 0` never fires. See 5.5. |
-| Kill the server process for OBS-01 | Reuse the phase 3 signal | Recovery is under a minute, which is shorter than any real alert's `for`. Nothing fires and the case passes or fails for the wrong reason. |
-| Drive the server to OOMKill in OBS-05 | Prove the alert precedes the kill directly | Costs the cluster its storage to prove an ordering that a fraction and a timestamp already establish. Rule 6. |
-| Use `kubelet_volume_stats_used_bytes` as the control plane source | Read the volume usage from Prometheus | It is derived from the kubelet Summary API, so reading the source directly gives the same number without requiring a monitoring stack for the half that does not need one. Recorded as a third row when available. |
-| Read the scrape interval from `/api/v1/status/config` | Ask Prometheus for its configuration | Not exposed on every deployment, often redacted, and the sample spacing is the ground truth regardless. Measured instead. |
-| Port-forward to reach the endpoint | A local listener per query | A failure mode per query that has nothing to do with the assertion. See 5.1. |
-| A generic "alerting backend" interface with a Prometheus implementation | Abstract over monitoring systems | No second implementation exists, and the repository rules forbid an abstraction layer ahead of a case that uses it. The `metricsFlavor` field leaves room to tell a second one apart later. |
+| Query a Prometheus-compatible API in the cluster | Read alerts and series from a monitoring stack | GKE runs no in-cluster Prometheus. Managed collection ships to Cloud Monitoring and its query API is a frontend proxy the operator deploys, so querying it is a Cloud Monitoring dependency. See 5.1. |
+| Install Prometheus and alert rules for the run | Deploy the stack the old design needed | Tests the rules the suite just wrote, and leaves a monitoring stack in someone's cluster. Rule 1. |
+| Assert on alert rules where a stack happens to exist | Read `/api/v1/rules` when it answers | Makes the suite's verdict depend on whether the operator happens to run Prometheus, and asserts on thresholds and severities that are organization-specific. Rule 2. |
+| Query Cloud Monitoring directly | Use the hosted backend this cluster already ships to | A cloud dependency, credentials the suite does not have, and a result that would not reproduce on bare metal. The suite is portable by design. |
+| A NetworkPolicy partition to sustain an outage for minutes | Make the outage long enough for a `for` duration to elapse | Only needed to make an alert rule fire. With no alert assertion, a pod delete produces the transition the API records, and the phase creates no new fault. |
+| Fill a volume to a capacity threshold | Approach the number a rule would fire on | The threshold is the operator's, so approaching it proves nothing here, and on an export with no per-volume quota it fills the server's disk. A bounded write proves the two sources track. |
+| Drive the server to its memory ceiling | Approach the number a rule would fire on | Same reason, plus it risks the cluster's storage and, on small workers, the node (F-002). |
+| `metrics.k8s.io` as the only memory source | Read the aggregated API and nothing else | It is an add-on, absent on a cluster without metrics-server, while the kubelet Summary API is served by the kubelet itself. Used as a cross-check instead. |
+| Read volume usage from `kubelet_volume_stats_used_bytes` | Take the number from a scrape | That series is derived from the Summary API. Reading the source directly gives the same number and needs no monitoring stack. |
 
 ---
 
@@ -747,16 +625,14 @@ the node, the pod and the profile named.
 
 | Item | The constraint that decides it |
 |---|---|
-| Whether any cluster available to this project serves a Prometheus-compatible query API at all. On GKE with managed collection there is no in-cluster query endpoint unless someone deploys the frontend. | PR 1, run against the F-008 cluster. A blocked result there decides whether the alert halves of PRs 2 through 4 are landing as code that has ever run. |
-| `nfs-server-provisioner` exports no metrics of its own, so OBS-07 will almost certainly fall to the container-counter channel on the current cluster. | The target list from the endpoint, read in PR 1. If no deployment ever exports server metrics, the plan's wording for OBS-07 is about the platform's metrics, not the server's, and Section 3.5 should say so. |
-| The export on the current cluster is directory-backed, so OBS-06's fill half is likely to report blocked on the quota precheck. | The `df` reading against the claim capacity, in PR 2. If it blocks, per-volume capacity alerting is not a property this deployment has, and that belongs in `findings.md`. |
-| Whether a NetworkPolicy denying ingress also kills the server's liveness probe, turning the outage into a restart. The node-IP exception is a mitigation and Kubernetes states node-to-pod traffic is implementation-defined. | The restart count either side of the hold, in PR 3. If the server restarts on every run, the partition is the wrong operation for OBS-01 and the honest fallback is scale-to-zero with the replica count recorded in an artifact. |
-| Whether the server ever approaches its memory limit under a bounded small-file storm, or whether it has a limit at all. | The peak fraction reported by PR 4. A server with no limit blocks the case; a server that never climbs blocks it too, and both are deployment facts worth recording. |
-| Alert routing is not asserted, so a deployment whose rules fire into a silenced receiver passes OBS-01. | Whether anyone asks for it. The answer would be an Alertmanager endpoint flag and an assertion on the receiver, which is a policy assertion; it is not in this phase on purpose. |
-| The `make test-obs` budget row cannot hold six cases at 45 minutes. | A measured runtime from the four PRs. The row is edited against that number, or the fill-heavy cases get their own target. Decided in the implementation PRs, not here. |
-| The severity convention (`critical`) is a built-in guess with a flag behind it, exactly like the grace wording rule, which F-008 showed can miss entirely. | The first deployment with real rules. If the built-in set misses everywhere, the flag becomes the documented path rather than the escape hatch. |
-| Two clocks again: alert `ActiveAt` is the monitoring system's, the fault timeline is the workstation's. | The same guard the suite already applies. Durations across the two are reported; nothing is failed on a margin narrower than the guard. |
-| None of the four has been run against a real cluster. | The first run. Expect it to change the discovery shortlist and the agreement tolerance. |
+| Whether the CSI driver in use implements `NodeGetVolumeStats`. It is optional in the CSI specification, and without it the kubelet reports no volume entry and OBS-06 blocks. | PR 1, against the F-008 cluster. A block there is a real finding: no per-volume usage data means no per-volume capacity monitoring for anyone. |
+| Whether the export is directory-backed with no per-volume quota, in which case `df` reports the backing filesystem and the two sources may agree with each other while both describe the wrong thing. | The precheck in 5.6. If `df`'s total is not the claim's capacity, the agreement assertion still holds but the finding is recorded, and what a capacity rule could mean on that deployment is the open part. |
+| Whether the server declares a memory limit at all. `nfs-server-provisioner` charts commonly ship without resource limits. | PR 3. No limit blocks OBS-05 and is recorded in `environment.json`. |
+| Whether a bounded small-file storm moves the server's working set measurably within a case budget. | The delta reported by PR 3. If it does not move at all, either the reading is broken or the server's memory is not workload-driven, and the two are told apart by the same reading under the heavier SCALE-04 load in step 9. |
+| `nodes/proxy` may be refused on a locked-down cluster, which blocks three of the four cases at once. | The first run. The classification is already in the design; what is open is whether a kubeconfig that can exec into pods but not proxy to nodes is common enough to need a second path. |
+| The availability window from the API and the outage measured from a client pod are two clocks and two definitions. | The existing guard band. Overlap is asserted, the difference is reported, and nothing fails on a margin narrower than the guard. |
+| This phase leaves the plan's original question, whether anyone is actually paged, unanswered by design. | Whether the project ever wants it. If it does, the answer is a separate, deployment-specific check against that deployment's own monitoring, not a case in a portable suite. Stated in 5.8 so it is a decision rather than a gap. |
+| None of the four has been run against a real cluster. | The first run. Expect it to change the tolerance in 5.6 and the delta in 5.5. |
 
 ---
 
@@ -766,28 +642,26 @@ One check per rule in section 2, observable from a run.
 
 | Rule | Check |
 |---|---|
-| 1. No monitoring stack is deployed | The suite creates no Deployment, Service or CRD in this phase. The only object it creates beyond pods and claims is one NetworkPolicy, and it is deleted before the case returns. Reviewable from the diff. |
-| 2. Unreachable is blocked, silent is failed | Unit tests on the classifier: a 403 on `services/proxy`, a connection failure and an empty discovery each produce blocked with the flag or verb named; a reachable endpoint with an empty rule set, and one whose rules never match the identity set, each produce a failure whose message names the deployment. |
-| 3. Nothing is invented | No alert name, metric name or threshold appears as a literal in any case. The only stated value is the severity set, and it has a flag. Grep-able, and the `-critical-severity` README row says why it exists. |
-| 4. An alert must name the thing under test | Unit tests on the matcher: an alert whose labels carry the server pod matches; one for an unrelated workload in the same namespace does not; a rule whose labels are generic but whose query names the server matches on the query only. |
-| 5. Restore outlives the case, assertions come after | OBS-01's removal is registered on a `context.WithoutCancel` context immediately after apply. Unit test: a cancelled case context still runs the removal. The case's assertions all execute after the recovery proof, which is checkable by reading the case top to bottom. |
-| 6. No deliberate OOM | OBS-05 stops on the first of three conditions and none of them is a kill. The sampled fraction at stop is in `server-memory.txt` for every run, and an OOMKill that happened anyway is reported with its timestamp against the alert's. |
-| 7. No filling a filesystem the case does not own | OBS-06 reports blocked, naming the export as not quota-enforced, when `df`'s total does not match the claim's capacity within tolerance. Unit test on the precheck with a 1Gi claim against a 500Gi `df` reading. |
-| 8. An unestablished precondition is blocked | OBS-05 with a peak fraction below the threshold reports blocked with the number, not a pass. OBS-07 with no samples reports `absent` and blocks. |
-| 9. Agreement has a stated tolerance | OBS-06 compares a `df` reading against a kubelet reading whose timestamp is later, within a tolerance from `pkg/slo`, and the failure message prints both timestamps and the byte delta. Unit tests on the comparison, including a reading that is fresh but outside tolerance and one inside tolerance but stale. |
-| 10. Bounds live in `pkg/slo` | The five new constants are defined there with the existing ones, and no case in this phase contains a duration or a fraction literal. |
-| 11. Phases 3 and 4 still hold | `make test-chaos` and `make test-data` pass unchanged across the four PRs, and OBS-02, OBS-03 and OBS-04 are not modified by any of them. |
+| 1. No stack, no hosted backend | The suite creates no Deployment, Service or CRD, and makes no call to any host other than the API server. Reviewable from the diff and from the absence of any new module dependency. |
+| 2. No alert is read or asserted | No case reads a rule, a threshold or a severity, and the word does not appear in an assertion. `AlertSLO` is renamed so the vocabulary matches. Grep-able. |
+| 3. The input is asserted: present, timestamped, current, correct | Each case fails on a missing reading, on a reading with no timestamp, on one older than the freshness bound, and on one that contradicts the workload's own view. Four distinct failure messages, unit tested on recorded source output. |
+| 4. Unreachable is blocked, silent is failed | Unit tests on the classifier: a 403 on `nodes/proxy` and an absent `metrics.k8s.io` produce blocked naming the verb or the API; a Summary API that answers with no entry for the claim, and an API that never shows the server unready across a real outage, produce failures whose messages name the deployment. |
+| 5. An unestablished precondition is blocked | OBS-05 with a reading that never moved reports blocked with the delta. OBS-07 with no successful read reports `absent` and blocks. |
+| 6. No ceiling chase | Neither case has a code path that writes toward a capacity threshold or a memory limit. Both write a fixed bounded delta from `pkg/slo` and stop. Reviewable from the two constants and their call sites. |
+| 7. Agreement has a stated tolerance | OBS-06 compares `df` against a kubelet reading whose timestamp is later, within a tolerance from `pkg/slo`. Unit tests: a reading that is fresh but outside tolerance fails, one inside tolerance but stale fails on freshness, and one inside both passes. |
+| 8. No new fault | `pkg/chaos` gains nothing in this phase. The two cases that inject use `DeleteServerPod` unchanged. |
+| 9. Bounds live in `pkg/slo` | The five constants are defined there with the existing ones, and no case in this phase contains a duration or a fraction literal. |
+| 10. Phases 3 and 4 still hold | `make test-chaos` and `make test-data` pass unchanged across the three PRs, and OBS-02, OBS-03 and OBS-04 are not modified by any of them. |
 
-Sources for the platform claims above: the Prometheus HTTP API reference for
-`/api/v1/query`, `/api/v1/query_range`, `/api/v1/alerts`, `/api/v1/rules` and
-`/api/v1/status/buildinfo`; the Kubernetes API reference for the `proxy`
-subresource on Services and Nodes; the kubelet Summary API types in
-`k8s.io/kubelet/pkg/apis/stats/v1alpha1` for `pvcRef`, `capacityBytes`,
-`usedBytes` and the per-volume timestamp, and the kubelet reference for
-`--volume-stats-agg-period`; the CSI specification for `NodeGetVolumeStats`
-being an optional node capability; the Kubernetes NetworkPolicy documentation
-for `ipBlock` and for node-to-pod traffic being outside what NetworkPolicy
-reliably governs; the metrics-server documentation for memory usage being
-reported as working set; and the Google Cloud Managed Service for Prometheus
-documentation for managed collection having no in-cluster query endpoint without
-the query frontend.
+Sources for the platform claims above: the Google Cloud Managed Service for
+Prometheus documentation for managed collection storing in Cloud Monitoring and
+for the `frontend` Deployment being the Prometheus-compatible query path
+([query API and UI](https://docs.cloud.google.com/stackdriver/docs/managed-prometheus/query-api-ui),
+[prometheus-engine](https://github.com/GoogleCloudPlatform/prometheus-engine));
+the Kubernetes API reference for the `proxy` subresource on Nodes, for pod
+conditions carrying `lastTransitionTime`, and for EndpointSlice readiness; the
+kubelet Summary API types in `k8s.io/kubelet/pkg/apis/stats/v1alpha1` for
+`pvcRef`, `capacityBytes`, `usedBytes`, `workingSetBytes` and the per-reading
+timestamp, and the kubelet reference for `--volume-stats-agg-period`; the CSI
+specification for `NodeGetVolumeStats` being an optional node capability; and
+the metrics-server documentation for memory usage being reported as working set.

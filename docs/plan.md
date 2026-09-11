@@ -167,8 +167,10 @@ interleaving fault injection across different domains:
 2. **DATA next**: complete all data path semantics and protocol edge cases
    (lease-expiry lock release, direct I/O, noac visibility, silly renames, large
    directory readdir, sparse files, and fsync durability guarantees).
-3. **OBS & SEC next**: close out production observability (alerts for outage,
-   memory ceiling, volume capacity, and metrics persistence) and security/identity
+3. **OBS & SEC next**: close out production observability (the data an operator
+   would monitor on: outage visibility, a readable memory ceiling, volume usage
+   that agrees with the workload, and readings that survive a restart) and
+   security/identity
    (fsGroup, service-proxy export rules, rejected clients, identity normalization,
    and network confidentiality).
 4. **SCALE next**: verify the cluster and server under volume fan-out, high mount
@@ -473,33 +475,44 @@ check to a content check; and the fix for `scripts/lock-probe.sh` passing
 
 Designed first in
 [`05-observability-and-alerting-design.md`](05-observability-and-alerting-design.md),
-which carries the rule that decides every case here: a monitoring API the suite
-cannot reach is blocked, and one that answers and has nothing to say about the
-server is a failure. That is F-008's rule applied to the metrics channel. The
-doc also says why OBS-06's fill half can refuse to run, and why no case here
-drives the server to OOMKill.
+which carries the decision that shapes every case here: **the suite verifies the
+data an alert is built on, never the alert rules**. Thresholds, severities and
+routing are organization-specific, and asserting on them would mean failing a
+healthy storage system for someone else's threshold, and finding or installing a
+monitoring stack this project does not own. GKE runs no in-cluster Prometheus:
+managed collection ships to Cloud Monitoring and its query API is a frontend
+proxy the operator deploys, so querying it is a cloud dependency this suite
+refuses. Everything here is read from the Kubernetes API and the kubelet
+instead. Section 3.5 of the test plan is reworded to match, in the same pull
+request as the design.
 
-Closes out Section 3.5 entirely. Four cases asserting operational observability,
-health alerting, memory ceiling warnings, capacity alerts, and metrics continuity:
+Closes out Section 3.5 entirely. Four cases asserting that an operator on this
+deployment has readable, timely, correct inputs to monitor with:
 
-- OBS-01: server unavailable. An alert fires within the SLO bound with the
-  expected severity and alert target.
-- OBS-05: server memory approaching ceiling. An alert fires before the server
-  pod hits OOMKill.
-- OBS-06: volume near capacity. An alert fires when usage exceeds threshold,
-  and `df` inside the pod agrees with the control-plane metric.
-- OBS-07: metrics survive server restart. Post-recovery metrics counters either
-  reset cleanly or persist continuously, leaving no gaps that obscure an outage.
+- OBS-01: server unavailable. The outage is visible in queryable Kubernetes
+  state within the bound, with timestamps, and the window it describes overlaps
+  the outage the client measured.
+- OBS-05: server memory approaching ceiling. The server declares a memory limit,
+  its working set is readable against that limit with a timestamp, and the
+  reading moves when the server is worked. No case drives the server to its
+  limit.
+- OBS-06: volume near capacity. The control plane reports the volume's usage, it
+  agrees with `df` inside the pod within a stated tolerance and freshness, and
+  both move together when the workload writes.
+- OBS-07: readings survive server restart. Every reading above keeps answering
+  across a restart, and each series either resets cleanly or persists.
 
-**Harness added**: a read-only client for a Prometheus-compatible HTTP API and
-for the kubelet Summary API, both reached through the API server's proxy
-subresource; endpoint discovery confirmed by probe and recorded in
-`environment.json`; a bounded ingress partition of the server pod, which
-CHAOS-04 inherits; a bounded capacity fill gated on the export being
-quota-enforced; and a bounded small-file storm for the memory ceiling case.
+**Harness added**: a reader for the kubelet Summary API through the API server's
+`nodes/proxy` subresource, serving per-volume usage and per-container working
+set; a reader for the availability data the Kubernetes API already serves (pod
+conditions with transition times, container statuses, endpoint readiness); a
+cross-check against `metrics.k8s.io` where it is served; a poller that samples
+those readers across a fault and classifies each series; and two bounded writes
+that move a reading far enough to prove it tracks reality. No new flags, no new
+fault, and no new module dependency.
 
-Delivered as four pull requests, smallest runnable slice first: the metrics
-reach with OBS-07, then OBS-06, then OBS-01, then OBS-05.
+Delivered as three pull requests, smallest runnable slice first: the kubelet
+reach with OBS-06, then OBS-01 and OBS-07 together, then OBS-05.
 
 ---
 
