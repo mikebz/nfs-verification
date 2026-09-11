@@ -40,31 +40,30 @@ unit:
 preflight:
 	go run ./cmd/preflight -timeout=3m $(COMMON)
 
-# Section 4.2 gates. Categories live in a go test pattern, not in harness
-# machinery: cases that injure the server are named TestChaos..., everything
-# else is presubmit. The prefix marks what a case does rather than where it sits
-# in the plan, so the OBS cases that inject a fault carry it too.
-#
-# Presubmit deliberately holds no chaos. Chaos is slow and its failures need
-# human triage; putting it in the fast gate trains people to ignore red.
+# E2E test targets. Tests are organized strictly by category:
+# PROV, DATA, CHAOS, OBS, SEC (and later SCALE, SKEW).
 
-# All P cases. Budget: under 15 minutes on 2 nodes.
-.PHONY: test-presubmit
-test-presubmit:
-	go test $(PKG) -v -timeout=30m -skip '^Test(Chaos|Soak)' $(COMMON)
+.PHONY: test-prov
+test-prov:
+	go test $(PKG) -v -timeout=45m -run '^TestProv' $(COMMON)
 
-# The chaos vector. Budget: under 4 hours per Section 4.2, and every case
-# injures the server. Repeated failover alone is five outages end to end.
+.PHONY: test-data
+test-data:
+	go test $(PKG) -v -timeout=45m -run '^TestData' $(COMMON)
+
 .PHONY: test-chaos
 test-chaos:
 	go test $(PKG) -v -timeout=240m -run '^TestChaos' $(COMMON)
 
-# The weekly soak vector. All W cases per Section 4.2.
-.PHONY: test-soak
-test-soak:
-	go test $(PKG) -v -timeout=240m -run '^TestSoak' $(COMMON)
+.PHONY: test-obs
+test-obs:
+	go test $(PKG) -v -timeout=45m -run '^TestObs' $(COMMON)
 
-# Everything. Same budget as chaos, since chaos dominates it.
+.PHONY: test-sec
+test-sec:
+	go test $(PKG) -v -timeout=30m -run '^TestSec' $(COMMON)
+
+# Everything across all categories.
 .PHONY: test-e2e
 test-e2e:
 	go test $(PKG) -v -timeout=300m $(COMMON)

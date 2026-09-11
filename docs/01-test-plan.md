@@ -294,18 +294,19 @@ If either is absent, CHAOS-03 is reported as **blocked on cluster configuration*
 - No distro-specific APIs. Chaos is expressed as Kubernetes operations (pod delete, node cordon and drain, NetworkPolicy apply, node shutdown via whatever the platform provides) behind an interface with a GKE implementation and a bare-metal implementation.
 - Every case is skippable by capability, never by platform name. `if !caps.CanKillNode { t.Skip() }`, never `if platform == "gke"`.
 
-### 4.2 Gates
+### 4.2 Execution by Category
 
 | Target | Contents | Budget |
 |---|---|---|
 | `make preflight` | Section 0 only | < 3 min |
-| `make test-presubmit` | All `P` cases | < 15 min, 2 nodes |
-| `make test-nightly` | All `P` and `N` cases | < 3 h, 4 nodes |
-| `make test-chaos` | CHAOS-01 through CHAOS-16 | < 4 h, 4 nodes |
-| `make test-soak` | All `W` cases | 24 h, 4 nodes |
-| `make test-all` | Everything except `M` | Overnight |
+| `make test-prov` | All PROV cases | < 45 min, 2 nodes |
+| `make test-data` | All DATA cases | < 45 min, 2 nodes |
+| `make test-chaos` | All CHAOS cases | < 4 h, 4 nodes |
+| `make test-obs` | All OBS cases | < 45 min, 2 nodes |
+| `make test-sec` | All SEC cases | < 30 min, 2 nodes |
+| `make test-e2e` | All categories end to end | < 5 h, 4 nodes |
 
-Presubmit deliberately holds no chaos cases. Chaos is slow and its failures need human triage; putting it in the fast gate trains people to ignore red.
+E2E tests are organized strictly by category. Each category has its own test file, Makefile target, and corresponding `Test<Category>...` function prefix.
 
 ### 4.3 Triage runbook
 

@@ -42,7 +42,7 @@ var mountFailureReasons = map[string]bool{
 //  5. Assert no container reported Ready with a volume that never mounted.
 //  6. Delete the pod and wait for it to leave the API before teardown reaches
 //     the claim.
-func TestMountFailureSurfacesAsEvent(t *testing.T) {
+func TestObsMountFailureSurfacesAsEvent(t *testing.T) {
 	f := framework.New(t, "OBS-04")
 	ctx, cancel := caseCtx(t, 15*time.Minute)
 	defer cancel()
@@ -137,9 +137,6 @@ func containsAny(s string, subs []string) bool {
 // is less, but it is still something an operator can see. Both are recorded,
 // because the difference matters when the server is one pod among many.
 //
-// It is named for the chaos gate rather than for its plan section, because it
-// injures the server and the fast path holds no fault injection.
-//
 // Steps:
 //  1. Start a workload and delete the server pod.
 //  2. Assert the ordinary recovery, and keep the outage the client experienced.
@@ -149,7 +146,7 @@ func containsAny(s string, subs []string) bool {
 //     then invisible from outside the client.
 //  6. Report each channel's duration next to the client's outage, and say so
 //     when only Kubernetes noticed.
-func TestChaosFailoverIsObservable(t *testing.T) {
+func TestObsFailoverIsObservable(t *testing.T) {
 	f := framework.New(t, "OBS-02")
 	ctx, cancel := caseCtx(t, 45*time.Minute)
 	defer cancel()
@@ -224,9 +221,6 @@ func TestChaosFailoverIsObservable(t *testing.T) {
 // either. Where a server words it differently, -grace-enter-pattern and
 // -grace-exit-pattern state the wording.
 //
-// It is named for the chaos gate rather than for its plan section, because it
-// injures the server and the fast path holds no fault injection.
-//
 // Steps:
 //  1. Start a workload and take a lock that is never released, so the server
 //     has state to reclaim and grace means something.
@@ -237,7 +231,7 @@ func TestChaosFailoverIsObservable(t *testing.T) {
 //  5. Assert the window is measurable and inside the grace exit bound.
 //  6. Assert grace was entered once, since a second entry for one failover is
 //     the re-entry loop.
-func TestChaosGracePeriodIsObservable(t *testing.T) {
+func TestObsGracePeriodIsObservable(t *testing.T) {
 	f := framework.New(t, "OBS-03")
 	ctx, cancel := caseCtx(t, 45*time.Minute)
 	defer cancel()
