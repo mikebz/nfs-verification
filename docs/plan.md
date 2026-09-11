@@ -146,7 +146,7 @@ Each step is one pull request. Later steps depend only on earlier ones.
 | 3 | Chaos operations package plus CHAOS-01 and CHAOS-02, the SLO measurement path, fault timelines | done, [PR #4](https://github.com/mikebz/nfs-verification/pull/4) |
 | 4 | Grace and lock reclaim: CHAOS-05, CHAOS-06, CHAOS-07, OBS-02, OBS-03, designed in [`03-grace-and-lock-reclaim-design.md`](03-grace-and-lock-reclaim-design.md) | done, [PR #8](https://github.com/mikebz/nfs-verification/pull/8) |
 | 5 | Close out Provisioning (PROV): PROV-02, PROV-05 to PROV-11 | done, [PR #10](https://github.com/mikebz/nfs-verification/pull/10) |
-| 6 | Close out Concurrency and Data Integrity (DATA): DATA-06 to DATA-14, locktool helper, designed in [`04-data-path-and-locktool-design.md`](04-data-path-and-locktool-design.md) | run on GKE 2026-09-11: DATA-05 to DATA-09, DATA-12, DATA-13 and CHAOS-06 pass; DATA-11's punch half and DATA-14 report blocked on the default image; DATA-10 not yet run |
+| 6 | Close out Concurrency and Data Integrity (DATA): DATA-06 to DATA-13, locktool helper, designed in [`04-data-path-and-locktool-design.md`](04-data-path-and-locktool-design.md) | run on GKE 2026-09-11: DATA-05 to DATA-09 and DATA-11 to DATA-13 pass, with CHAOS-06; DATA-11's punch half reports blocked on a busybox image; DATA-10 not yet run; DATA-14 deferred, see test plan Section 3.2 |
 | 7 | Close out Observability (OBS): OBS-01, OBS-05, OBS-06, OBS-07 | |
 | 8 | Close out Security and Identity (SEC): SEC-03 to SEC-09 | |
 | 9 | Close out Scale and Performance (SCALE): SCALE-01 to SCALE-07 | |
@@ -421,9 +421,10 @@ which also carries what a busybox image can and cannot do here, and why DATA-06,
 DATA-08, DATA-09 and DATA-11 assert something other than the one-line expected
 result in the test plan.
 
-Closes out Section 3.2 entirely. Nine cases verifying protocol edge cases,
-byte-range lock expiry, direct I/O, silly renames, large directory chunk reuse,
-sparse file hole punches, and fsync/COMMIT durability:
+Closes out Section 3.2 except for the soak. Eight cases verifying protocol edge
+cases, byte-range lock expiry, direct I/O, silly renames, large directory chunk
+reuse, sparse file hole punches, and fsync/COMMIT durability. The ninth,
+DATA-14, is deferred:
 
 - DATA-06: lock held by a pod that is force-deleted. Asserts the lock is
   released within one lease period and a new acquirer on another node succeeds.
@@ -443,11 +444,11 @@ sparse file hole punches, and fsync/COMMIT durability:
 - DATA-13: negative durability. Pod writes without fsync and the server is
   killed. Asserts that missing uncommitted data is acceptable and documented,
   not failed.
-- DATA-14: mixed 70/30 read/write workload across 20 pods with file sizes from
-  4KiB to 1GiB for 1 hour. Asserts zero checksum mismatches. An hour does not
-  fit `make test-data`, so it gets its own target; see
-  [`04-data-path-and-locktool-design.md`](04-data-path-and-locktool-design.md)
-  section 5.14.
+- DATA-14: **deferred, not implemented.** The mixed soak is the one case of the
+  nine left out, because this project is not doing soak testing yet: the suite's
+  soak is SCALE-07 in Section 3.4 of the test plan, and DATA-14 sits between it
+  and SCALE-03's pod fan-out. Section 3.2 of the test plan carries the full
+  reasoning and what the deferral costs.
 
 **Harness added**: `locktool`, a small static Go binary for `fcntl` byte-range
 locks, built by `make locktool` and streamed into an existing pod over
@@ -457,8 +458,7 @@ node to release the mount and a teardown guard that keeps a claim whose unmount
 was never observed; clone volumes over an export a dynamic claim already owns,
 for the `noac` contrast; `O_DIRECT`, hole-punch and free-inode probes; directory
 population, deletion and census helpers; a content-verifying record sweep
-returning four verdicts, which replaced the existence check everywhere; and
-`fio` orchestration (`-fio-image`) for DATA-14 behind `make test-data-soak`.
+returning four verdicts, which replaced the existence check everywhere.
 
 **Also landed**: the byte-range half of DATA-05 and the disjoint-range extension
 of CHAOS-06, both deferred here by

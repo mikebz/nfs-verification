@@ -41,7 +41,6 @@ make locktool                                             # build bin/locktool-l
 make preflight      FLAGS="-storage-class=nfs -lease-seconds=60 -grace-seconds=90"
 make test-prov      FLAGS="-storage-class=nfs -lease-seconds=60 -grace-seconds=90"
 make test-data      FLAGS="-storage-class=nfs -lease-seconds=60 -grace-seconds=90"
-make test-data-soak FLAGS="-storage-class=nfs -fio-image=<image>"    # DATA-14, one hour
 make test-chaos     FLAGS="-storage-class=nfs -lease-seconds=60 -grace-seconds=90"
 make test-obs       FLAGS="-storage-class=nfs -lease-seconds=60 -grace-seconds=90"
 make test-sec       FLAGS="-storage-class=nfs -lease-seconds=60 -grace-seconds=90"
@@ -61,12 +60,10 @@ process, because the suite sorts strictly by category and they are DATA cases;
 `test-prov` and `test-obs` are already in the same position. Only `make unit`
 and `make preflight` leave the cluster alone.
 
-Soak is not a category. DATA-14 is a DATA case, carries the `TestData` prefix
-and lives in the DATA file with the rest of them; what it has separately is a
-runtime. An hour across 20 pods does not fit inside `make test-data`'s 45 minute
-budget, so `make test-data-soak` runs that one case on its own clock. It needs
-`-fio-image` and skips without it; no image is assumed, because pulling one
-nobody named is a supply chain the operator did not agree to.
+Soak is not a category, and this suite is not doing soak testing for now.
+DATA-14, the one case that would have needed an hour and a target of its own, is
+deferred; Section 3.2 of the test plan says why, and the short version is that
+the suite's soak is SCALE-07 and belongs to a section nobody is working yet.
 
 E2E tests are organized strictly by category: `test-prov` runs provisioning cases
 (`-run '^TestProv'`), `test-data` runs data consistency cases (`-run '^TestData'`),
@@ -158,7 +155,6 @@ charged to every case eats the `go test -timeout` budget for the package.
 | DATA-11 | Sparse write and read back; the hole punch recorded, not asserted, on 4.1 | DATA |
 | DATA-12 | fsync durability: every committed record intact after a server kill | DATA |
 | DATA-13 | Negative durability: un-fsynced records may be absent, never wrong | DATA |
-| DATA-14 | A 70/30 mixed soak across 20 pods for an hour, verified by crc32c | DATA |
 | SEC-01 | uid and gid preservation across pods on two nodes | SEC |
 | SEC-02 | What the export does to a root-owned write, and whether it does it coherently | SEC |
 | OBS-04 | A mount that cannot succeed reaches the operator as a Kubernetes Event | OBS |
@@ -262,7 +258,6 @@ answer them:
 | `-pvc-size` | claim size | defaults to 1Gi: a backing volume that cannot satisfy the request fails every case, and no case here needs more |
 | `-refresh-preflight` | forcing rediscovery | the cached result is reused until it ages out |
 | `-tools-image` | client pods and the node agent | needs `dd`, `sha256sum`, `flock`, `stat` and `nsenter`; defaults to `alpine:3.20`, whose busybox carries all five. DATA-07 and DATA-11 probe two things this image may not have, `dd`'s `oflag=direct` and `fallocate`'s `-p`, and report blocked naming this flag rather than filing a tool gap as a protocol gap |
-| `-fio-image` | DATA-14 | nothing in the cluster names an image carrying `fio`, and no default is assumed: pulling one nobody named is a supply chain the operator did not agree to. The case skips when it is empty |
 | `-server-process` | CHAOS-01 | derived from the server container's command; a server started through a shell wrapper or an image entrypoint hides it, and the case reports blocked rather than signalling the wrong process |
 | `-grace-enter-pattern`, `-grace-exit-pattern` | OBS-03, CHAOS-05, CHAOS-07 | nothing in the Kubernetes API states how a server words grace entry and exit; the built-in rule covers the common wordings, and these state it for a server it does not. Set both or neither: one alone would report every failover as a grace re-entry loop |
 | `-root-squash` | SEC-02 | nothing in the Kubernetes API states the export's squash setting; without it the case records what the export does instead of asserting a value nobody stated |
@@ -297,13 +292,19 @@ here would silently invalidate every timing assertion.
 The harness compiles, `go vet` is clean, and the unit tests in `pkg/slo` and
 `pkg/framework` pass.
 
-The data path cases were run against a three-worker GKE cluster on 2026-09-11.
-DATA-05 through DATA-09, DATA-12, DATA-13 and CHAOS-06 passed, along with the
-SEC, OBS and CHAOS cases alongside them. DATA-11's hole-punch half and DATA-14
-reported blocked on the default image, which is the documented answer for both.
-**DATA-10 has not been run**, so whether a directory-backed export holds 100k
-entries is still unmeasured. That run also found two cases reporting more than
-they had measured; both are fixed and the reasoning is F-007.
+The data path cases were run against a three-worker GKE cluster on 2026-09-11,
+on Kubernetes v1.37 with the in-cluster `nfs-server-provisioner`. DATA-05
+through DATA-09, DATA-11, DATA-12, DATA-13 and CHAOS-06 passed, along with the
+SEC, OBS and CHAOS cases alongside them. DATA-11's hole-punch half reported
+blocked, which is the documented answer on a busybox image.
+
+Two things that suite does not cover today. **DATA-10 has not been run**, so
+whether a directory-backed export holds 100k entries is still unmeasured. And
+**DATA-14 is deferred**, so nothing covers sustained mixed load at scale; that
+gap belongs to SCALE-07. Section 3.2 of the test plan has the reasoning.
+
+An earlier run found two cases reporting more than they had measured; both are
+fixed and the reasoning is F-007.
 
 Notable findings from running the suite against real clusters are recorded in
 [`docs/findings.md`](docs/findings.md).

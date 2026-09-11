@@ -74,16 +74,7 @@ test-prov:
 # but a reader of this file should not have to infer it.
 .PHONY: test-data
 test-data:
-	go test $(PKG) -v -timeout=45m -run '^TestData' -skip 'MixedSoak' $(COMMON)
-
-# DATA-14 alone. Not a soak category: DATA-14 is a DATA case with the TestData
-# prefix, and this target exists only because an hour across 20 pods does not
-# fit inside test-data's 45 minute budget. A target that cannot execute its own
-# documented contents is worse than one that does less. It needs -fio-image and
-# skips without it. See docs/04-data-path-and-locktool-design.md section 5.14.
-.PHONY: test-data-soak
-test-data-soak:
-	go test $(PKG) -v -timeout=120m -run '^TestDataMixedSoak' $(COMMON)
+	go test $(PKG) -v -timeout=45m -run '^TestData' $(COMMON)
 
 .PHONY: test-chaos
 test-chaos:
