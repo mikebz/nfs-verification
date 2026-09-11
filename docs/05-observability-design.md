@@ -206,12 +206,21 @@ What OBS-07 reads, and only where the server publishes it.
 | `Value` | float64 | The sample value. Counters and gauges are not distinguished by the scanner: what a series means is the case's assertion, not a property of the parse. |
 | `At` | time.Time | The workstation clock at the read. The exposition format carries an optional timestamp and servers commonly omit it, so there is no source clock to prefer. |
 
-The restart verdict is one of four, exhaustive over what two reads either side of
-a restart can show:
+The restart verdict is one of four, exhaustive over what two reads of **one
+series from this endpoint** can show either side of a restart. It is not a
+classification of every reading in this phase: volume usage and working set are
+gauges that may legitimately fall for reasons that have nothing to do with a
+restart, and neither is read by this case.
+
+The two `resumed-` verdicts both pass, so the split between them labels the
+record rather than deciding the case. That is deliberate: a server may publish
+gauges as readily as counters, a gauge that fell is not evidence of anything,
+and a verdict that failed on it would be asserting that every series a server
+publishes must be a counter.
 
 | Verdict | Shape | Meaning |
 |---|---|---|
-| `resumed-reset` | Series answers on both sides, values lower after | The process restarted and its counters started again. |
+| `resumed-reset` | Series answers on both sides, values lower after | Consistent with a process that restarted and began counting again. |
 | `resumed-continuous` | Series answers on both sides, values not lower | The series outlived the process. Lawful for anything the server derives from outside itself. |
 | `never-resumed` | Answered before, not after, past the resume bound | The metrics did not survive the restart. |
 | `absent` | The server publishes no endpoint to read | Fails the case. 5.9 says why this is not a block. |
@@ -365,7 +374,7 @@ caused the event, and the comparison is against that:
 | A series from the server's own endpoint (4.4) | Two reads, before and after the restart |
 | Volume usage on a claim the case created (4.2) | Two reads around a bounded write. The claim starts empty, so the absolute value is also assertable; the baseline is kept because it costs one call and survives a claim that did not start empty |
 | The working set under load (4.3) | Samples across the storm, compared against the first |
-| A container's start time and restart count | One read, against the fault time already on the timeline |
+| The fact that the server restarted | One read of the replacement, against the fault time already on the timeline. **Not the restart count**: the phase 3 fault deletes the pod and its controller creates a new one, whose count starts at zero, so a count assertion would fail on the healthy path. What identifies a replacement is a new pod identity and a start time after the fault. A count increase belongs to an in-place container restart, which is CHAOS-01's fault, not this one |
 
 Magnitude is asserted only where the suite knows it: the bytes it wrote. The
 clocks differ, the fault timeline being the workstation's and the container's
@@ -431,8 +440,18 @@ What the case asserts:
 
 The storm is bounded by the case budget and the claim's capacity, is nowhere
 near any limit by construction, and its files are deleted before teardown
-reaches the claim. If the reading does not move inside the budget, the case
-reports blocked with the delta it saw: rule 3, row three.
+reaches the claim.
+
+If the reading does not move inside the budget, the case reports **blocked**
+with the delta it saw, and the reason it is not a failure is worth stating,
+because the neighbouring case answers the same shape differently. The suite does
+not know how much memory this server should use for the writes it made. A static
+reading here is either a broken input or a server whose memory is not
+workload-driven, and nothing in the case distinguishes them, so failing would be
+asserting the first without evidence. The heavier load in SCALE-04 at step 9 is
+what tells them apart. OBS-06 is the contrasting case: there the suite knows
+exactly how many bytes it wrote and has `df` confirming they landed, so a
+control plane that does not move is unambiguously wrong and fails.
 
 ### 5.8 OBS-06: two sources, one quantity, and a write to prove they track [decided: no threshold fill, and no volume stats fails]
 
@@ -455,7 +474,9 @@ plane reporting a volume as nearly empty while the workload is getting ENOSPC.
 
 Then a bounded write, sized well outside the tolerance and nothing like a fill,
 and the comparison is repeated. Two sources that agree on a static number prove
-less than two that move together.
+less than two that move together. A control plane reading that did not move
+**fails**: `df` confirms the bytes landed and the suite knows how many it wrote,
+so there is no second reading of a number that stayed put.
 
 The quota precheck is recorded, not a gate. `df`'s reported total is compared
 against the claim's capacity; a directory-backed export with no per-volume quota
@@ -476,8 +497,13 @@ says nothing about NFS.
 
 So the case asserts on the server's own endpoint and nothing stands in for it:
 
-1. Find a metrics port declared on the server pod or on a Service in front of
-   it, and read it through the pod proxy. No port declared anywhere, or a port
+1. Find the metrics port. A port named for metrics on the server's own
+   container is the direct answer. A Service may name one instead, and there the
+   Service's port number is not what the pod proxy needs: the proxy addresses the
+   pod, so the Service's target port is resolved to the container's port first.
+   A Service port that resolves to no declared container port is not probed, and
+   is recorded as such rather than guessed at. Then read it through the pod
+   proxy. No port declared anywhere, or a port
    that serves nothing readable, **fails**: this deployment publishes nothing
    about NFS itself, so there are no metrics to survive anything. The message
    names that, the way OBS-03 names a server that is silent about grace.
@@ -489,9 +515,21 @@ So the case asserts on the server's own endpoint and nothing stands in for it:
    between the last good read and the first after: a hole that shows the outage
    is what an operator should see, not a defect.
 
-The restart itself is read from container status, which already carries the
-start time and the restart count, so nothing else is needed to establish that a
-restart happened.
+The restart itself is read from container status, which already carries what is
+needed: a replacement pod identity and a start time after the fault. Two
+consequences the implementation must not get wrong, both of which follow from
+the fault deleting the pod rather than restarting its container:
+
+- **The restart count does not increase.** The replacement is a new pod and its
+  count starts at zero. Anything asserting an increase fails on the healthy
+  path. The count is the right signal for an in-place restart, which is
+  CHAOS-01's fault, and the wrong one here.
+- **The second read addresses a different pod.** The endpoint is reached through
+  the pod proxy, so the post-restart read resolves the server again through
+  discovery rather than reusing the old pod's name, and a series whose labels
+  carry the pod identity will legitimately differ across the two reads. A case
+  that compared the old labels would classify a healthy replacement as
+  `never-resumed`.
 
 Known consequence, stated rather than discovered: the provisioner this project
 runs against declares eleven command-line flags and none concerns metrics, so
@@ -701,7 +739,7 @@ One check per rule in section 2, observable from a run.
 | 2. No alert is read or asserted | No case reads a rule, threshold or severity, and `AlertSLO` is deleted rather than renamed. Grep-able |
 | 3. One verdict rule | Unit tests, one per row of the 5.2 table: a refused node proxy blocks naming the verb; an absent metrics endpoint, an absent memory limit, an absent volume-stats entry and an absent NFS-targeted probe each fail with a message naming the deployment; a storm that moved nothing blocks with its delta. No case consults a capability, and none is added |
 | 4. No case passes on a signal its own fault produced | OBS-01 injects no fault and asserts configuration. OBS-07's assertion is on the server's own series, which a pod delete does not produce. Reviewable from the two cases |
-| 5. A live reading is shown to move | OBS-05, OBS-06 and OBS-07 each write a before and after into their table, and each fails when the value did not move as required. OBS-01 is the exempt case and its file records configuration only |
+| 5. A live reading is shown to move | OBS-05, OBS-06 and OBS-07 each write a before and after into their table. OBS-06 fails on a control plane reading that did not move, since the bytes written are known and `df` confirms them; OBS-05 blocks with its delta, since no expected memory delta is known, and 5.7 says why the two differ; OBS-07 fails on a series that did not answer after the restart. OBS-01 is the exempt case and records configuration only |
 | 6. Only what a case asserts on is built | The phase adds two readers. The 5.11 table lists what was removed and what would have used it; a reviewer can check no code lands for any row of it |
 | 7. No ceiling chase | Neither case has a path that writes toward a capacity threshold or a memory limit. Both write a fixed bounded delta from `pkg/slo` and stop |
 | 8. Agreement has a stated tolerance | OBS-06 compares against a kubelet reading whose timestamp is later, within a tolerance from `pkg/slo`. Unit tests: fresh but outside tolerance fails, inside tolerance but stale fails on freshness, inside both passes |
