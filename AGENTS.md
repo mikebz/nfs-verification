@@ -63,6 +63,49 @@ description of what gets tested, and it must not become one. Read these first:
   stop. Lease and grace fail preflight rather than defaulting, because a wrong
   base makes every timing assertion silently meaningless.
 
+## The test is the test
+
+A red result is not a reason to change what the suite asserts. When a run comes
+back red, the question is whether the assertion was right, never whether it can
+be relaxed until this deployment passes. A bound loosened, a check deleted or a
+verdict downgraded because one provisioner cannot meet it produces a suite that
+passes everywhere and says nothing anywhere, and the next person to run it has
+no way to tell which of its greens were earned.
+
+So the order is: establish what the correct assertion is, from the documents
+below; assert that; and report what this deployment does about it. A deployment
+that cannot meet a correct assertion is a finding about that deployment. It goes
+in `docs/findings.md` and stays red, or reports blocked where the rules for the
+case say blocked, and either way the message says whose configuration produced
+it. What it does not do is change the assertion.
+
+**State the assumption, and say where it came from.** Every assertion rests on
+something somebody wrote down, and the citation is what lets a reviewer disagree
+with the assertion rather than with you:
+
+- **NFSv4.1 semantics**: RFC 8881, and RFC 7530 where v4.0 behaviour is being
+  contrasted. Close-to-open, post-COMMIT durability, lock reclaim during grace
+  and client identity all come from here.
+- **The Linux NFS client**: `Documentation/filesystems/nfs/` in the kernel tree,
+  for anything about mount options, `local_lock`, the shared lease per server,
+  or what a `hard` mount does on retry. Client behaviour is not protocol
+  behaviour and the difference belongs in the comment.
+- **Kubernetes**: the API reference and the component docs, for pod conditions,
+  endpoint readiness, finalizers, kubelet timers and aggregation periods.
+- **CSI**: the specification, for what a driver must implement against what it
+  may implement. Volume statistics, expansion and snapshots are all optional
+  capabilities, and a driver that omits one is not defective.
+- **The implementation in front of us**: the provisioner's flags, its chart
+  templates, its source. The least authoritative source, but enough for a
+  statement about this deployment as long as it is labelled as one.
+
+Where no document settles it, say that in the same breath as the assertion:
+"this is this implementation's behaviour, not a protocol guarantee" is a
+legitimate basis as long as the case says so and the failure message repeats it,
+so that the failure reaches the boundary discussion instead of being filed as a
+server defect. An assumption nobody can trace is the one that gets quietly
+relaxed the first time it fails.
+
 ## Say what you actually ran
 
 State plainly, per change, which of these happened:
@@ -114,7 +157,8 @@ told it works stops trusting every later claim, including the true ones.
 - **No timing literals.** Bounds come from `pkg/slo` against the pinned profile.
   A literal in a case invalidates itself the moment the profile changes, and
   nothing tells you.
-- **Assert what NFSv4.1 guarantees, no more.** Close-to-open is asserted
+- **Assert what NFSv4.1 guarantees, no more**, and name the document it comes
+  from, per *The test is the test* above. Close-to-open is asserted
   directly. The absence of anything stronger is asserted just as deliberately.
   Where a case must assert an implementation property rather than a protocol
   guarantee, the failure message says so, so the failure reaches the boundary
