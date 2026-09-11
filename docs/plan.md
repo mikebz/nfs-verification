@@ -147,7 +147,7 @@ Each step is one pull request. Later steps depend only on earlier ones.
 | 4 | Grace and lock reclaim: CHAOS-05, CHAOS-06, CHAOS-07, OBS-02, OBS-03, designed in [`03-grace-and-lock-reclaim-design.md`](03-grace-and-lock-reclaim-design.md) | done, [PR #8](https://github.com/mikebz/nfs-verification/pull/8) |
 | 5 | Close out Provisioning (PROV): PROV-02, PROV-05 to PROV-11 | done, [PR #10](https://github.com/mikebz/nfs-verification/pull/10) |
 | 6 | Close out Concurrency and Data Integrity (DATA): DATA-06 to DATA-13, locktool helper, designed in [`04-data-path-and-locktool-design.md`](04-data-path-and-locktool-design.md) | run on GKE 2026-09-11: DATA-05 to DATA-09 and DATA-11 to DATA-13 pass, with CHAOS-06; DATA-11's punch half reports blocked on a busybox image; DATA-10 not yet run; DATA-14 deferred, see test plan Section 3.2 |
-| 7 | Close out Observability (OBS): OBS-01, OBS-05, OBS-06, OBS-07 | |
+| 7 | Observability (OBS): OBS-05, OBS-06, OBS-07 and the half of OBS-01 that needs no fault, designed in [`05-observability-design.md`](05-observability-design.md). Does not close out Section 3.5: OBS-01's behavioral half needs a fault that lands in step 10 | next, design written |
 | 8 | Close out Security and Identity (SEC): SEC-03 to SEC-09 | |
 | 9 | Close out Scale and Performance (SCALE): SCALE-01 to SCALE-07 | |
 | 10 | Close out Resiliency and Chaos (CHAOS): CHAOS-03, CHAOS-04, CHAOS-08 to CHAOS-18 | |
@@ -167,10 +167,13 @@ interleaving fault injection across different domains:
 2. **DATA next**: complete all data path semantics and protocol edge cases
    (lease-expiry lock release, direct I/O, noac visibility, silly renames, large
    directory readdir, sparse files, and fsync durability guarantees).
-3. **OBS & SEC next**: close out production observability (alerts for outage,
-   memory ceiling, volume capacity, and metrics persistence) and security/identity
-   (fsGroup, service-proxy export rules, rejected clients, identity normalization,
-   and network confidentiality).
+3. **OBS & SEC next**: production observability (what the deployment publishes
+   for an operator to monitor: an availability signal that represents NFS, a
+   declared memory ceiling, volume usage that agrees with the workload, and
+   server metrics that survive a restart) and security/identity (fsGroup,
+   service-proxy export rules, rejected clients, identity normalization, and
+   network confidentiality). OBS is not closed out by step 7: one half of OBS-01
+   needs a fault from step 10.
 4. **SCALE next**: verify the cluster and server under volume fan-out, high mount
    counts, metadata churn, noisy neighbors, and throughput soak.
 5. **CHAOS last**: close out the most invasive, platform-dependent infrastructure
@@ -469,23 +472,58 @@ check to a content check; and the fix for `scripts/lock-probe.sh` passing
 
 ---
 
-## 3f. What step 7 contains (Close out OBS)
+## 3f. What step 7 contains (Observability)
 
-Closes out Section 3.5 entirely. Four cases asserting operational observability,
-health alerting, memory ceiling warnings, capacity alerts, and metrics continuity:
+Designed first in
+[`05-observability-design.md`](05-observability-design.md), which carries the
+decision that shapes every case: **the suite verifies what the deployment
+publishes, never the alert rules**. Thresholds, severities and routing are
+organization-specific, and asserting on them would mean failing a healthy
+storage system for someone else's threshold and installing a monitoring stack
+this project does not own. GKE runs no in-cluster Prometheus either: managed
+collection ships to Cloud Monitoring and its query API is a frontend proxy the
+operator deploys, so querying it is a cloud dependency the suite refuses.
 
-- OBS-01: server unavailable. An alert fires within the SLO bound with the
-  expected severity and alert target.
-- OBS-05: server memory approaching ceiling. An alert fires before the server
-  pod hits OOMKill.
-- OBS-06: volume near capacity. An alert fires when usage exceeds threshold,
-  and `df` inside the pod agrees with the control-plane metric.
-- OBS-07: metrics survive server restart. Post-recovery metrics counters either
-  reset cleanly or persist continuously, leaving no gaps that obscure an outage.
+The second decision is what makes the cases worth running. An input that exists
+because Kubernetes produces it for every workload is not evidence about NFS, so
+no case here passes on a signal its own fault produced, and every case fails
+rather than skipping when the deployment publishes nothing. That is F-008's rule
+applied uniformly: the design states it once, in one table, because an earlier
+revision stated it four different ways.
 
-**Harness added**: a metrics and alert querying client (Prometheus API or
-Kubernetes metrics endpoints), threshold-fill workload helpers, and server
-memory pressure simulation.
+Four cases, asserting that an operator on this deployment has inputs to monitor
+with:
+
+- OBS-01: the deployment provides an availability signal that can represent NFS
+  reachability, rather than only the container's lifecycle. Asserted from the
+  readiness configuration, with no fault: deleting a pod moves every
+  container-derived signal by construction and would pass anywhere. The
+  behavioral half, that the signal moves when a running server stops answering,
+  needs a stop-without-exit fault and lands in **step 10**.
+- OBS-05: the server declares a memory limit, its working set is readable
+  against it, and the reading moves when the server is worked. Fails when no
+  limit is declared. No case drives the server to its limit.
+- OBS-06: the control plane reports the volume's usage, it agrees with `df`
+  inside the pod within a stated tolerance, and both move together when the
+  workload writes. Fails when the CSI driver reports no usage.
+- OBS-07: the server's own metrics answer either side of a restart, and either
+  reset cleanly or persist. Fails when the server publishes no endpoint; no
+  container-level signal is substituted for one.
+
+**Harness added**: two readers. The kubelet's stats summary through the API
+server's node proxy, serving per-volume usage and per-container working set for
+OBS-05 and OBS-06; and the server's own metrics endpoint through the pod proxy,
+with a minimal scanner for the exposition format, for OBS-07. Everything else
+comes from objects the suite already reads. No new flags, no new fault, no new
+module dependency, and no new capability: a capability would gate these cases
+off on exactly the runs whose findings matter.
+
+Delivered as three pull requests: OBS-06 first, then OBS-05, then OBS-01 and
+OBS-07.
+
+Expect most of it to come back red on the provisioner this project runs against,
+which declares no probes, no resource limits and no metrics endpoint. That is
+the phase working, and it belongs in `findings.md` as one entry.
 
 ---
 
