@@ -21,6 +21,17 @@ for the reasons in section 1 here. Doc 03 itself is not edited, since a numbered
 design doc records what was decided at the time; this paragraph is where the
 change is recorded.
 
+**Amendment, 2026-09-11, after the first run of OBS-06 (rule 3, and 5.2).** A
+deployment that does not implement what a case is about now reports **blocked**
+citing the finding that records it, rather than failing. The owner's decision,
+taken after the run behind F-009: a limitation somebody has written down is a
+different result from a defect, and a suite that cannot tell the two apart is
+read as broken. The sections below are edited in place rather than left
+contradicting each other, because two pull requests of this phase are still to
+be implemented from them. What did not change is what counts as a limitation: an
+absence the deployment could configure away. A number that contradicts another
+number is still a failure, and 5.2 says where the line falls.
+
 ---
 
 ## 1. Problem and outcomes [decided: verify what the deployment publishes, never the alert rules]
@@ -58,17 +69,19 @@ Observable outcomes that define done:
   together when the workload writes.
 - A case can state whether the server publishes any metrics of its own and
   whether they survive its restart, or that it publishes none.
-- Every one of the four fails, rather than passing quietly, on a deployment that
-  does not publish what it needs, and the failure names the deployment rather
-  than the NFS server's code.
+- Every one of the four reports, rather than passing quietly, on a deployment
+  that does not publish what it needs: blocked citing the finding that records
+  the absence, and the message names the deployment rather than the NFS server's
+  code. What each still fails on is a published number that contradicts another
+  published number (5.2).
 
 Requirements: Section 3.5 of [`01-test-plan.md`](01-test-plan.md) for the four
 cases, whose wording this phase changes in the same pull request (5.13);
 Section 4.2 for the category budget; Section 4.3 for where a failure gets
 routed. Findings that constrain this phase: F-008, which is about grace signals and not
 about metrics, cited here only for the rule it established, that a case whose
-signal the deployment does not publish fails rather than skips so the finding
-lands where an operator sees it; F-002 (node sizing, which bounds what the
+signal the deployment does not publish reports rather than passes, which the
+amendment above routes to blocked citing a finding rather than to a failure; F-002 (node sizing, which bounds what the
 memory case may do); F-001 and F-003 (ordering around anything that unmounts).
 
 Cases served: **OBS-01** (server unavailable), **OBS-05** (memory approaching a
@@ -93,10 +106,14 @@ section without reading code.
    threshold or a severity. Those are the operator's.
 3. **One verdict rule, used in every case.** A source the suite cannot reach for
    its own reasons is **blocked**. A deployment that does not publish, declare or
-   implement what the case is about is a **failure**. A precondition the case
-   failed to create by its own actions is **blocked**, with the number reached.
-   Nothing is a capability skip: a capability that gates one of these cases off
-   would hide the finding on every replayed run.
+   implement what the case is about is **blocked**, naming the deployment and
+   citing the `F-NNN` entry that records it. A precondition the case failed to
+   create by its own actions is **blocked**, with the number reached. What a case
+   still **fails** on is data: two published numbers that contradict each other,
+   or one that does not move when the workload moves it. Nothing is a capability
+   skip either way: a capability flag gates a case off before it runs and takes
+   the finding with it, while every blocked verdict here is reached by probing
+   live and says what was found.
 4. No case passes on a signal its own fault produced. Deleting a pod moves every
    container-derived signal by construction, so no case asserts on one.
 5. A case that reads a live value shows it moves. A frozen counter and a gauge
@@ -201,7 +218,7 @@ rows with the same claim and different sources.
 |---|---|---|
 | `Pod`, `Container` | string | Which container. A pod with a sidecar has more than one, and only the one serving NFS is the subject. |
 | `WorkingSetBytes` | int64 | From the same kubelet call as 4.2. |
-| `LimitBytes` | int64 | From the pod spec. Zero means no limit is declared, which fails the case rather than blocking it: an undeclared ceiling is a deployment property, not a harness gap. |
+| `LimitBytes` | int64 | From the pod spec. Zero means no limit is declared, which blocks the case citing the finding for it: an undeclared ceiling is a deployment property rather than a harness gap, and 5.2 row two says how it is reported. |
 | `Fraction` | float64 | Working set over limit, computed only when a limit exists. |
 | `At` | time.Time | The kubelet's sample time. |
 | `OOMKills` | int32 | Terminations with that reason so far, from the container status. |
@@ -234,7 +251,7 @@ publishes must be a counter.
 | `resumed-reset` | Series answers on both sides, values lower after | Consistent with a process that restarted and began counting again. |
 | `resumed-continuous` | Series answers on both sides, values not lower | The series outlived the process. Lawful for anything the server derives from outside itself. |
 | `never-resumed` | Answered before, not after, past the resume bound | The metrics did not survive the restart. |
-| `absent` | The server publishes no endpoint to read | Fails the case. 5.9 says why this is not a block. |
+| `absent` | The server publishes no endpoint to read | Blocks the case, citing the finding that records it. 5.9 says why nothing stands in for it. |
 
 ### 4.5 Ownership and evolution
 
@@ -252,8 +269,10 @@ failure report in every category benefits from carrying.
 capability flags for these sources. A capability gates a case off, and every one
 of these absences is a finding this phase exists to report, so gating on them
 would hide the finding on exactly the runs that should report it. The cases
-probe live and fail. This is rule 3's last sentence, and it is the one piece of
-the contract that an implementer could get wrong without any test noticing.
+probe live and report what they found. This is rule 3's last sentence, and it
+is the one piece of the contract that an implementer could get wrong without any
+test noticing: a blocked verdict reached by probing carries the finding, and a
+capability flag checked beforehand takes it away.
 
 Backward compatible: a record written before this phase decodes with the three
 new fields empty, and nothing gates on them.
@@ -282,7 +301,7 @@ So this phase reads two things, both through the API server:
 | The kubelet's stats summary, through the node proxy | Per-volume capacity and usage, per-container working set (4.2, 4.3) | Yes, it is the kubelet |
 | The server's own metrics endpoint, through the pod proxy | Whatever the server publishes about itself (4.4) | Only if the server publishes it |
 
-### 5.2 One verdict rule [decided: blocked is a harness gap, failed is a deployment finding]
+### 5.2 One verdict rule [decided: an absence is blocked and cites its finding, a contradiction fails]
 
 An earlier revision stated the verdict for a missing volume-stats entry four
 different ways in four places. That is worse than choosing wrong, because an
@@ -292,22 +311,34 @@ which section they read. One rule, stated once, applied everywhere:
 | What happened | Verdict | Why |
 |---|---|---|
 | The suite could not reach a source for its own reasons: the node proxy refused it, the kubeconfig lacks the verb | **blocked**, naming what was refused | Harness access. Nothing was learned about the deployment. |
-| The deployment does not publish, declare or implement what the case is about: no metrics endpoint, no memory limit, no volume stats from the driver, no readiness probe that tests NFS | **fail**, naming the deployment | This is the finding. An operator here has no input, and no rule they write will change that. |
+| The deployment does not publish, declare or implement what the case is about: no metrics endpoint, no memory limit, no volume stats from the driver, no per-volume quota, no readiness probe that tests NFS | **blocked**, naming the deployment and citing the `F-NNN` entry | The finding is real and it is written down. It is a limitation of this deployment rather than a defect in what it does implement, and the two are triaged by different people. |
 | The case could not create its own precondition: the storm did not move the reading inside the budget | **blocked**, with the number reached | The case did not establish what it needed. Rule 5 forbids calling that a pass. |
+| The deployment publishes the input and the numbers do not hold up: two sources disagree beyond tolerance, or a reading does not move when the workload moves it | **fail**, naming both readings | Nothing here is absent. What is published is wrong, and an operator acting on it is acting on a number that does not describe their volume. |
 
-F-008 is the precedent for row two: on a server that never announces grace,
-OBS-03 fails rather than skips, so the finding lands where an operator sees it.
-Every absence in this phase gets the same treatment. The failure message routes
-it per Section 4.3: it names the deployment and its configuration, not the NFS
-server's code.
+The line between rows two and four is the whole of this rule. Row two is an
+absence the deployment could configure away: turn the quota option on, declare a
+memory limit, add a probe, expose an endpoint. Row four is a number that
+contradicts another number, which no configuration change explains and which a
+green run would hide. A case reaches row two by probing live and reporting what
+it found, so nothing is gated off before it runs and nothing disappears on a
+replay. Either way the message routes per Section 4.3: it names the deployment
+and its configuration, not the NFS server's code.
 
-There is no exception to this table. An earlier revision carved one out for an
-export whose reported total is not the claim's capacity, on the grounds that the
-data is published and the two sources still agree. That was the rule bending
-around an awkward case: OBS-06 is about a **volume** near capacity, and a number
-describing the backing filesystem is not a measurement of this claim. It is row
-two, it fails, and the agreement comparison is still run and recorded so the
-failure arrives with everything a reader needs.
+**Every row-two verdict cites an entry in `findings.md`.** That is the
+load-bearing half of the rule, because a blocked line scrolls past and the entry
+is what survives the run. Where a case meets an absence nothing has recorded
+yet, it reports blocked saying exactly that, and writing the entry is part of
+closing out the run. F-008 is the precedent for the shape rather than for the
+verdict: OBS-03 was written to fail on a server that never announces grace and
+is not modified here, and a phase whose four cases are each expected to meet a
+different absence on this provisioner is not the same situation as one case
+meeting one.
+
+The previously carved-out case is now row two like the rest. An export whose
+reported total is not the claim's capacity publishes real numbers, which agree
+with each other perfectly and describe the wrong filesystem. The absence behind
+it is a per-volume quota, F-009 records it, and the agreement comparison is
+still run and recorded so the result arrives with everything a reader needs.
 
 ### 5.3 What the outside channel covers, and what it cannot
 
@@ -413,9 +444,9 @@ split is stated here rather than discovered when it fails to fail:
 **In this phase, with no fault at all.** Read the availability configuration
 (4.1) and assert that this deployment has a signal that can represent NFS
 reachability: a readiness probe that targets the NFS service, with the Service's
-endpoints following it. On a deployment with no such probe, fail, naming that the
-only in-cluster availability signal is the container's lifecycle and that a
-wedged server is invisible to it. Record the blind window, which is the probe's
+endpoints following it. On a deployment with no such probe, report blocked
+citing the finding for it, naming that the only in-cluster availability signal
+is the container's lifecycle and that a wedged server is invisible to it. Record the blind window, which is the probe's
 period times its failure threshold, or state that it is unbounded where no probe
 exists. Where the suite cannot see a signal an operator may have outside the
 cluster, the message says so, the way OBS-03's message names its flags.
@@ -430,7 +461,7 @@ What this costs: OBS-01 in step 7 asserts a configuration rather than a
 behavior, and Section 3.5 is therefore not fully closed out by this step. That
 is recorded in the plan rather than papered over.
 
-### 5.7 OBS-05: a ceiling that is declared, a reading that moves [decided: no ceiling chase, and an undeclared ceiling fails]
+### 5.7 OBS-05: a ceiling that is declared, a reading that moves [decided: no ceiling chase, and an undeclared ceiling is a finding]
 
 The plan's expected result is "alert fires before OOMKill". The alert is a rule,
 and producing the OOMKill would mean deliberately destroying the cluster's
@@ -439,10 +470,10 @@ storage to observe an ordering. Rule 7.
 What the case asserts:
 
 1. The server container declares a memory limit. Without one there is no
-   denominator and nothing for any threshold to sit below, so the case **fails**,
-   naming the container. Rule 3, row two: the deployment has not declared the
-   ceiling it would be monitored against, and this chart declares none by
-   default (5.3).
+   denominator and nothing for any threshold to sit below, so the case reports
+   **blocked** citing the finding, naming the container. Rule 3, row two: the
+   deployment has not declared the ceiling it would be monitored against, and
+   this chart declares none by default (5.3).
 2. Its working set is readable against that limit, with a timestamp.
 3. The reading tracks reality: a bounded workload through the export moves the
    working set by a measurable margin. What the stimulus is must be stated
@@ -472,14 +503,15 @@ OBS-06 is the contrasting case, and the contrast is the point: there the suite
 knows exactly how many bytes it wrote and has `df` confirming they landed, so a
 control plane reading that did not move is unambiguously wrong and fails.
 
-### 5.8 OBS-06: two sources, one quantity, and a write to prove they track [decided: no threshold fill, and no volume stats fails]
+### 5.8 OBS-06: two sources, one quantity, and a write to prove they track [decided: no threshold fill, and an absent reading is a finding]
 
 - `df` inside the pod, which is what the workload sees.
 - The kubelet's entry for the same claim, which is what the control plane sees.
   No entry means the CSI driver does not implement volume stats, which the CSI
-  specification makes optional. The case **fails**, naming the driver: a volume
-  the control plane cannot measure is one nobody can monitor for capacity. Rule
-  3, row two, and this is the verdict an earlier revision stated four ways.
+  specification makes optional. The case reports **blocked** citing the finding,
+  naming the driver: a volume the control plane cannot measure is one nobody can
+  monitor for capacity. Rule 3, row two, and this is the verdict an earlier
+  revision stated four ways.
 
 What "agrees" means, since two samplers at two moments never produce equal
 numbers. The kubelet aggregates volume stats on a period that defaults to one
@@ -501,8 +533,8 @@ less than two that move together. A control plane reading that did not move
 **fails**: `df` confirms the bytes landed and the suite knows how many it wrote,
 so there is no second reading of a number that stayed put.
 
-The quota check **fails** the case, and it runs last so that everything above it
-is measured and recorded first. `df`'s reported total is compared against the
+The quota check reports **blocked** citing F-009, and it runs last so that
+everything above it is measured and recorded first. `df`'s reported total is compared against the
 claim's capacity; a directory-backed export with no per-volume quota reports the
 backing filesystem's size instead, and no threshold on that number says anything
 about this claim. The cause is nameable on this provisioner, whose XFS quota
@@ -510,11 +542,11 @@ option is off by default, so an export is a subdirectory with no per-volume
 limit at all.
 
 Two readings that agree with each other about the wrong filesystem is exactly
-the shape a passing case would hide, which is why this is row two of 5.2 and not
-a note. The agreement table is still written, so the failure says both that the
+the shape a passing case would hide, which is why this is row two of 5.2 rather
+than a note, and why the entry it cites is the part that has to exist. The agreement table is still written, so the failure says both that the
 sources agree and that what they agree about is not the volume.
 
-### 5.9 OBS-07: the server's own metrics, and nothing standing in for them [decided: a server that publishes nothing fails]
+### 5.9 OBS-07: the server's own metrics, and nothing standing in for them [decided: nothing stands in for a server that publishes nothing]
 
 The plan's OBS-07 is about metrics surviving a restart, and the first question is
 whose. An earlier revision let the case fall through to the kubelet's container
@@ -532,9 +564,10 @@ So the case asserts on the server's own endpoint and nothing stands in for it:
    A Service port that resolves to no declared container port is not probed, and
    is recorded as such rather than guessed at. Then read it through the pod
    proxy. No port declared anywhere, or a port
-   that serves nothing readable, **fails**: this deployment publishes nothing
-   about NFS itself, so there are no metrics to survive anything. The message
-   names that, the way OBS-03 names a server that is silent about grace.
+   that serves nothing readable, reports **blocked** citing the finding: this
+   deployment publishes nothing about NFS itself, so there are no metrics to
+   survive anything. The message names that, the way OBS-03 names a server that
+   is silent about grace.
 2. Where an endpoint answers: read the series, delete the server pod with the
    phase 3 operation, wait for the phase 3 recovery, read again, and classify
    with the table in 4.4.
@@ -561,7 +594,7 @@ the fault deleting the pod rather than restarting its container:
 
 Known consequence, stated rather than discovered: the provisioner this project
 runs against declares eleven command-line flags and none concerns metrics, so
-OBS-07 is expected to fail on this deployment, and the pass path will first be
+OBS-07 is expected to report blocked on this deployment, and the pass path will first be
 exercised somewhere else. Section 11 carries what that means for confidence in
 the scanner.
 
@@ -575,7 +608,7 @@ the scanner.
   stops answering needs the step 10 fault (5.6).
 - It does not observe NFS operations or NFS errors anywhere, on a deployment
   whose server publishes nothing. The table in 5.3 is the boundary, and OBS-07
-  fails rather than implying otherwise.
+  reports it rather than implying otherwise.
 
 What a green run does show, stated no more strongly than the cases support: this
 deployment declares a readiness signal wired to the NFS service, declares a
@@ -749,9 +782,9 @@ existing mechanism.
 
 | Item | The constraint that decides it |
 |---|---|
-| Three of the four cases are expected to fail on the deployment this project runs against: no readiness probe, no memory limit, no server metrics endpoint. | The first run. If they do, that is the phase working as designed and the three results belong in `findings.md` as one entry about what this provisioner publishes. What must not happen is the failures being read as harness defects, which is why each message names the deployment and its configuration. |
-| Whether the CSI driver implements volume stats, which decides OBS-06. | PR 1. A failure there is a real finding: no per-volume usage means no capacity monitoring for anyone. |
-| OBS-07's pass path will not be exercised on this cluster, so the scanner's only run here is the failure path. | Unit tests against recorded exposition text, and the first deployment with a server that publishes. Until then the pass path is covered by tests rather than by a run, and that is stated rather than implied. |
+| Three of the four cases are expected to meet an absence on the deployment this project runs against: no readiness probe, no memory limit, no server metrics endpoint. | The first run. If they do, that is the phase working as designed, and each reports blocked citing its `findings.md` entry, which is what must be written for them to cite. What must not happen is a result being read as a harness defect, which is why each message names the deployment and its configuration. |
+| Whether the CSI driver implements volume stats, which decides OBS-06. | Settled by the first run: it does, and the two sources agree exactly. What the run found instead was an absent per-volume quota, recorded as F-009. |
+| OBS-07's pass path will not be exercised on this cluster, so the scanner's only run here is the absent path. | Unit tests against recorded exposition text, and the first deployment with a server that publishes. Until then the pass path is covered by tests rather than by a run, and that is stated rather than implied. |
 | OBS-01 asserts a configuration, not a behavior, until step 10 adds the wedge fault. | Step 10. The node agent already signals processes, so the operation is small; what is open is the bound, which gets a Section 3.8 row when the fault that can violate it exists. |
 | A server publishing on a port it declares nowhere is invisible to OBS-07's probe, and no flag exists for it. | Whether such a deployment shows up. A flag then earns its place and its README row. |
 | Node proxy and pod proxy may be refused independently on a locked-down cluster. | The first run. Each is classified separately, so a partial refusal blocks only what it blocks. |
@@ -768,9 +801,9 @@ One check per rule in section 2, observable from a run.
 |---|---|
 | 1. No stack, no hosted backend | The suite creates no Deployment, Service or CRD, makes no call to any host but the API server, and adds no module dependency. Reviewable from the diff |
 | 2. No alert is read or asserted | No case reads a rule, threshold or severity, and `AlertSLO` is deleted rather than renamed. Grep-able |
-| 3. One verdict rule | Unit tests, one per row of the 5.2 table: a refused node proxy blocks naming the verb; an absent metrics endpoint, an absent memory limit, an absent volume-stats entry and an absent NFS-targeted probe each fail with a message naming the deployment; a storm that moved nothing blocks with its delta. No case consults a capability, and none is added |
+| 3. One verdict rule | Unit tests, one per row of the 5.2 table: a refused node proxy blocks naming the verb; an absent metrics endpoint, an absent memory limit, an absent volume-stats entry, an absent per-volume quota and an absent NFS-targeted probe each block with a message naming the deployment and citing a finding; a storm that moved nothing blocks with its delta; two published readings that disagree beyond tolerance fail. No case consults a capability, and none is added |
 | 4. No case passes on a signal its own fault produced | OBS-01 injects no fault and asserts configuration. OBS-07's assertion is on the server's own series, which a pod delete does not produce. Reviewable from the two cases |
-| 5. A live reading is shown to move | OBS-05, OBS-06 and OBS-07 each write a before and after into their table. OBS-06 fails on a control plane reading that did not move, since the bytes written are known and `df` confirms them; OBS-05 blocks with its delta, since no expected memory delta is known, and 5.7 says why the two differ; OBS-07 fails on a series that did not answer after the restart. OBS-01 is the exempt case and records configuration only |
+| 5. A live reading is shown to move | OBS-05, OBS-06 and OBS-07 each write a before and after into their table. OBS-06 fails on a control plane reading that did not move, since the bytes written are known and `df` confirms them, and that is row four rather than an absence; OBS-05 blocks with its delta, since no expected memory delta is known, and 5.7 says why the two differ; OBS-07 fails on a series that answered before the restart and not after. OBS-01 is the exempt case and records configuration only |
 | 6. Only what a case asserts on is built | The phase adds two readers. The 5.11 table lists what was removed and what would have used it; a reviewer can check no code lands for any row of it |
 | 7. No ceiling chase | Neither case has a path that writes toward a capacity threshold or a memory limit. OBS-06 writes an absolute byte count from `pkg/slo`, not a fraction of the claim, and OBS-05's churn is bounded by its budget |
 | 8. Agreement has a stated tolerance | OBS-06 compares against a kubelet reading whose timestamp is later, within a tolerance from `pkg/slo`. Unit tests: fresh but outside tolerance fails, inside tolerance but stale fails on freshness, inside both passes |

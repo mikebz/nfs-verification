@@ -233,13 +233,13 @@ Blanket rule: any core dump on any server pod fails the run. Cores are collected
 
 | ID | Case | Expected |
 |---|---|---|
-| OBS-01 | Server unavailable | The deployment provides an availability signal that can represent NFS reachability: a readiness probe targeting the NFS service, with the Service's endpoints following it. Fails when the only in-cluster signal is the container's lifecycle, which cannot represent a server that is wedged rather than dead. The behavioral half, that the signal moves when a running server stops answering, needs a fault that does not kill the container and lands in step 10. |
+| OBS-01 | Server unavailable | The deployment provides an availability signal that can represent NFS reachability: a readiness probe targeting the NFS service, with the Service's endpoints following it. Reports blocked, citing the finding that records the absence, when the only in-cluster signal is the container's lifecycle, which cannot represent a server that is wedged rather than dead. The behavioral half, that the signal moves when a running server stops answering, needs a fault that does not kill the container and lands in step 10. |
 | OBS-02 | Failover event | Event is observable in metrics or logs with a timestamp; measurable duration |
 | OBS-03 | Grace period entry and exit | Both observable; duration measurable. Required to make CHAOS-05 diagnosable. |
 | OBS-04 | Mount failure on a client | Surfaced as a Kubernetes Event on the pod with an actionable reason |
-| OBS-05 | Server memory approaching ceiling | The server container declares a memory limit, its working set is readable against that limit with a timestamp, and the reading moves when the server is worked. An OOMKill, if one occurs, is visible with a timestamp. Fails when no limit is declared: an undeclared ceiling is one nobody can monitor against. **Not manufactured**: no case drives the server to its limit. |
-| OBS-06 | Volume near capacity | The control plane reports this volume's usage, it agrees with `df` inside the pod within a stated tolerance and freshness, and both move together when the workload writes. Fails when the CSI driver reports no usage for the volume, and fails when the reported total is not the claim's capacity: an export with no per-volume quota is measuring the backing filesystem, so no threshold on that number describes this claim. The agreement comparison is still run and recorded either way. |
-| OBS-07 | Metrics survive server restart | The server's own metrics answer before a restart and after it, and its counters either reset cleanly or persist. A gap that shows the outage is not a defect. Fails when the server publishes no metrics endpoint: a deployment that says nothing about NFS has nothing that could survive anything, and no case substitutes a container-level signal for it. |
+| OBS-05 | Server memory approaching ceiling | The server container declares a memory limit, its working set is readable against that limit with a timestamp, and the reading moves when the server is worked. An OOMKill, if one occurs, is visible with a timestamp. Reports blocked citing the finding when no limit is declared: an undeclared ceiling is one nobody can monitor against. **Not manufactured**: no case drives the server to its limit. |
+| OBS-06 | Volume near capacity | The control plane reports this volume's usage, it agrees with `df` inside the pod within a stated tolerance and freshness, and both move together when the workload writes. Reports blocked citing the finding when the CSI driver reports no usage for the volume, and when the reported total is not the claim's capacity: an export with no per-volume quota is measuring the backing filesystem, so no threshold on that number describes this claim (F-009). Fails, rather than blocking, when the data is published and does not hold up: two sources disagreeing beyond tolerance, or a control plane reading that does not move when the workload writes. The agreement comparison is run and recorded in every case. |
+| OBS-07 | Metrics survive server restart | The server's own metrics answer before a restart and after it, and its counters either reset cleanly or persist. A gap that shows the outage is not a defect. Reports blocked citing the finding when the server publishes no metrics endpoint: a deployment that says nothing about NFS has nothing that could survive anything, and no case substitutes a container-level signal for it. Fails when an endpoint that answered before a restart does not answer after it. |
 
 **Alerting rules are out of scope.** Thresholds, durations, severities and
 routing are organization-specific and problem-specific, and a portable suite
@@ -247,8 +247,18 @@ that asserted on them would fail a healthy storage system for a threshold set
 differently, and would have to find or install a monitoring stack it does not
 own. The four cases above verify the **data an alert is built on**: that it
 exists, is current, and agrees with what the workload sees. A deployment missing
-that data cannot be alerted on by anyone, whatever rules they write, so each
-case fails rather than skipping when the data is absent.
+that data cannot be alerted on by anyone, whatever rules they write.
+
+Where the data is absent, each case reports **blocked** and cites the `F-NNN`
+entry in [`findings.md`](findings.md) that records the absence, rather than
+failing: a limitation somebody has written down is a different result from a
+defect, and they are triaged by different people. The entry is what makes that
+honest, since a blocked line scrolls past and the entry does not, so a case that
+meets an absence nothing has recorded yet says so and the entry gets written.
+What these cases fail on is data that is published and does not hold up: two
+sources that contradict each other, or a reading that does not move when the
+workload moves it. Nothing is gated on a capability flag either way, because a
+flag checked before the case runs takes the finding with it.
 
 How the data is read, and what a green run does and does not establish, is in
 [`05-observability-design.md`](05-observability-design.md).

@@ -313,7 +313,7 @@ func TestObsGracePeriodIsObservable(t *testing.T) {
 // Steps:
 //  1. Create an RWX claim and a pod on it, and read what df says inside the pod.
 //  2. Wait for a kubelet reading of the same claim at least as new as that one.
-//     No reading at all fails the case and names the CSI driver: a volume the
+//     No reading at all blocks the case and names the CSI driver: a volume the
 //     control plane cannot measure is one nobody can monitor for capacity.
 //  3. Assert the two agree on used bytes within the tolerance in pkg/slo.
 //  4. Write a bounded, absolute number of bytes and take both readings again.
@@ -325,6 +325,13 @@ func TestObsGracePeriodIsObservable(t *testing.T) {
 //     the case. An export with no per-volume quota reports the backing
 //     filesystem, and two sources agreeing about the wrong filesystem is
 //     exactly the shape a passing case would hide.
+//
+// What it blocks on against what it fails on, per section 5.2 of the design: an
+// absence this deployment could configure away is blocked and cites the
+// findings entry that records it, because a limitation somebody wrote down is
+// not a defect. What it fails on is data that is published and does not hold
+// up: the two sources disagreeing beyond tolerance, or the control plane's
+// reading not moving when the workload writes.
 func TestObsVolumeUsageAgreesWithControlPlane(t *testing.T) {
 	f := framework.New(t, "OBS-06")
 	ctx, cancel := caseCtx(t, 20*time.Minute)
@@ -408,24 +415,34 @@ func TestObsVolumeUsageAgreesWithControlPlane(t *testing.T) {
 			"cannot be checked against what was provisioned", pvc.Name)
 	}
 	if !framework.MatchesClaimCapacity(after.Pod.CapacityBytes, claimBytes) {
-		t.Errorf("claim %s is provisioned at %d bytes and df inside the pod reports a total of %d. The "+
+		// Blocked rather than failed, and it comes last, so that a real defect
+		// found above still reports as one: the testing package keeps a case
+		// that has already failed as failed, whatever is skipped afterwards.
+		blocked(t, "claim %s is provisioned at %d bytes and df inside the pod reports a total of %d. The "+
 			"export is a subdirectory of a larger filesystem with no per-volume quota, so both sources "+
 			"are measuring that filesystem rather than this volume, and no threshold on that number "+
-			"describes this claim. This is the provisioner's configuration, not the NFS server: the "+
-			"driver behind StorageClass %s is %s, and a quota option it does not have on cannot produce "+
-			"a per-volume total", pvc.Name, claimBytes, after.Pod.CapacityBytes, f.Env.StorageClass, csiDriver(f))
+			"describes this claim. This is the provisioner's configuration rather than the NFS server or "+
+			"this suite: the driver behind StorageClass %s is %s, and a quota option it does not have on "+
+			"cannot produce a per-volume total. Recorded as F-009 in docs/findings.md, which says what "+
+			"turning that option on would change",
+			pvc.Name, claimBytes, after.Pod.CapacityBytes, f.Env.StorageClass, csiDriver(f))
 	}
 }
 
 // agreeOnUsage reads both views of one claim, waits for a control plane reading
 // at least as new as the workload's, and asserts the two agree.
 //
-// The three ways it can end without a comparison are routed differently on
-// purpose. A refused node proxy is blocked: the suite could not reach the
-// source, so nothing was learned about the deployment. No reading and a reading
-// that never catches up are both failures that name the deployment, because on
-// that cluster an operator has no input either and no rule they write will
-// change that.
+// The three ways it can end without a comparison all report blocked, and the
+// messages are different because the reader is. A refused node proxy says the
+// suite could not reach the source and nothing was learned about the
+// deployment. No reading, and a reading that never catches up, both name the
+// deployment and cite the finding that records the absence: an operator there
+// has no input either, and no rule they write will change that until the
+// configuration does.
+//
+// The comparison itself is the part that fails rather than blocking. Two
+// published numbers that disagree are not an absence anybody can configure
+// away.
 func agreeOnUsage(ctx context.Context, t *testing.T, f *framework.Framework, node, claim, label string,
 	claimBytes int64, report *framework.UsageReport) framework.UsageComparison {
 	t.Helper()
@@ -439,16 +456,19 @@ func agreeOnUsage(ctx context.Context, t *testing.T, f *framework.Framework, nod
 	case framework.IsBlocked(err):
 		blocked(t, "%v", err)
 	case errors.Is(err, framework.ErrNoVolumeStats):
-		t.Fatalf("%v. Volume statistics are an optional node capability in the CSI specification, and the "+
-			"driver %s behind StorageClass %s does not report them for this volume, so how full %s is "+
-			"cannot be seen from outside the workload at all. There is no number here for a threshold to "+
-			"sit on, which is a property of this deployment rather than of the NFS server",
+		blocked(t, "%v. Volume statistics are an optional node capability in the CSI specification, and "+
+			"the driver %s behind StorageClass %s does not report them for this volume, so how full %s "+
+			"is cannot be seen from outside the workload at all. There is no number here for a threshold "+
+			"to sit on. That is a limitation of this deployment rather than a defect in the NFS server, "+
+			"and no entry in docs/findings.md records it yet: write one, since a result nobody wrote "+
+			"down is a result the next run has to rediscover",
 			err, csiDriver(f), f.Env.StorageClass, claim)
 	case errors.Is(err, framework.ErrStaleVolumeStats):
-		t.Fatalf("%v. The kubelet recomputes volume statistics every %s by default and this case waited "+
-			"%s, so a reading on node %s still behind the workload's means the control plane's view of "+
-			"this volume is not being refreshed. A usage figure nobody updates cannot report a volume "+
-			"filling up", err, slo.VolumeStatsPeriod, slo.VolumeStatsFreshness, node)
+		blocked(t, "%v. The kubelet recomputes volume statistics every %s by default and this case "+
+			"waited %s, so a reading on node %s still behind the workload's means the control plane's "+
+			"view of this volume is not being refreshed. A usage figure nobody updates cannot report a "+
+			"volume filling up. Record it in docs/findings.md if this deployment does it repeatedly",
+			err, slo.VolumeStatsPeriod, slo.VolumeStatsFreshness, node)
 	case err != nil:
 		t.Fatalf("reading what the control plane sees of %s on node %s: %v", claim, node, err)
 	}

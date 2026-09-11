@@ -58,7 +58,18 @@ which OBS-06 touches.
 
 ### What changed
 
-Two things in the harness, both exposed by this run rather than by the
+The verdict first. A deployment that does not implement what an OBS case is
+about now reports **blocked** citing the entry that records it, rather than
+failing, and this entry is what OBS-06 cites when it meets the missing quota.
+The owner's call, taken on this run: a limitation somebody has written down is a
+different result from a defect, and a suite that cannot tell them apart gets
+read as broken. The line held is that an absence the deployment could configure
+away is blocked, while a number contradicting another number still fails, so the
+agreement and movement assertions above keep their teeth. Section 3.5 of the
+test plan and section 5.2 of the observability design carry the rule; the design
+doc records the amendment at its head rather than pretending it always said so.
+
+Then two things in the harness, both exposed by this run rather than by the
 provisioner:
 
 - **The agreement tolerance is now a fraction of the smaller of the claim's
@@ -75,7 +86,8 @@ provisioner:
   about the script. It now probes first, the way the capacity parsers already
   probe for `stat -f`.
 
-The case itself is unchanged: it reported what it was built to report.
+The case itself asserts exactly what it did before. What changed is which
+column of the run summary the answer lands in.
 
 ---
 
