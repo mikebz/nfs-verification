@@ -61,9 +61,10 @@ process, because the suite sorts strictly by category and they are DATA cases;
 `test-prov` and `test-obs` are already in the same position. Only `make unit`
 and `make preflight` leave the cluster alone.
 
-DATA-14 is the one case split out of its category's target. It runs for an hour
-across 20 pods, which `make test-data` cannot hold inside its 45 minute budget,
-so it keeps the `TestData` prefix and gets `make test-data-soak`. It needs
+Soak is not a category. DATA-14 is a DATA case, carries the `TestData` prefix
+and lives in the DATA file with the rest of them; what it has separately is a
+runtime. An hour across 20 pods does not fit inside `make test-data`'s 45 minute
+budget, so `make test-data-soak` runs that one case on its own clock. It needs
 `-fio-image` and skips without it; no image is assumed, because pulling one
 nobody named is a supply chain the operator did not agree to.
 

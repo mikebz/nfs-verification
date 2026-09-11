@@ -300,8 +300,7 @@ If either is absent, CHAOS-03 is reported as **blocked on cluster configuration*
 |---|---|---|
 | `make preflight` | Section 0 only | < 3 min |
 | `make test-prov` | All PROV cases | < 45 min, 2 nodes |
-| `make test-data` | All DATA cases except DATA-14 | < 45 min, 2 nodes |
-| `make test-data-soak` | DATA-14 alone; needs `-fio-image` | < 2 h, 2 nodes |
+| `make test-data` | All DATA cases except the DATA-14 soak | < 45 min, 2 nodes |
 | `make test-chaos` | All CHAOS cases | < 4 h, 4 nodes |
 | `make test-obs` | All OBS cases | < 45 min, 2 nodes |
 | `make test-sec` | All SEC cases | < 30 min, 2 nodes |
@@ -309,7 +308,9 @@ If either is absent, CHAOS-03 is reported as **blocked on cluster configuration*
 
 E2E tests are organized strictly by category. Each category has its own test file, Makefile target, and corresponding `Test<Category>...` function prefix.
 
-DATA-14 is the one case split out of its category's target. It runs for an hour across 20 pods, which `make test-data` cannot hold inside a 45 minute budget, so it keeps the `TestData` prefix and the DATA file and gets its own target. The split is inside a category rather than across them, so one prefix still means one category.
+**Soak is not a category**, and the table above has one row per category for that reason. DATA-14 is a DATA case: it carries the `TestData` prefix, lives in the DATA file, and is listed in Section 3.2 with the rest of them.
+
+What it has separately is a runtime. It runs for an hour across 20 pods, which `make test-data` cannot hold inside a 45 minute budget, so `make test-data-soak` runs that one case with `-timeout=120m`. That is a runtime exception inside one category, not a seventh category, and it is why the target is named for the case's own category rather than for what the case does. DATA-14 also needs `-fio-image` and skips without it, wherever it is run from.
 
 `make test-data` injects faults: DATA-12 and DATA-13 kill the NFS server process. `make test-prov` and `make test-obs` are already in that position.
 
