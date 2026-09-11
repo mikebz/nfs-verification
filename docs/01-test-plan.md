@@ -314,7 +314,7 @@ If either is absent, CHAOS-03 is reported as **blocked on cluster configuration*
 ### 4.1 Harness design
 
 - Language: Go. `client-go` for orchestration, standard `testing` for structure, table-driven cases. No Ginkgo.
-- The harness runs **on the operator's workstation**, outside the cluster. It authenticates with a kubeconfig, creates namespaces, PVCs, pods and DaemonSets, injects faults, collects logs, and asserts. No component of the suite is deployed into the cluster ahead of time.
+- The harness runs **on the operator's workstation**, outside the cluster. It authenticates with a kubeconfig, creates PVCs, pods and DaemonSets, injects faults, collects logs, and asserts. It creates no namespaces: everything lands in `default`. No component of the suite is deployed into the cluster ahead of time.
 - The harness is a Kubernetes client, not an NFS client. It never mounts the share itself. All I/O comes from in-cluster pods running portable binaries: `fio` for load, `dd` for simple patterns, `flock` and a small static Go binary for lock semantics, `sha256sum` for verification.
 - Optional and off by default: `-external-mount=<server>:<path>` lets the workstation mount the export directly with a plain Linux NFS client. Used only for triage step 6 (reproducing outside Kubernetes to route a defect upstream). It is skipped, never failed, when the server is unreachable from the workstation, which is the normal case on a private GKE cluster.
 - Node-level assertions (`/proc/mounts`, dmesg, process signals) go through a privileged DaemonSet with host namespace access. This is the only privileged component, and its absence is a preflight failure rather than a silent skip.
