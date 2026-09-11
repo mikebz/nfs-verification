@@ -15,8 +15,10 @@ adds a helper no case calls yet does not land.
 ### Where the harness runs
 
 On the operator's workstation, outside the cluster. It authenticates with a
-kubeconfig, creates namespaces, PVCs, pods and DaemonSets, injects faults,
-collects artifacts and asserts.
+kubeconfig, creates PVCs, pods and DaemonSets, injects faults,
+collects artifacts and asserts. It creates no namespaces: everything lands in
+`default`, kept apart by name and by label (see "Namespaces and object naming"
+below).
 
 The harness is a **Kubernetes client, not an NFS client**. It never mounts the
 share itself. Every byte of I/O in every assertion comes from a pod inside the
