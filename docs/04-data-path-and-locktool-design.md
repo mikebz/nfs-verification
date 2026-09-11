@@ -126,13 +126,13 @@ section without reading code.
 - The byte-range half of DATA-05 and the disjoint-range extension of CHAOS-06,
   both of which [`03-grace-and-lock-reclaim-design.md`](03-grace-and-lock-reclaim-design.md)
   section 5.5 deferred to this phase by name.
-- DATA-06 through DATA-14.
+- DATA-06 through DATA-13. DATA-14 was in scope when this was written and is
+  now **deferred**: see the note at the head of section 5.13.
 - A clone volume: a static PV pointing at an export a dynamic claim already
   owns, with different mount options, so one export can be mounted twice.
 - Directory population and census helpers for DATA-10.
 - A content-verifying record sweep, replacing the existence check for the
   durability cases and upgrading CHAOS-01 and CHAOS-02 by the same change.
-- `fio` orchestration behind `-fio-image`, for DATA-14 only.
 
 **Out of scope (explicit non-goals)**
 
@@ -811,7 +811,21 @@ said".
 
 ### 5.13 DATA-14: fio, partitioned by pod, capacity checked first
 
-[decided: one job per pod over its own directory, `verify=crc32c`, `verify_fatal=1`]
+[superseded 2026-09-11: DATA-14 is deferred and not implemented]
+
+**This section records a decision that was made and then reversed.** DATA-14 was
+built as designed below and then removed, because this project is not doing soak
+testing yet: the suite's soak is SCALE-07 in Section 3.4 of the test plan, and
+twenty pods under sustained mixed load for an hour is a scale question wearing a
+data path number. Section 3.2 of the test plan carries the full reasoning, what
+the deferral costs, and the three other arguments against doing it here.
+
+The design below stands as written for whoever picks the case up, in this
+section or in SCALE-07's. What went with the removal: the `-fio-image` flag,
+`pkg/framework/fio.go`, `scripts/fio-soak.sh` and the `make test-data-soak`
+target.
+
+[decided, then reversed: one job per pod over its own directory, `verify=crc32c`, `verify_fatal=1`]
 
 Twenty pods, 70/30 read/write, file sizes from 4KiB to 1GiB, one hour, zero
 checksum mismatches. Three decisions inside that:
@@ -876,7 +890,12 @@ and `make test-obs` are already in that position, so this is where the
 repository is rather than something this phase introduces, but a reader of the
 Makefile should not have to infer it.
 
-**DATA-14 gets its own target, because it cannot fit the one it belongs to.**
+**DATA-14 got its own target, and then the case was deferred.** What follows is
+why the target existed; with DATA-14 gone there is no `make test-data-soak` and
+`make test-data` holds every DATA case again. The reasoning is kept because it
+is the argument anyone reviving the case has to answer.
+
+
 `make test-data` is a single `go test` over every `^TestData` case with
 `-timeout=45m`, and Section 4.2 budgets it at under 45 minutes on two nodes.
 After this phase that one invocation would hold fourteen cases: DATA-01 to
@@ -897,9 +916,10 @@ Three ways out:
    live there, but it changes what is verified to fit a Makefile, which is the
    wrong direction to reason in.
 
-**Decided: 2.** It keeps every property [PR #11](https://github.com/mikebz/nfs-verification/pull/11) introduced, the prefix, the
-file and the one-category-one-target shape, and it does not make a soak the
-price of running the data path. The cost distinction it reintroduces is inside a
+**Decided: 2, then overtaken by a fourth answer nobody had listed: not doing the
+case at all.** Option 2 shipped and was then removed with DATA-14. The objection
+that settled it is one none of the three options addressed: a target named for a
+runtime reads as a category, and soak is not one of this suite's categories. The cost distinction it reintroduces is inside a
 category rather than across them, which is what
 [PR #11](https://github.com/mikebz/nfs-verification/pull/11) removed. This is a
 change to the Makefile and to Section 4.2, and it lands in the PR that lands
@@ -969,11 +989,11 @@ and 3.
 
 | Flag | Default | Needed for |
 |---|---|---|
-| `-fio-image` | empty | DATA-14 only. Empty skips it. No default image: a suite that pulls an image nobody named is a supply chain the operator did not agree to |
 | `-tools-image` | unchanged | DATA-07 and DATA-11 probe what this image's `dd` and `fallocate` support |
 | everything from phases 2 and 3 | unchanged | the fault, the target, the profile, the grace wording |
 
-One new make target, `make locktool`, which `make all` calls. No flag for the
+One new make target, `make locktool`, which `make all` calls. (`-fio-image` and
+`make test-data-soak` shipped and were removed with DATA-14.) No flag for the
 locktool path, its architecture, or where it lands in the pod: the path is
 derived from the repository root, which `FinalizeFlags` already resolves for the
 artifacts directory; the architecture is read from the node; the destination is
@@ -1091,10 +1111,11 @@ Export path: unchanged, `artifacts/<run-id>/<CASE-ID>/`.
    merged case, one line to fix (`-n` in a retry loop, which is what the bound
    already provides), and it lands as its own PR with a finding before this
    phase starts. locktool later gives the probe a real timed acquire.
-2. **Whether the tools image's `dd` carries `direct`.** It is behind
-   `FEATURE_DD_IBS_OBS` in busybox. **Decided by** the probe in section 5.7 on
-   the first real run. If it is absent, section 5.4 is revisited and locktool
-   grows a `dio` subcommand rather than DATA-07 being permanently blocked.
+2. ~~**Whether the tools image's `dd` carries `direct`.**~~ **Answered**
+   2026-09-11 on GKE: `alpine:3.20`'s busybox carries `oflag=direct` and DATA-07
+   passed. Section 5.4 holds and locktool does not grow a `dio` subcommand.
+   `fallocate -p` is absent on the same image, as predicted, so DATA-11's punch
+   half reports blocked there. See F-007 in [`findings.md`](findings.md).
 3. **Whether `make test-data` still fits 45 minutes with thirteen cases in it.**
    Section 5.14 takes DATA-14's hour out to its own target, which is the part
    that made the budget impossible. What remains is a real question: DATA-05
@@ -1113,19 +1134,26 @@ Export path: unchanged, `artifacts/<run-id>/<CASE-ID>/`.
    needs them to vary, so there is no duration flag, which means exercising the
    fio path costs an hour. **Decided by** the first attempt to debug it: if that
    hour is spent twice, the flag has earned its place and gets a README row.
-6. **The clone PV's reclaim policy.** It is `Retain` and the fixture deletes the
-   object, because nothing provisioned it. If a driver treats an unknown static
-   PV over a managed export as something to reconcile, the clone could disturb
-   the dynamic claim that owns the export. **Decided by** watching the dynamic
-   PV's phase across DATA-08 on a real cluster. Unresolved, and it is the reason
-   DATA-08 is not in the MVP.
+6. ~~**The clone PV's reclaim policy.**~~ **Answered for one driver**,
+   2026-09-11 on GKE: DATA-08 passed and the clone did not disturb the dynamic
+   claim that owns the export. It stays worth re-checking on a driver that
+   reconciles static PVs, since the hazard is a property of the driver rather
+   than of the clone.
 7. **Sizing risk on the nodes.** F-002 is 2GB workers rebooting under a 1MiB
    write and a page cache. DATA-10 and DATA-14 are heavier than anything the
    suite has run. A case that reboots a node reports a storage defect that is a
    node pool defect. Mitigation is the README's existing minimum of 8GB per
    worker for anything past the quick cases, and the fact that neither runs
    unless someone asks for its target; there is no mitigation inside the case.
-8. **Nothing now records that a case is expensive.** [PR #11](https://github.com/mikebz/nfs-verification/pull/11) removed the gate
+8. **A case that asserts over a set it produced has to state how large that set
+   must be.** The durability pair inherited a three-record warm-up from the
+   recovery cases and passed having verified three and four records. Fixed for
+   that pair with `durabilityRecords` and `requireDurabilitySet`, and recorded
+   as F-007 in [`findings.md`](findings.md). **Open** for everything else: no
+   other case in the suite states a floor on the set it measures, and the ones
+   that produce a set (DATA-10's directory, DATA-14's files) should be looked at
+   before anyone trusts a small pass from them.
+9. **Nothing now records that a case is expensive.** [PR #11](https://github.com/mikebz/nfs-verification/pull/11) removed the gate
    column, so DATA-10's 100k entries and DATA-14's hour read in the plan exactly
    like a case that takes twenty seconds. **Decided by** whether anyone is
    surprised by a category target's runtime. If they are, the answer is a cost

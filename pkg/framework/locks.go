@@ -13,12 +13,21 @@ import (
 // guarantee under test is what NFSv4.1 specifies, not what a local filesystem
 // provides.
 
-// LockHolder is a lock held by a background process inside a pod.
+// LockHolder is a lock held by a background process inside a pod. One shape
+// covers both holders: the shell flock holder and locktool's fcntl holder
+// report the same states into the same kind of file, so a case polls them
+// identically and Kind says which was taken.
 type LockHolder struct {
-	f     *Framework
-	Pod   string
-	Path  string
-	ID    string
+	f    *Framework
+	Pod  string
+	Path string
+	ID   string
+	// Kind is the API the lock was taken with, which decides which mount
+	// options would have made it local.
+	Kind LockKind
+	// Range is the locked range. A flock holder covers the whole file, which is
+	// what a zero Len means.
+	Range LockRange
 	state string
 	run   string
 }
@@ -33,6 +42,7 @@ func (f *Framework) HoldFlock(ctx context.Context, pod, path, id string) (*LockH
 	// Resolve the logical pod name once, here, so that State and Release cannot
 	// drift from the pod the lock was taken in.
 	l := &LockHolder{f: f, Pod: f.Name(pod), Path: path, ID: id,
+		Kind: FlockLock, Range: LockRange{Mode: "write"},
 		state: "/tmp/lock-" + id + ".state", run: "/tmp/lock-" + id + ".run"}
 	script, err := RunScript("hold-flock.sh", id, path, l.run, l.state)
 	if err != nil {
@@ -41,7 +51,17 @@ func (f *Framework) HoldFlock(ctx context.Context, pod, path, id string) (*LockH
 	if _, err := f.C.MustSh(ctx, Namespace, l.Pod, "main", script); err != nil {
 		return nil, err
 	}
-	if err := Poll(ctx, FastPoll, 2*time.Minute, func(ctx context.Context) (bool, error) {
+	if err := l.awaitHeld(ctx, 2*time.Minute); err != nil {
+		return nil, err
+	}
+	return l, nil
+}
+
+// awaitHeld waits for the holder to report that it has the lock. Shared by both
+// holders: a failed acquisition is an error here rather than a timeout, because
+// "timed out" would not say that the tool refused to start.
+func (l *LockHolder) awaitHeld(ctx context.Context, timeout time.Duration) error {
+	if err := Poll(ctx, FastPoll, timeout, func(ctx context.Context) (bool, error) {
 		s, err := l.State(ctx)
 		if err != nil {
 			return false, err
@@ -49,15 +69,16 @@ func (f *Framework) HoldFlock(ctx context.Context, pod, path, id string) (*LockH
 		if s == "failed" {
 			return false, fmt.Errorf("lock acquisition failed in %s", l.Pod)
 		}
-		return s == "held", nil
+		return s == "held", fmt.Errorf("the holder in %s reports %q, not held", l.Pod, s)
 	}); err != nil {
-		return nil, fmt.Errorf("holding lock %s in %s: %w", id, l.Pod, err)
+		return fmt.Errorf("holding %s lock %s on %s in %s: %w", l.Kind, l.ID, l.Path, l.Pod, err)
 	}
-	return l, nil
+	return nil
 }
 
-// State returns the holder's state: held, released, failed, or empty while the
-// acquisition is still blocked.
+// State returns the holder's state: held, released, failed, waiting while a
+// byte-range acquire is still being refused, or empty while a flock acquire is
+// still blocked.
 func (l *LockHolder) State(ctx context.Context) (string, error) {
 	r := l.f.C.Sh(ctx, Namespace, l.Pod, "main", "cat "+shellQuote(l.state)+" 2>/dev/null || true")
 	if r.Err != nil {

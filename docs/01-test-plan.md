@@ -161,7 +161,34 @@ Assertions here are calibrated to the protocol claim in 2.3. Do not tighten them
 | DATA-11 | Sparse file write, hole punch, read back | Correct zero regions; reported size consistent. Hole punching is NFSv4.2 (`DEALLOCATE`, RFC 7862); on the 4.1 mount Section 0 pins, the punch is **recorded as unsupported, not asserted**, and the case fails only if a punch reports success without zeroing. |
 | DATA-12 | fsync and COMMIT durability: write, fsync, kill server | Post-recovery data present |
 | DATA-13 | Negative durability: write without fsync, kill server | Data may be absent. Asserted as acceptable, documented. |
-| DATA-14 | Mixed 70/30 read/write, 4KiB to 1GiB files, 20 pods, 1h | Zero checksum mismatches |
+| DATA-14 | Mixed 70/30 read/write, 4KiB to 1GiB files, 20 pods, 1h | Zero checksum mismatches. **Deferred, not implemented.** See below. |
+
+
+**DATA-14 is deferred and this suite is not doing soak testing for now.** Four
+reasons, and none of them is that the case is wrong:
+
+- **The suite already has its soak, and it is SCALE-07**, a sustained 8h
+  throughput run in Section 3.4. DATA-14 sits between that and SCALE-03's pod
+  fan-out: twenty pods under sustained mixed load for an hour is a scale
+  question wearing a data path number. Doing it here, ahead of the section it
+  belongs to, would mean two soaks to reconcile when they disagree.
+- **It needs an image nobody has supplied.** `fio` is not ours to build, so the
+  case can only run behind an operator-named image, and none has been named in
+  any run so far.
+- **It asks for tens of gigabytes.** Twenty pods at up to 1GiB across four files
+  each is 80GiB in the worst case, which is two orders of magnitude more than
+  any other case in the plan asks of an export.
+- **An hour fits inside no category budget.** Section 4.2 gives every category
+  target 45 minutes or less except CHAOS. An hour-long case either breaks that
+  or needs a target of its own, and a target of its own reads as a soak
+  category, which this suite does not have.
+
+What the deferral costs: nothing that runs today covers sustained mixed
+read/write load at scale. DATA-01 covers concurrent writers with cross-verified
+checksums, and CHAOS-01, CHAOS-02 and CHAOS-05 cover content survival across
+failovers, but all of them are minutes, not hours. That gap is real and it is
+SCALE-07's to close.
+
 
 ### 3.3 Resiliency and chaos (CHAOS)
 
@@ -307,6 +334,10 @@ If either is absent, CHAOS-03 is reported as **blocked on cluster configuration*
 | `make test-e2e` | All categories end to end | < 5 h, 4 nodes |
 
 E2E tests are organized strictly by category. Each category has its own test file, Makefile target, and corresponding `Test<Category>...` function prefix.
+
+**Soak is not a category**, and the table above has one row per category. The one case that would have needed a target of its own, DATA-14, is deferred; Section 3.2 says why.
+
+`make test-data` injects faults: DATA-12 and DATA-13 kill the NFS server process. `make test-prov` and `make test-obs` are already in that position.
 
 ### 4.3 Triage runbook
 

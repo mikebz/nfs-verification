@@ -33,3 +33,7 @@ go.work.sum
 
 # Run artifacts: environment.json, logs, dmesg, fault timelines.
 artifacts/
+
+# Built binaries: make locktool puts one per node architecture here. Never
+# committed; a repository that ships compiled artifacts cannot be reviewed.
+bin/

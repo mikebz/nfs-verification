@@ -152,6 +152,48 @@ func (f *Framework) dumpNodeState(ctx context.Context, dir string) error {
 	return nil
 }
 
+// WriteArtifact puts a file in this case's bundle.
+//
+// CollectArtifacts runs only when a case fails. This is for an observation a
+// case wants recorded whether it passed or not: a verdict table, a mount line,
+// a lock table. A pass that took a different path from the last pass is worth
+// seeing, and by teardown the pods that could answer are gone.
+func (f *Framework) WriteArtifact(name string, content []byte) error {
+	dir := CaseDir(f.CaseID)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, name), content, 0o644)
+}
+
+// RecordNodeLocks writes each node's own lock table into the bundle, labelled
+// by the moment it was taken.
+//
+// This is the *client's* belief, not the server's, and the difference is the
+// point: a lock the client thinks it holds and the server has forgotten is
+// visible as a line here with no matching refusal at the server, and reading
+// only one side cannot see it.
+func (f *Framework) RecordNodeLocks(ctx context.Context, label string, nodes ...string) error {
+	agent, err := NodeAgent(ctx, f.C)
+	if err != nil {
+		return err
+	}
+	var sb strings.Builder
+	for _, n := range nodes {
+		fmt.Fprintf(&sb, "# %s, node %s\n", label, n)
+		locks, err := agent.Locks(ctx, n)
+		if err != nil {
+			fmt.Fprintf(&sb, "unreadable: %v\n\n", err)
+			continue
+		}
+		for _, l := range locks {
+			fmt.Fprintf(&sb, "%s\n", l)
+		}
+		sb.WriteString("\n")
+	}
+	return f.WriteArtifact("proc-locks-"+label+".txt", []byte(sb.String()))
+}
+
 // FaultEvent is one entry in the injected-fault timeline.
 type FaultEvent struct {
 	At     string `json:"at"`
@@ -163,14 +205,19 @@ type FaultEvent struct {
 // RecordFault appends to the case timeline. Chaos helpers call it so that the
 // bundle says exactly what was done and when.
 func (f *Framework) RecordFault(e FaultEvent) {
-	f.faults = append(f.faults, e)
+	f.state.mu.Lock()
+	f.state.faults = append(f.state.faults, e)
+	f.state.mu.Unlock()
 	if f.T != nil {
 		f.T.Logf("fault: %s %s %s", e.Action, e.Target, e.Detail)
 	}
 }
 
 func (f *Framework) dumpTimeline(dir string) error {
-	b, err := json.MarshalIndent(f.faults, "", "  ")
+	f.state.mu.Lock()
+	faults := append([]FaultEvent(nil), f.state.faults...)
+	f.state.mu.Unlock()
+	b, err := json.MarshalIndent(faults, "", "  ")
 	if err != nil {
 		return err
 	}
