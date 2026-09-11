@@ -502,14 +502,20 @@ deployment has readable, timely, correct inputs to monitor with:
 - OBS-07: readings survive server restart. Every reading above keeps answering
   across a restart, and each series either resets cleanly or persists.
 
-**Harness added**: a reader for the kubelet Summary API through the API server's
-`nodes/proxy` subresource, serving per-volume usage and per-container working
-set; a reader for the availability data the Kubernetes API already serves (pod
-conditions with transition times, container statuses, endpoint readiness); a
-cross-check against `metrics.k8s.io` where it is served; a poller that samples
-those readers across a fault and classifies each series; and two bounded writes
-that move a reading far enough to prove it tracks reality. No new flags, no new
-fault, and no new module dependency.
+**Harness added**: readers for everything the API server can reach without a
+scraper. The kubelet's `/stats/summary` and its Prometheus endpoints
+(`/metrics`, `/metrics/cadvisor`, `/metrics/resource`, `/metrics/probes`)
+through `nodes/proxy`, with a minimal text-format scanner; the NFS server's own
+metrics endpoint through `pods/proxy` where it declares one; the availability
+data the Kubernetes API already serves (pod conditions with transition times,
+container statuses, endpoint readiness); `metrics.k8s.io` as a cross-check; a
+poller that samples those readers across a fault and classifies each series; and
+two bounded writes that move a reading far enough to prove it tracks reality.
+
+Every case reads a value, causes something the suite already does (provision,
+mount, write, delete the server pod) and reads again, asserting the direction of
+the change. Presence alone is not asserted anywhere: a counter frozen at a value
+exists and is useless. No new flags, no new fault, and no new module dependency.
 
 Delivered as three pull requests, smallest runnable slice first: the kubelet
 reach with OBS-06, then OBS-01 and OBS-07 together, then OBS-05.

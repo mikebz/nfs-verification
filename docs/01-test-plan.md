@@ -239,7 +239,7 @@ Blanket rule: any core dump on any server pod fails the run. Cores are collected
 | OBS-04 | Mount failure on a client | Surfaced as a Kubernetes Event on the pod with an actionable reason |
 | OBS-05 | Server memory approaching ceiling | A ceiling is declarable and readable: the server container declares a memory limit, its working set is readable against that limit with a timestamp, and the reading moves when the server is worked. An OOMKill, if one occurs, is visible in the API with a timestamp. **Not manufactured**: no case drives the server to its limit. |
 | OBS-06 | Volume near capacity | The control plane reports this volume's usage, it agrees with `df` inside the pod within a stated tolerance and freshness, and both move together when the workload writes. An export whose reported total is not the claim's capacity has no per-volume capacity to threshold, which is **recorded as a finding**. |
-| OBS-07 | Metrics survive server restart | Every reading above keeps answering across a server restart, and each series either resets cleanly or persists. A source that stops answering fails; a gap that shows the outage does not. |
+| OBS-07 | Metrics survive server restart | Every reading above keeps answering across a server restart, and each series either resets cleanly or persists. Read from the server's own metrics endpoint where it publishes one, and from the kubelet's otherwise, saying which answered. A source that stops answering fails; a gap that shows the outage does not. |
 
 **Alerting rules are out of scope.** Thresholds, `for` durations, severities and
 routing are organization-specific and problem-specific, and a portable suite that
@@ -248,9 +248,19 @@ differently, and would have to find or install a monitoring stack it does not
 own. The four cases above verify the **data an alert is built on**: that it
 exists, carries a timestamp, is current, and agrees with what the workload sees.
 A deployment missing that data cannot be alerted on by anyone, whatever rules
-they write. What this does not establish is stated in
+they write.
+
+The data is read through the API server with the kubeconfig the suite already
+uses: pod conditions and endpoint readiness from the API, the kubelet's
+`/stats/summary` and `/metrics*` endpoints through `nodes/proxy`, the server
+pod's own metrics endpoint through `pods/proxy` where it declares one, and
+`metrics.k8s.io` as a cross-check. No scraper, no monitoring stack and no hosted
+backend is required or permitted. Every case reads a value, causes something,
+and reads again: a number that does not move when the thing it measures does is
+a broken input, and presence alone is not asserted anywhere. What this does not
+establish is stated in
 [`05-observability-and-alerting-design.md`](05-observability-and-alerting-design.md)
-section 5.8.
+section 5.11.
 
 ### 3.6 Security and identity (SEC)
 
