@@ -108,8 +108,16 @@ charged to every case eats the `go test -timeout` budget for the package.
 | ID | Case | Gate |
 |---|---|---|
 | PROV-01 | Dynamic provision, bind, mount, write, delete, backing volume reclaimed | presubmit |
+| PROV-02 | Provision 20 RWX PVCs concurrently; no duplicate export IDs or paths | presubmit |
 | PROV-03 | Delete a claim a pod still mounts; it stays Terminating until the mount is gone | presubmit |
 | PROV-04 | Volume expansion, or a clean rejection when the class does not advertise it | presubmit |
+| PROV-05 | Snapshot and restore, or clean rejection if unsupported | presubmit |
+| PROV-06 | Reclaim policy Retain: PV persists and rebinds with data intact | presubmit |
+| PROV-07 | Provision while server pod is down; recovers cleanly once server returns | chaos |
+| PROV-08 | Delete claim while server pod is down; completes deletion once server returns | chaos |
+| PROV-09 | Rapid create/delete churn (100 cycles); no export ID or fd exhaustion | soak |
+| PROV-10 | Volume name edge cases (1000-character names, boundary RFC 1123 names) | presubmit |
+| PROV-11 | Two-stage volume expansion under active I/O; zero I/O errors | presubmit |
 | DATA-01 | Four pods writing at once, four files, cross-verified checksums | presubmit |
 | DATA-02 | Four pods appending to one file through a held-open descriptor | presubmit |
 | DATA-03 | Close-to-open across two nodes | presubmit |

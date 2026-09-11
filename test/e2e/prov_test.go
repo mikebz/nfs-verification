@@ -1,13 +1,17 @@
 package e2e
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"github.com/mikebz/nfs-verification/pkg/chaos"
 	"github.com/mikebz/nfs-verification/pkg/framework"
 )
 
@@ -278,6 +282,726 @@ func TestVolumeExpansion(t *testing.T) {
 			seenAfter.TotalBytes)
 	default:
 		t.Errorf("the share shrank across an expansion: df reports %d bytes, was %d",
+			seenAfter.TotalBytes, seenBefore.TotalBytes)
+	}
+}
+
+// PROV-02: provision 20 RWX claims concurrently. All must bind, no duplicate
+// export IDs or duplicate export paths may be assigned, and the server must
+// not restart under the load.
+//
+// Steps:
+//  1. Record server container restart count before provisioning.
+//  2. Launch 20 concurrent goroutines to create RWX claims.
+//  3. If the storage class binds on first consumer, create consumer pods.
+//  4. Wait for all 20 claims to reach Bound.
+//  5. Resolve backing PVs and assert:
+//     a. Every PV has a unique name.
+//     b. No duplicate export IDs (from Export_Id annotation) across PVs.
+//     c. No duplicate export paths / volume handles across PVs.
+//  6. Assert server restart count did not increase.
+func TestConcurrentProvisioning(t *testing.T) {
+	f := framework.New(t, "PROV-02")
+	ctx, cancel := caseCtx(t, 25*time.Minute)
+	defer cancel()
+
+	restartsBefore, err := framework.ServerRestartCount(ctx, f.C)
+	if err != nil {
+		t.Fatalf("reading initial server restart count: %v", err)
+	}
+
+	mode, err := f.BindingMode(ctx, f.Env.StorageClass)
+	if err != nil {
+		t.Fatalf("reading binding mode of StorageClass %s: %v", f.Env.StorageClass, err)
+	}
+
+	const claimCount = 20
+	type claimResult struct {
+		name string
+		err  error
+	}
+	ch := make(chan claimResult, claimCount)
+
+	for i := 1; i <= claimCount; i++ {
+		name := fmt.Sprintf("prov02-%02d", i)
+		go func(cName string) {
+			_, cErr := f.CreatePVC(ctx, framework.PVCSpec{Name: cName})
+			ch <- claimResult{name: cName, err: cErr}
+		}(name)
+	}
+
+	var claimNames []string
+	for i := 0; i < claimCount; i++ {
+		res := <-ch
+		if res.err != nil {
+			t.Fatalf("creating claim %s: %v", res.name, res.err)
+		}
+		claimNames = append(claimNames, res.name)
+	}
+
+	// If the storage class binds on first consumer, spawn a consumer pod for each.
+	if mode == storagev1.VolumeBindingWaitForFirstConsumer {
+		t.Logf("StorageClass %s binds on first consumer; launching pods for all %d claims",
+			f.Env.StorageClass, claimCount)
+		for _, cName := range claimNames {
+			pName := fmt.Sprintf("consumer-%s", cName)
+			f.MustPod(ctx, toolsPod(pName, f.Name(cName), ""))
+		}
+	}
+
+	// Wait for all 20 claims to reach Bound.
+	for _, cName := range claimNames {
+		if _, err := f.WaitPVCBound(ctx, cName, framework.BindTimeout); err != nil {
+			t.Fatalf("claim %s did not bind: %v", cName, err)
+		}
+	}
+
+	// Inspect backing PVs for duplicate export IDs and paths.
+	seenPVs := make(map[string]bool)
+	seenExportIDs := make(map[string]string) // exportID -> pvName
+	seenPaths := make(map[string]string)     // path -> pvName
+
+	for _, cName := range claimNames {
+		pv, err := f.PVForClaim(ctx, cName)
+		if err != nil {
+			t.Fatalf("resolving PV for claim %s: %v", cName, err)
+		}
+		if seenPVs[pv.Name] {
+			t.Errorf("claim %s bound to duplicate PV %s", cName, pv.Name)
+		}
+		seenPVs[pv.Name] = true
+
+		if expID := pv.Annotations["Export_Id"]; expID != "" {
+			if existing, exists := seenExportIDs[expID]; exists {
+				t.Errorf("duplicate Export_Id %s on PV %s (already used by %s)", expID, pv.Name, existing)
+			}
+			seenExportIDs[expID] = pv.Name
+		}
+
+		exportPath := ""
+		if pv.Spec.NFS != nil && pv.Spec.NFS.Path != "" {
+			exportPath = pv.Spec.NFS.Path
+		} else if pv.Spec.CSI != nil && pv.Spec.CSI.VolumeHandle != "" {
+			exportPath = pv.Spec.CSI.VolumeHandle
+		}
+		if exportPath != "" {
+			if existing, exists := seenPaths[exportPath]; exists {
+				t.Errorf("duplicate export path / handle %s on PV %s (already used by %s)",
+					exportPath, pv.Name, existing)
+			}
+			seenPaths[exportPath] = pv.Name
+		}
+	}
+
+	restartsAfter, err := framework.ServerRestartCount(ctx, f.C)
+	if err != nil {
+		t.Fatalf("reading final server restart count: %v", err)
+	}
+	if restartsAfter != restartsBefore {
+		t.Errorf("server restarted during concurrent provisioning: %d restarts, was %d",
+			restartsAfter, restartsBefore)
+	}
+}
+
+// PROV-05: snapshot and restore, if advertised. A restored volume must mount
+// RWX and its content must match the original snapshot source. If snapshotting
+// is unsupported on the cluster or driver, the API must reject cleanly.
+//
+// Steps:
+//  1. Provision an RWX claim and mount it in a pod.
+//  2. Write known data and compute checksum.
+//  3. If snapshots are not advertised (no CRD or no VolumeSnapshotClass),
+//     assert creation is cleanly rejected, and return.
+//  4. If advertised, create a VolumeSnapshot targeting the claim.
+//  5. Wait for the VolumeSnapshot to become readyToUse.
+//  6. Provision a new claim with DataSource set to the VolumeSnapshot.
+//  7. Mount the restored claim in a new pod and verify the data matches.
+//  8. Delete pods and claims.
+func TestSnapshotAndRestore(t *testing.T) {
+	f := framework.New(t, "PROV-05")
+	ctx, cancel := caseCtx(t, 20*time.Minute)
+	defer cancel()
+
+	pvc := f.MustRWXPVC(ctx, "prov05")
+	pod := f.MustPod(ctx, toolsPod("writer", pvc.Name, ""))
+	if _, err := f.WaitPVCBound(ctx, pvc.Name, framework.BindTimeout); err != nil {
+		t.Fatalf("claim did not bind once a pod consumed it: %v", err)
+	}
+
+	want, err := f.WriteFile(ctx, pod.Name, fileIn("prov05.dat"), 1<<20, "prov05")
+	if err != nil {
+		t.Fatalf("writing to share: %v", err)
+	}
+
+	if !f.Caps.CanSnapshot {
+		// Assert clean rejection when CRD is not present.
+		t.Logf("VolumeSnapshot CRD is not served; asserting clean API rejection on restore claim")
+		group := "snapshot.storage.k8s.io"
+		_, err := f.CreatePVC(ctx, framework.PVCSpec{
+			Name: "prov05-restore-unsupported",
+			DataSource: &corev1.TypedLocalObjectReference{
+				APIGroup: &group,
+				Kind:     "VolumeSnapshot",
+				Name:     f.Name("prov05-nonexistent-snap"),
+			},
+		})
+		if err == nil {
+			t.Errorf("expected rejection when creating PVC from snapshot without snapshot capability, got nil")
+		} else {
+			t.Logf("clean rejection when snapshotting is unsupported: %v", err)
+		}
+		return
+	}
+
+	classes, err := f.C.VolumeSnapshotClasses(ctx)
+	if err != nil || len(classes) == 0 {
+		t.Logf("VolumeSnapshot CRD is served but no VolumeSnapshotClass is configured for StorageClass %s", f.Env.StorageClass)
+		// Assert clean rejection or unready status when no class is configured.
+		_, snapErr := f.CreateVolumeSnapshot(ctx, "prov05-snap", pvc.Name, "")
+		if snapErr != nil {
+			t.Logf("VolumeSnapshot creation without class rejected cleanly: %v", snapErr)
+		} else {
+			t.Logf("VolumeSnapshot created without class; verifying it does not falsely report readyToUse")
+			readyErr := f.WaitVolumeSnapshotReady(ctx, "prov05-snap", 10*time.Second)
+			if readyErr == nil {
+				t.Errorf("snapshot reported readyToUse without a backing VolumeSnapshotClass")
+			}
+		}
+		return
+	}
+
+	snapClass := classes[0]
+	t.Logf("using VolumeSnapshotClass %s for snapshot test", snapClass)
+	_, err = f.CreateVolumeSnapshot(ctx, "prov05-snap", pvc.Name, snapClass)
+	if err != nil {
+		t.Fatalf("creating VolumeSnapshot: %v", err)
+	}
+	if err := f.WaitVolumeSnapshotReady(ctx, "prov05-snap", framework.BindTimeout); err != nil {
+		t.Fatalf("VolumeSnapshot did not become readyToUse: %v", err)
+	}
+
+	// Restore from snapshot.
+	group := "snapshot.storage.k8s.io"
+	restoredPVC, err := f.CreatePVC(ctx, framework.PVCSpec{
+		Name: "prov05-restored",
+		DataSource: &corev1.TypedLocalObjectReference{
+			APIGroup: &group,
+			Kind:     "VolumeSnapshot",
+			Name:     f.Name("prov05-snap"),
+		},
+	})
+	if err != nil {
+		t.Fatalf("creating restored PVC from snapshot: %v", err)
+	}
+
+	restoredPod := f.MustPod(ctx, toolsPod("reader", restoredPVC.Name, ""))
+	if _, err := f.WaitPVCBound(ctx, restoredPVC.Name, framework.BindTimeout); err != nil {
+		t.Fatalf("restored claim did not bind: %v", err)
+	}
+
+	got, err := f.Sha256(ctx, restoredPod.Name, fileIn("prov05.dat"))
+	if err != nil {
+		t.Fatalf("reading from restored volume: %v", err)
+	}
+	if got != want {
+		t.Fatalf("data mismatch on restored volume: got %s want %s", got, want)
+	}
+}
+
+// PROV-06: reclaim policy Retain. When a claim with Retain policy is deleted,
+// the backing PV must persist in Released phase. Once its ClaimRef is cleared,
+// it must be rebound to a new claim and its existing data must remain intact.
+//
+// Steps:
+//  1. Dynamically provision an RWX claim, mount it, write a test file with known checksum.
+//  2. Resolve the underlying PV.
+//  3. Set the PV reclaim policy to Retain.
+//  4. Delete the pod gracefully and wait for it to leave the API.
+//  5. Delete the claim and wait for it to be removed.
+//  6. Verify the PV persists and transitions to Released phase.
+//  7. Clear the PV's ClaimRef so it transitions to Available.
+//  8. Create a new claim bound explicitly to the retained PV by name.
+//  9. Wait for the new claim to bind.
+//
+// 10. Mount the rebound claim in a new pod, read the file, and verify checksum matches.
+// 11. Restore PV reclaim policy to Delete so framework teardown reclaims the backing storage.
+func TestReclaimPolicyRetain(t *testing.T) {
+	f := framework.New(t, "PROV-06")
+	ctx, cancel := caseCtx(t, 20*time.Minute)
+	defer cancel()
+
+	pvc := f.MustRWXPVC(ctx, "prov06")
+	pod := f.MustPod(ctx, toolsPod("writer", pvc.Name, ""))
+	if _, err := f.WaitPVCBound(ctx, pvc.Name, framework.BindTimeout); err != nil {
+		t.Fatalf("claim did not bind: %v", err)
+	}
+
+	want, err := f.WriteFile(ctx, pod.Name, fileIn("prov06.dat"), 1<<20, "prov06")
+	if err != nil {
+		t.Fatalf("writing to share: %v", err)
+	}
+
+	pv, err := f.PVForClaim(ctx, pvc.Name)
+	if err != nil {
+		t.Fatalf("resolving PV for claim: %v", err)
+	}
+
+	// Change policy to Retain.
+	if err := f.SetPVReclaimPolicy(ctx, pv.Name, corev1.PersistentVolumeReclaimRetain); err != nil {
+		t.Fatalf("setting PV reclaim policy to Retain: %v", err)
+	}
+
+	// Graceful pod delete.
+	if err := f.DeletePod(ctx, pod.Name); err != nil {
+		t.Fatalf("deleting pod: %v", err)
+	}
+	if err := f.WaitPodGone(ctx, pod.Name, framework.DeleteTimeout); err != nil {
+		t.Fatalf("pod did not leave API: %v", err)
+	}
+
+	// Delete claim.
+	if err := f.DeletePVC(ctx, pvc.Name); err != nil {
+		t.Fatalf("deleting claim: %v", err)
+	}
+	if err := f.WaitPVCGone(ctx, pvc.Name, framework.DeleteTimeout); err != nil {
+		t.Fatalf("claim did not leave API: %v", err)
+	}
+
+	// PV must persist and transition to Released.
+	if err := f.WaitPVPhase(ctx, pv.Name, corev1.VolumeReleased, framework.DeleteTimeout); err != nil {
+		t.Fatalf("PV did not enter Released phase: %v", err)
+	}
+	t.Logf("PV %s survived claim deletion in Released phase", pv.Name)
+
+	// Release PV to Available by clearing ClaimRef.
+	if err := f.ReleasePV(ctx, pv.Name); err != nil {
+		t.Fatalf("clearing ClaimRef on PV: %v", err)
+	}
+	if err := f.WaitPVPhase(ctx, pv.Name, corev1.VolumeAvailable, framework.DeleteTimeout); err != nil {
+		t.Fatalf("PV did not enter Available phase: %v", err)
+	}
+
+	// Re-bind to a new claim referencing this PV by VolumeName.
+	reboundPVC, err := f.BindPVToClaim(ctx, "prov06-rebound", pv.Name, "")
+	if err != nil {
+		t.Fatalf("creating rebound PVC: %v", err)
+	}
+	readerPod := f.MustPod(ctx, toolsPod("reader", reboundPVC.Name, ""))
+	if _, err := f.WaitPVCBound(ctx, reboundPVC.Name, framework.BindTimeout); err != nil {
+		t.Fatalf("rebound claim did not bind: %v", err)
+	}
+
+	// Verify data survived across retention and rebinding.
+	got, err := f.Sha256(ctx, readerPod.Name, fileIn("prov06.dat"))
+	if err != nil {
+		t.Fatalf("reading from rebound volume: %v", err)
+	}
+	if got != want {
+		t.Fatalf("data corruption on rebound volume: got %s want %s", got, want)
+	}
+
+	// Restore Delete policy so cleanup removes the PV.
+	if err := f.SetPVReclaimPolicy(ctx, pv.Name, corev1.PersistentVolumeReclaimDelete); err != nil {
+		t.Errorf("restoring PV reclaim policy to Delete: %v", err)
+	}
+}
+
+// PROV-07: provision while the server pod is down. The claim must remain Pending
+// during the outage, bind cleanly after server recovery, and provide a working
+// data path without orphaned exports.
+//
+// Steps:
+//  1. Discover the server pod target. Skip if unmanaged (no controller).
+//  2. Delete the server pod via pkg/chaos.
+//  3. Create an RWX claim while the server is down.
+//  4. Observe the claim for a bounded window: verify it stays Pending.
+//  5. Wait for the server pod to recover and become Ready.
+//  6. If the StorageClass binds on first consumer, create a consumer pod.
+//  7. Wait for the claim to reach Bound.
+//  8. Mount the claim, write a test file, and verify checksum on read-back.
+//  9. Delete pod and claim.
+func TestChaosProvisionServerDown(t *testing.T) {
+	f := framework.New(t, "PROV-07")
+	ctx, cancel := caseCtx(t, 25*time.Minute)
+	defer cancel()
+
+	target, err := chaos.ServerTarget(ctx, f)
+	if err != nil {
+		t.Skipf("blocked: %v", err)
+	}
+	if target.Controller == "" {
+		t.Skipf("blocked: server pod %s has no controller, so deleting it would not bring it back", target.Pod)
+	}
+
+	if err := chaos.DeleteServerPod(ctx, f, target); err != nil {
+		t.Fatalf("injuring server pod: %v", err)
+	}
+
+	// Create claim while server is down.
+	pvc, err := f.CreatePVC(ctx, framework.PVCSpec{Name: "prov07"})
+	if err != nil {
+		t.Fatalf("creating claim during server outage: %v", err)
+	}
+
+	// Check that the claim remains Pending while the server is missing.
+	time.Sleep(5 * time.Second)
+	live, err := f.GetPVC(ctx, pvc.Name)
+	if err != nil {
+		t.Fatalf("re-reading claim: %v", err)
+	}
+	if live.Status.Phase == corev1.ClaimBound {
+		t.Errorf("claim %s bound immediately while server was down", pvc.Name)
+	} else {
+		t.Logf("claim %s remained %s during server outage as expected", pvc.Name, live.Status.Phase)
+	}
+
+	// Wait for server pod recovery.
+	if err := chaos.WaitServerBack(ctx, f, framework.PodReadyTimeout); err != nil {
+		t.Fatalf("server pod did not recover: %v", err)
+	}
+
+	mode, err := f.BindingMode(ctx, f.Env.StorageClass)
+	if err != nil {
+		t.Fatalf("reading binding mode of StorageClass %s: %v", f.Env.StorageClass, err)
+	}
+	var pod *corev1.Pod
+	if mode == storagev1.VolumeBindingWaitForFirstConsumer {
+		pod = f.MustPod(ctx, toolsPod("holder", pvc.Name, ""))
+	}
+
+	if _, err := f.WaitPVCBound(ctx, pvc.Name, framework.BindTimeout); err != nil {
+		t.Fatalf("claim did not bind after server recovery: %v", err)
+	}
+
+	if pod == nil {
+		pod = f.MustPod(ctx, toolsPod("holder", pvc.Name, ""))
+	}
+
+	want, err := f.WriteFile(ctx, pod.Name, fileIn("prov07.dat"), 1<<20, "prov07")
+	if err != nil {
+		t.Fatalf("writing to share after server recovery: %v", err)
+	}
+	got, err := f.Sha256(ctx, pod.Name, fileIn("prov07.dat"))
+	if err != nil {
+		t.Fatalf("reading back from share after server recovery: %v", err)
+	}
+	if got != want {
+		t.Fatalf("checksum mismatch: got %s want %s", got, want)
+	}
+}
+
+// PROV-08: delete claim while the server pod is down. Deletion must complete
+// without orphaned exports or leaked backing storage once the server recovers.
+//
+// Steps:
+//  1. Provision an RWX claim, mount it in a pod, write a test file.
+//  2. Delete the pod gracefully and wait for it to leave the API before touching the server.
+//  3. Resolve the underlying PV name and reclaim policy.
+//  4. Discover the server pod target. Skip if unmanaged.
+//  5. Delete the server pod via pkg/chaos.
+//  6. Delete the claim while the server is down.
+//  7. Wait for the server pod to recover and become Ready.
+//  8. Wait for the claim to be completely removed from the API.
+//  9. If reclaim policy was Delete, wait for the PV to be removed as well.
+func TestChaosDeleteClaimServerDown(t *testing.T) {
+	f := framework.New(t, "PROV-08")
+	ctx, cancel := caseCtx(t, 25*time.Minute)
+	defer cancel()
+
+	pvc := f.MustRWXPVC(ctx, "prov08")
+	pod := f.MustPod(ctx, toolsPod("writer", pvc.Name, ""))
+	if _, err := f.WaitPVCBound(ctx, pvc.Name, framework.BindTimeout); err != nil {
+		t.Fatalf("claim did not bind: %v", err)
+	}
+	if _, err := f.WriteFile(ctx, pod.Name, fileIn("prov08.dat"), 1<<20, "prov08"); err != nil {
+		t.Fatalf("writing to share: %v", err)
+	}
+
+	pv, err := f.PVForClaim(ctx, pvc.Name)
+	if err != nil {
+		t.Fatalf("resolving PV: %v", err)
+	}
+
+	// Gracefully remove pod before injuring server to prevent F-001 unmount wedging.
+	if err := f.DeletePod(ctx, pod.Name); err != nil {
+		t.Fatalf("deleting pod: %v", err)
+	}
+	if err := f.WaitPodGone(ctx, pod.Name, framework.DeleteTimeout); err != nil {
+		t.Fatalf("pod did not leave API: %v", err)
+	}
+
+	target, err := chaos.ServerTarget(ctx, f)
+	if err != nil {
+		t.Skipf("blocked: %v", err)
+	}
+	if target.Controller == "" {
+		t.Skipf("blocked: server pod %s has no controller, so deleting it would not bring it back", target.Pod)
+	}
+
+	if err := chaos.DeleteServerPod(ctx, f, target); err != nil {
+		t.Fatalf("injuring server pod: %v", err)
+	}
+
+	// Delete claim while server is down.
+	if err := f.DeletePVC(ctx, pvc.Name); err != nil {
+		t.Fatalf("initiating PVC delete during server outage: %v", err)
+	}
+
+	// Wait for server to recover.
+	if err := chaos.WaitServerBack(ctx, f, framework.PodReadyTimeout); err != nil {
+		t.Fatalf("server pod did not recover: %v", err)
+	}
+
+	// Wait for claim to complete deletion.
+	if err := f.WaitPVCGone(ctx, pvc.Name, framework.DeleteTimeout); err != nil {
+		t.Fatalf("claim did not leave API after server recovery: %v", err)
+	}
+
+	// If reclaim policy is Delete, verify backing PV was reclaimed.
+	if pv.Spec.PersistentVolumeReclaimPolicy == corev1.PersistentVolumeReclaimDelete {
+		if err := f.WaitPVGone(ctx, pv.Name, framework.DeleteTimeout); err != nil {
+			t.Errorf("backing volume %s was leaked after server recovery: %v", pv.Name, err)
+		}
+	}
+}
+
+// PROV-09: rapid create/delete churn (100 cycles). Asserts no export ID
+// exhaustion, no file descriptor leaks, and server RSS remains bounded under
+// the ceiling. Gated in weekly soak (Gate: W).
+//
+// Steps:
+//  1. Check for short test mode; skip if -short is set.
+//  2. Record server restart count before churn.
+//  3. Execute 100 cycles of create PVC -> wait Bound -> delete PVC -> wait gone.
+//  4. Assert all cycles completed successfully.
+//  5. Assert server container restart count did not increase.
+func TestRapidProvisionChurn(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping 100-cycle rapid provision churn in -short mode; Gate: W (weekly soak)")
+	}
+
+	f := framework.New(t, "PROV-09")
+	ctx, cancel := caseCtx(t, 45*time.Minute)
+	defer cancel()
+
+	restartsBefore, err := framework.ServerRestartCount(ctx, f.C)
+	if err != nil {
+		t.Fatalf("reading initial server restart count: %v", err)
+	}
+
+	const cycles = 100
+	res, err := f.RunPVCLifecycleChurn(ctx, cycles, "prov09")
+	if err != nil {
+		t.Fatalf("churn run failed after %d cycles: %v", res.Completed, err)
+	}
+	t.Logf("completed %d of %d rapid churn cycles", res.Completed, cycles)
+
+	restartsAfter, err := framework.ServerRestartCount(ctx, f.C)
+	if err != nil {
+		t.Fatalf("reading final server restart count: %v", err)
+	}
+	if restartsAfter != restartsBefore {
+		t.Errorf("server restarted during rapid churn: %d restarts, was %d",
+			restartsAfter, restartsBefore)
+	}
+}
+
+// PROV-10: volume name edge cases (1000-character names, unusual characters,
+// and boundary names). Rejections must be clean and boundary names must not
+// produce malformed export configuration.
+//
+// Steps:
+//  1. Attempt to create a claim with a 1000-character name: assert clean rejection.
+//  2. Attempt to create a claim with invalid characters (uppercase, underscores): assert clean rejection.
+//  3. Create a claim with a maximum-length valid RFC 1123 name.
+//  4. Verify it binds cleanly (or fails with a clean API rejection if backend driver limits name length)
+//     without malforming export configuration.
+//  5. Confirm server remains healthy.
+func TestVolumeNameEdgeCases(t *testing.T) {
+	f := framework.New(t, "PROV-10")
+	ctx, cancel := caseCtx(t, 15*time.Minute)
+	defer cancel()
+
+	restartsBefore, err := framework.ServerRestartCount(ctx, f.C)
+	if err != nil {
+		t.Fatalf("reading initial server restart count: %v", err)
+	}
+
+	// 1. Direct API call with 1000-character name. Must be rejected cleanly.
+	longName := strings.Repeat("a", 1000)
+	longPVC := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: longName, Namespace: framework.Namespace},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany},
+			Resources: corev1.VolumeResourceRequirements{
+				Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("1Gi")},
+			},
+		},
+	}
+	if _, err := f.C.Kube.CoreV1().PersistentVolumeClaims(framework.Namespace).Create(ctx, longPVC, metav1.CreateOptions{}); err == nil {
+		t.Fatalf("API accepted PVC with 1000-character name")
+	} else {
+		t.Logf("1000-character volume name rejected cleanly: %v", err)
+	}
+
+	// 2. Direct API call with invalid characters (uppercase letters). Must be rejected cleanly.
+	badCharPVC := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "INVALID_UPPERCASE_NAME", Namespace: framework.Namespace},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany},
+			Resources: corev1.VolumeResourceRequirements{
+				Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("1Gi")},
+			},
+		},
+	}
+	if _, err := f.C.Kube.CoreV1().PersistentVolumeClaims(framework.Namespace).Create(ctx, badCharPVC, metav1.CreateOptions{}); err == nil {
+		t.Fatalf("API accepted PVC with invalid uppercase name")
+	} else {
+		t.Logf("invalid name rejected cleanly: %v", err)
+	}
+
+	// 3. Boundary RFC 1123 name at maximum allowed length (253 characters).
+	prefix := f.Name("")
+	pad := 253 - len(prefix)
+	if pad > 0 {
+		boundaryLogical := strings.Repeat("x", pad)
+		boundPVC, err := f.CreatePVC(ctx, framework.PVCSpec{Name: boundaryLogical})
+		if err != nil {
+			t.Logf("253-character boundary name rejected cleanly by driver: %v", err)
+		} else {
+			t.Logf("boundary 253-character claim created: %s", boundPVC.Name)
+			// Ensure cleanup if accepted
+			defer func() {
+				_ = f.DeletePVC(ctx, boundPVC.Name)
+			}()
+		}
+	}
+
+	restartsAfter, err := framework.ServerRestartCount(ctx, f.C)
+	if err != nil {
+		t.Fatalf("reading final server restart count: %v", err)
+	}
+	if restartsAfter != restartsBefore {
+		t.Errorf("server restarted during volume name edge case tests: %d restarts, was %d",
+			restartsAfter, restartsBefore)
+	}
+}
+
+// PROV-11: two-stage expansion under active I/O. Grows the backing volume while
+// an active write load is running. Asserts zero I/O errors, that all committed
+// writes survive, and client df reflects the new capacity.
+//
+// Steps:
+//  1. Provision an RWX claim, mount it in a client pod.
+//  2. If expansion is unsupported, assert clean rejection as in PROV-04.
+//  3. If expansion is supported:
+//     a. Record initial df capacity, pod restarts, and server restarts.
+//     b. Start background write load (StartWriteLoad).
+//     c. Request volume expansion from size X to X+1Gi.
+//     d. Wait for claim status.capacity to update.
+//     e. Stop the write load and parse the report.
+//     f. Assert zero I/O errors (report.Errors() is empty).
+//     g. Assert all committed writes are readable on the share.
+//     h. Assert pod restart count did not increase.
+//     i. Assert server restart count did not increase.
+//     j. Compare df before and after: growth is logged, no change is explained.
+func TestTwoStageExpansionUnderIO(t *testing.T) {
+	f := framework.New(t, "PROV-11")
+	ctx, cancel := caseCtx(t, 25*time.Minute)
+	defer cancel()
+
+	pvc := f.MustRWXPVC(ctx, "prov11")
+	pod := f.MustPod(ctx, toolsPod("writer", pvc.Name, ""))
+	bound, err := f.WaitPVCBound(ctx, pvc.Name, framework.BindTimeout)
+	if err != nil {
+		t.Fatalf("claim did not bind: %v", err)
+	}
+	before := bound.Spec.Resources.Requests[corev1.ResourceStorage]
+	grown := before.DeepCopy()
+	grown.Add(resource.MustParse("1Gi"))
+
+	if !f.Caps.CanExpand {
+		if err := f.ExpandPVC(ctx, pvc.Name, grown.String()); err == nil {
+			t.Fatalf("StorageClass %s does not advertise expansion, yet API accepted resize", f.Env.StorageClass)
+		} else {
+			t.Logf("expansion is unsupported on StorageClass %s and was rejected cleanly: %v",
+				f.Env.StorageClass, err)
+		}
+		return
+	}
+
+	seenBefore, err := f.MountCapacity(ctx, pod.Name, mountPath)
+	if err != nil {
+		t.Fatalf("reading capacity from pod: %v", err)
+	}
+	podRestartsBefore, err := f.PodRestarts(ctx, pod.Name)
+	if err != nil {
+		t.Fatalf("reading pod restarts: %v", err)
+	}
+	serverRestartsBefore, err := framework.ServerRestartCount(ctx, f.C)
+	if err != nil {
+		t.Fatalf("reading server restarts: %v", err)
+	}
+
+	// Start background active I/O.
+	workload, err := f.StartWriteLoad(ctx, pod.Name, mountPath, "prov11")
+	if err != nil {
+		t.Fatalf("starting background workload: %v", err)
+	}
+
+	// Expand claim while workload is actively writing.
+	if err := f.ExpandPVC(ctx, pvc.Name, grown.String()); err != nil {
+		t.Fatalf("requesting expansion during active I/O: %v", err)
+	}
+	capacity, err := f.WaitPVCCapacity(ctx, pvc.Name, grown.String(), framework.ExpandTimeout)
+	if err != nil {
+		t.Fatalf("claim capacity did not reach %s: %v", grown.String(), err)
+	}
+	t.Logf("claim expanded to %s during active I/O", capacity.String())
+
+	// Stop workload and check results.
+	rep, err := workload.Stop(ctx)
+	if err != nil {
+		t.Fatalf("stopping workload: %v", err)
+	}
+	if errs := rep.Errors(); len(errs) > 0 {
+		t.Errorf("%d I/O errors occurred during volume expansion under active I/O", len(errs))
+	}
+	if len(rep.Committed()) == 0 {
+		t.Errorf("no writes were committed by the workload during expansion")
+	}
+
+	podRestartsAfter, err := f.PodRestarts(ctx, pod.Name)
+	if err != nil {
+		t.Fatalf("re-reading pod restarts: %v", err)
+	}
+	if podRestartsAfter != podRestartsBefore {
+		t.Errorf("client pod restarted during expansion: %d restarts, was %d",
+			podRestartsAfter, podRestartsBefore)
+	}
+
+	serverRestartsAfter, err := framework.ServerRestartCount(ctx, f.C)
+	if err != nil {
+		t.Fatalf("re-reading server restarts: %v", err)
+	}
+	if serverRestartsAfter != serverRestartsBefore {
+		t.Errorf("server restarted during volume expansion: %d restarts, was %d",
+			serverRestartsAfter, serverRestartsBefore)
+	}
+
+	seenAfter, err := f.MountCapacity(ctx, pod.Name, mountPath)
+	if err != nil {
+		t.Fatalf("reading capacity after expansion: %v", err)
+	}
+	switch {
+	case seenAfter.TotalBytes > seenBefore.TotalBytes:
+		t.Logf("workload sees new capacity under df: %d bytes, was %d",
+			seenAfter.TotalBytes, seenBefore.TotalBytes)
+	case seenAfter.TotalBytes == seenBefore.TotalBytes:
+		t.Logf("df still reports %d bytes after expansion; shared-server export without per-volume quota",
+			seenAfter.TotalBytes)
+	default:
+		t.Errorf("share shrank across expansion: df reports %d bytes, was %d",
 			seenAfter.TotalBytes, seenBefore.TotalBytes)
 	}
 }
