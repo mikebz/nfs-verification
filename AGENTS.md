@@ -74,10 +74,29 @@ no way to tell which of its greens were earned.
 
 So the order is: establish what the correct assertion is, from the documents
 below; assert that; and report what this deployment does about it. A deployment
-that cannot meet a correct assertion is a finding about that deployment. It goes
-in `docs/findings.md` and stays red, or reports blocked where the rules for the
-case say blocked, and either way the message says whose configuration produced
-it. What it does not do is change the assertion.
+that cannot meet a correct assertion is a finding about that deployment, and the
+finding is the deliverable: an `F-NNN` entry in `docs/findings.md`, with the
+case citing it in the message it prints. What the case does not do is change the
+assertion.
+
+Which colour that result is depends on what kind of gap it is, and the two are
+read by different people:
+
+- **An absence the deployment could configure away** reports **blocked** citing
+  its entry: no per-volume quota, no declared memory limit, no metrics endpoint,
+  a driver that does not implement an optional capability. Nothing is broken,
+  and nobody should go looking for a bug.
+- **Data that is published and does not hold up** stays **red**: two sources
+  contradicting each other, a reading that does not move when the workload moves
+  it, a guarantee the protocol makes and this server does not keep. No
+  configuration change explains it, and a green run would hide it.
+
+Blocked is not a way to make a run quiet. It is reached by probing live and
+saying what was found, never by a capability flag checked beforehand, which
+gates the case off and takes the finding with it. And a blocked line scrolls
+past while an entry does not, which is why the entry is the part that has to
+exist: a case meeting an absence nothing has recorded yet says so, and writing
+the entry is part of closing out the run.
 
 **State the assumption, and say where it came from.** Every assertion rests on
 something somebody wrote down, and the citation is what lets a reviewer disagree
