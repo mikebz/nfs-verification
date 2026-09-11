@@ -52,11 +52,12 @@ func TestProvProvisionMountWriteDelete(t *testing.T) {
 	t.Logf("claim %s bound to %s on StorageClass %s", pvc.Name, pv.Name, f.Env.StorageClass)
 	want, err := f.WriteFile(ctx, writer.Name, fileIn("prov01.dat"), 1<<20, "prov01")
 	if err != nil {
-		t.Fatalf("writing to the share: %v", err)
+		t.Fatalf("writing to the share from writer pod %s on %s: %v", writer.Name, nodeA, err)
 	}
 	got, err := f.Sha256(ctx, reader.Name, fileIn("prov01.dat"))
 	if err != nil {
-		t.Fatalf("reading back from reader on %s: %v", nodeB, err)
+		t.Fatalf("reader pod %s on %s failed reading file written by writer pod %s on %s (profile %s, want %s): %v",
+			reader.Name, nodeB, writer.Name, nodeA, profile(t).Name, want, err)
 	}
 	if got != want {
 		t.Fatalf("reader on %s did not see what writer on %s closed (profile %s): got %s want %s",
