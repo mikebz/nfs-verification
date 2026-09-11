@@ -107,6 +107,46 @@ const (
 // Convention: grace runs about two lease periods.
 func GraceExitBound(p Profile) time.Duration { return 2 * p.Lease }
 
+// LockReleaseBound is the longest a lock held by a client that vanished may
+// stay held before another client can take the range.
+//
+// One lease period. The Linux NFSv4 client establishes a single lease on each
+// server it accesses, shared by every mount and every pod on that node
+// (Documentation/filesystems/nfs/client-identifier.rst), and that lease is the
+// only thing that releases state nothing closed.
+//
+// It is an upper bound, never an expectation. A pod dying closes its
+// descriptors and the lock goes in about a second with no lease expiring; a
+// node dying closes nothing and every pod's locks on it wait out the lease. A
+// case that asserted expiry would fail on a healthy cluster, and one that
+// asserted promptness would fail wherever kubelet was slow to kill, for reasons
+// that have nothing to do with NFS. The bound holds under both, which is why it
+// is the bound the plan states.
+func LockReleaseBound(p Profile) time.Duration { return p.Lease }
+
+// ObservationMargin is how far past a bound a case keeps watching before it
+// gives up.
+//
+// A case that stops at its own SLO reports "timed out" where it could report
+// how long the thing actually took, and the second is what a defect report
+// needs. It is a diagnostic allowance, never part of any assertion: the bound
+// decides pass or fail, and this only decides how much is known about a
+// failure.
+//
+// Named here rather than written as a literal in each case, so that it cannot
+// drift out of step with the bounds beside it.
+const ObservationMargin = 5 * time.Minute
+
+// PromptLockRelease separates the two mechanisms that can release such a lock,
+// so that a pass says which one was observed rather than only that the bound
+// held. Below it the descriptors closed and the client sent LOCKU; near the
+// lease the client never noticed and the lease expired.
+//
+// A run where every release is at the lease boundary is a different cluster
+// from one where every release is prompt, and the pass looks identical without
+// this. Deliberately loose: it classifies a log line, it gates nothing.
+const PromptLockRelease = 5 * time.Second
+
 // ClockSkewGuard narrows a window whose two ends were stamped by different
 // clocks. A grace window is stamped by the kubelet on the server's node; a lock
 // attempt is stamped by the client pod that made it, on another node. There is

@@ -220,8 +220,9 @@ func TestOpenWriteScriptHoldsAndCloses(t *testing.T) {
 	waitForState(t, state, "closed")
 }
 
-// waitForState polls the writer's state file, which is how Close and
-// HoldOpenWrite know the descriptor reached the state they asked for.
+// waitForState polls a background worker's state file, which is how Close,
+// HoldOpenWrite and the lock holders know the thing they started reached the
+// state they asked for.
 func waitForState(t *testing.T, path, want string) {
 	t.Helper()
 	deadline := time.Now().Add(30 * time.Second)
@@ -236,7 +237,7 @@ func waitForState(t *testing.T, path, want string) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	t.Fatalf("writer state is %q after 30s, want %q", last, want)
+	t.Fatalf("the state file says %q after 30s, want %q", last, want)
 }
 
 // lookOrSkip skips the test unless every named tool is on this machine, and

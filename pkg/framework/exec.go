@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"regexp"
 	"strings"
 
@@ -29,11 +30,27 @@ func (r ExecResult) Combined() string {
 // test itself: callers decide whether a non-zero exit is a defect or the
 // expected result, which matters because several cases assert on failure.
 func (c *Client) Exec(ctx context.Context, ns, pod, container string, argv ...string) ExecResult {
+	return c.exec(ctx, ns, pod, container, nil, argv...)
+}
+
+// ExecStdin runs argv with stdin attached, which is how a file reaches a pod
+// without an image to carry it: the exec stream is binary-clean, so a binary
+// goes in as bytes with no encoding step and no tool in the container beyond
+// the shell redirect that receives it.
+func (c *Client) ExecStdin(ctx context.Context, ns, pod, container string, stdin io.Reader, argv ...string) ExecResult {
+	if stdin == nil {
+		return ExecResult{Err: fmt.Errorf("ExecStdin called with no reader; use Exec"), ExitCode: -1}
+	}
+	return c.exec(ctx, ns, pod, container, stdin, argv...)
+}
+
+func (c *Client) exec(ctx context.Context, ns, pod, container string, stdin io.Reader, argv ...string) ExecResult {
 	req := c.Kube.CoreV1().RESTClient().Post().
 		Resource("pods").Name(pod).Namespace(ns).SubResource("exec").
 		VersionedParams(&corev1.PodExecOptions{
 			Container: container,
 			Command:   argv,
+			Stdin:     stdin != nil,
 			Stdout:    true,
 			Stderr:    true,
 		}, scheme.ParameterCodec)
@@ -43,7 +60,11 @@ func (c *Client) Exec(ctx context.Context, ns, pod, container string, argv ...st
 		return ExecResult{Err: fmt.Errorf("creating executor: %w", err), ExitCode: -1}
 	}
 	var stdout, stderr bytes.Buffer
-	err = exec.StreamWithContext(ctx, remotecommand.StreamOptions{Stdout: &stdout, Stderr: &stderr})
+	opts := remotecommand.StreamOptions{Stdout: &stdout, Stderr: &stderr}
+	if stdin != nil {
+		opts.Stdin = stdin
+	}
+	err = exec.StreamWithContext(ctx, opts)
 	res := ExecResult{Stdout: stdout.String(), Stderr: stderr.String()}
 	if err != nil {
 		res.Err = err

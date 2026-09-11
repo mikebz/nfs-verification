@@ -102,3 +102,30 @@ func TestGraceExitBoundIsTwoLeases(t *testing.T) {
 		t.Errorf("got %s, want %s", got, want)
 	}
 }
+
+// TestLockReleaseBoundIsOneLease covers the bound DATA-06 asserts against: a
+// lock held by a client that vanished becomes available inside one lease
+// period.
+//
+// One lease, not one grace period and not a literal. The Linux NFSv4 client
+// keeps a single lease per server per node, and that lease is the only thing
+// that releases state nothing closed.
+//
+// Steps:
+//  1. Take the bound under each profile.
+//  2. Assert it is that profile's lease, so the case measures against the
+//     configuration preflight pinned rather than against a constant.
+//  3. Assert the prompt-release threshold sits well below both, so that the
+//     classification can tell a descriptor close from a lease expiry on either.
+func TestLockReleaseBoundIsOneLease(t *testing.T) {
+	for _, p := range Profiles() {
+		if got := LockReleaseBound(p); got != p.Lease {
+			t.Errorf("the lock release bound on the %s profile is %s, want its %s lease", p.Name, got, p.Lease)
+		}
+		if PromptLockRelease >= p.Lease {
+			t.Errorf("the prompt-release threshold %s is not below the %s profile's %s lease, so a "+
+				"lease expiry and a descriptor close would classify the same way",
+				PromptLockRelease, p.Name, p.Lease)
+		}
+	}
+}

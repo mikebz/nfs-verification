@@ -26,6 +26,41 @@ func (f *Framework) Sha256(ctx context.Context, pod, path string) (string, error
 		fmt.Sprintf("sha256sum %s | cut -d' ' -f1", shellQuote(path)))
 }
 
+// FileIdentity returns a file's device and inode as a pod sees them.
+//
+// It is how a lock line in /proc/locks is matched to the file a case locked.
+// The table covers every file on every filesystem on the node, so neither a
+// byte range nor an inode number alone is identity: the same offsets in another
+// file, or the same inode number on another device, would satisfy an assertion
+// that compared only one of them.
+//
+// A device that cannot be read is not an error. stat's device field is the one
+// part of this a stripped-down image might not print, and an identity with only
+// an inode still rules out almost everything; the caller reports that it is
+// matching on less.
+func (f *Framework) FileIdentity(ctx context.Context, pod, path string) (FileID, error) {
+	out, err := f.C.MustSh(ctx, Namespace, f.Name(pod), "main",
+		fmt.Sprintf("stat -c '%%i %%d' %s", shellQuote(path)))
+	if err != nil {
+		return FileID{}, err
+	}
+	fields := strings.Fields(out)
+	if len(fields) == 0 {
+		return FileID{}, fmt.Errorf("stat reported nothing for %s", path)
+	}
+	inode, err := strconv.ParseInt(fields[0], 10, 64)
+	if err != nil {
+		return FileID{}, fmt.Errorf("stat reported %q as the inode of %s, which is not a number", out, path)
+	}
+	id := FileID{Inode: inode}
+	if len(fields) > 1 {
+		if dev, err := strconv.ParseUint(fields[1], 10, 64); err == nil {
+			id.Device = DeviceFromStatDev(dev)
+		}
+	}
+	return id, nil
+}
+
 // Quote exposes shell quoting to test packages building their own scripts.
 func Quote(s string) string { return shellQuote(s) }
 
@@ -209,4 +244,70 @@ func parseDF(out string) (Capacity, error) {
 		return Capacity{}, fmt.Errorf("unexpected available count in df line %q: %w", lines[len(lines)-1], err)
 	}
 	return Capacity{TotalBytes: total * 1024, AvailBytes: avail * 1024}, nil
+}
+
+// Direct I/O bypasses the page cache on both ends, which is the only way a
+// case can say that what it read came from the server rather than from the
+// client that wrote it. A read that returns zeros never crossed.
+//
+// Both helpers assume the flags parse. Probe with ProbeDirectIO first: an image
+// whose dd was built without FEATURE_DD_IBS_OBS reports blocked rather than
+// failing, because a missing flag is a fact about the image and not a defect in
+// the storage.
+
+// WriteDirect writes one block of deterministic content at a block offset with
+// O_DIRECT, and returns the block's sha256.
+//
+// The block is built on the pod's own filesystem and copied into place, because
+// a direct write needs a whole aligned block from a file rather than a stream.
+// conv=notrunc so that a pod writing a later block does not remove an earlier
+// one written by another pod.
+func (f *Framework) WriteDirect(ctx context.Context, pod, path, seed string, block, offset int) (string, error) {
+	script := fmt.Sprintf(
+		`set -e; mkdir -p "$(dirname %[1]s)"; `+
+			`yes %[2]s | head -c %[3]d > /tmp/nfsv-direct-block; `+
+			`dd if=/tmp/nfsv-direct-block of=%[1]s bs=%[3]d count=1 seek=%[4]d oflag=direct conv=notrunc 2>/dev/null; `+
+			`sha256sum /tmp/nfsv-direct-block | cut -d' ' -f1`,
+		shellQuote(path), shellQuote(seed), block, offset)
+	return f.C.MustSh(ctx, Namespace, f.Name(pod), "main", script)
+}
+
+// CountNonZeroBytes reads one block at a block offset and returns how many of
+// its bytes are not zero.
+//
+// The read lands in a file before it is counted, for the reason ReadDirect does
+// the same: a POSIX pipeline reports its last command's status, so piping a
+// failed read into a counter yields a confident zero, and "the hole read back
+// as zeros" would be indistinguishable from "the hole could not be read".
+func (f *Framework) CountNonZeroBytes(ctx context.Context, pod, path string, block, offset int) (int, error) {
+	const scratch = "/tmp/nfsv-hole-read"
+	out, err := f.C.MustSh(ctx, Namespace, f.Name(pod), "main", fmt.Sprintf(
+		`set -e; dd if=%s of=%s bs=%d count=1 skip=%d 2>/dev/null; tr -d '\000' < %s | wc -c`,
+		shellQuote(path), shellQuote(scratch), block, offset, shellQuote(scratch)))
+	if err != nil {
+		return 0, err
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(out))
+	if err != nil {
+		return 0, fmt.Errorf("counting the non-zero bytes of block %d of %s: the pod said %q", offset, path, out)
+	}
+	return n, nil
+}
+
+// ReadDirect reads one block at a block offset with O_DIRECT and returns its
+// sha256, as that pod sees it.
+//
+// The read lands in a file on the pod's own filesystem before it is hashed,
+// rather than being piped straight into sha256sum. A POSIX pipeline reports the
+// status of its last command, so a failed direct read would be hashed as an
+// empty stream and come back as a valid-looking checksum of nothing. The case
+// would then report a data mismatch where the truth is that the read failed,
+// which is a different defect filed against a different owner.
+func (f *Framework) ReadDirect(ctx context.Context, pod, path string, block, offset int) (string, error) {
+	const scratch = "/tmp/nfsv-direct-read"
+	script := fmt.Sprintf(
+		`set -e; dd if=%s of=%s bs=%d count=1 skip=%d iflag=direct 2>/dev/null; `+
+			`sha256sum %s | cut -d' ' -f1`,
+		shellQuote(path), shellQuote(scratch), block, offset, shellQuote(scratch))
+	return f.C.MustSh(ctx, Namespace, f.Name(pod), "main", script)
 }

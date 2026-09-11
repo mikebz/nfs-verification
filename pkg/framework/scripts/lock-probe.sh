@@ -19,7 +19,7 @@
 #   run-file       the probe stops once this is removed
 #   log-file       one "OK <index> <epoch>" or "ERR <index> <epoch>" per attempt,
 #                  where OK means the lock was granted
-#   wait-seconds   how long one attempt waits for the lock before giving up
+#   wait-seconds   how long one attempt keeps retrying before giving up
 #   bound-seconds  hard bound on one attempt, in case the client blocks in the
 #                  kernel rather than returning
 #
@@ -48,8 +48,12 @@ if [ "${NFSV_WORKER:-}" = "" ]; then
 fi
 
 # A blocked NFS client can sit in the kernel rather than returning the server's
-# retryable error, so the attempt gets a hard bound as well as flock's own wait.
-# Where busybox carries no timeout, flock's wait is the only bound there is.
+# retryable error, so the attempt gets a hard bound as well as its own wait.
+#
+# The wait is a retry loop around flock -n rather than flock -w: busybox flock
+# has no -w, and passing it makes every attempt fail on a usage error, which
+# reads as a refusal and makes this probe's assertion vacuous. -n is carried by
+# busybox and by util-linux alike, so one loop serves both images.
 if command -v timeout >/dev/null 2>&1; then
 	bounded="timeout $bound"
 else
@@ -59,7 +63,13 @@ fi
 i=0
 while [ -f "$run" ]; do
 	i=$((i + 1))
-	if $bounded sh -c 'exec 9>>"$1"; flock -w "$2" -x 9' probe "$path" "$wait" >/dev/null 2>&1; then
+	if $bounded sh -c '
+		end=$(( $(date +%s) + $2 ))
+		while :; do
+			( exec 9>>"$1"; flock -n -x 9 ) && exit 0
+			[ "$(date +%s)" -lt "$end" ] || exit 1
+			sleep 1
+		done' probe "$path" "$wait" >/dev/null 2>&1; then
 		echo "OK $i $(date +%s)" >> "$log"
 	else
 		echo "ERR $i $(date +%s)" >> "$log"

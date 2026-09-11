@@ -19,13 +19,14 @@ the fault injection engine, and grace observability. The remaining cases land in
 |---|---|
 | `pkg/slo` | Timing and correctness targets, and the two lease/grace profiles |
 | `pkg/env` | The environment record written to `artifacts/<run-id>/environment.json` |
-| `pkg/framework` | Clients, per-case fixture, pods and PVCs from embedded manifests, exec, locks and the lock probe, the grace observer, the privileged node agent, artifact collection |
+| `pkg/framework` | Clients, per-case fixture, pods and PVCs from embedded manifests, exec, locks and the lock probe, locktool delivery, the grace observer, the privileged node agent, artifact collection |
 | `pkg/framework/manifests` | The YAML the suite applies: the client pod and the node agent DaemonSet |
 | `pkg/framework/scripts` | The shell the suite runs inside pods, as scripts rather than as Go strings |
 | `pkg/chaos` | The fault operations the CHAOS cases inject |
 | `pkg/preflight` | Section 0 checks and all discovery |
 | `test/e2e` | The cases; each names its plan ID in the comment above it |
 | `cmd/preflight` | `make preflight` |
+| `cmd/locktool` | The byte-range lock tool the lock cases stream into a pod; `make locktool` |
 
 [`AGENTS.md`](AGENTS.md) is the guide for working in this repository: how to
 approach a change, how to write a case, what to claim when you are done.
@@ -33,9 +34,10 @@ approach a change, how to write a case, what to claim when you are done.
 ## Running
 
 ```sh
-make all                                                  # fmt, vet, unit, build
+make all                                                  # fmt, vet, unit, build, locktool
 make check-fmt                                            # verify formatting without modifying
 make unit                                                 # harness unit tests, no cluster
+make locktool                                             # build bin/locktool-linux-{amd64,arm64}
 make preflight      FLAGS="-storage-class=nfs -lease-seconds=60 -grace-seconds=90"
 make test-prov      FLAGS="-storage-class=nfs -lease-seconds=60 -grace-seconds=90"
 make test-data      FLAGS="-storage-class=nfs -lease-seconds=60 -grace-seconds=90"
@@ -43,7 +45,7 @@ make test-chaos     FLAGS="-storage-class=nfs -lease-seconds=60 -grace-seconds=9
 make test-obs       FLAGS="-storage-class=nfs -lease-seconds=60 -grace-seconds=90"
 make test-sec       FLAGS="-storage-class=nfs -lease-seconds=60 -grace-seconds=90"
 make test-e2e       FLAGS="-storage-class=nfs -lease-seconds=60 -grace-seconds=90"
-make clean                                                # remove artifacts/
+make clean                                                # remove artifacts/ and bin/
 ```
 
 Everything goes through `make`. The targets carry the flags, the timeouts and
@@ -52,6 +54,16 @@ the run ID, so a result reported from a target is one anyone else can reproduce.
 the generated run ID. `make unit` needs no cluster, no network and no
 kubeconfig, and unit tests must stay that way: a test under `pkg/` that needs a
 cluster belongs in `test/e2e` behind a capability check.
+
+`make test-data` injects faults. DATA-12 and DATA-13 kill the NFS server
+process, because the suite sorts strictly by category and they are DATA cases;
+`test-prov` and `test-obs` are already in the same position. Only `make unit`
+and `make preflight` leave the cluster alone.
+
+Soak is not a category, and this suite is not doing soak testing for now.
+DATA-14, the one case that would have needed an hour and a target of its own, is
+deferred; Section 3.2 of the test plan says why, and the short version is that
+the suite's soak is SCALE-07 and belongs to a section nobody is working yet.
 
 E2E tests are organized strictly by category: `test-prov` runs provisioning cases
 (`-run '^TestProv'`), `test-data` runs data consistency cases (`-run '^TestData'`),
@@ -65,6 +77,14 @@ teardown deletes exactly that selector, pods first and then claims. The full run
 ID stays in the name: truncating it collides across runs and turns triage into
 guesswork. The node agent is privileged by design, so a cluster enforcing a
 restricted Pod Security level on `default` cannot run the suite as it stands.
+
+`make locktool` cross-compiles `cmd/locktool` into `bin/locktool-linux-<arch>`
+with `CGO_ENABLED=0`, one per node architecture. `make all` runs it, so a
+contributor who never touches a cluster still compiles it. The lock cases read
+the target node's architecture, stream the matching binary into the ordinary
+client pod over `pods/exec`, and verify it by checksum on the far side; a node
+whose architecture has no built binary reports blocked and names this target.
+`bin/` is git-ignored, so the binaries are never committed.
 
 Preflight runs once per cluster. A passing result is cached at
 `<repo>/artifacts/preflight-<context>.json`, keyed by kubeconfig context, and
@@ -126,14 +146,22 @@ charged to every case eats the `go test -timeout` budget for the package.
 | DATA-02 | Four pods appending to one file through a held-open descriptor | DATA |
 | DATA-03 | Close-to-open across two nodes | DATA |
 | DATA-04 | The negative of DATA-03: what a reader may see before the writer closes | DATA |
-| DATA-05 | flock mutual exclusion across two nodes, clean handover on release | DATA |
+| DATA-05 | flock and byte-range mutual exclusion across two nodes | DATA |
+| DATA-06 | A byte-range lock held by a force-deleted pod, released inside one lease | DATA |
+| DATA-07 | One file written and read O_DIRECT by two pods on two nodes | DATA |
+| DATA-08 | The same export mounted twice, once with noac: visibility without a close | DATA |
+| DATA-09 | Silly rename, cross-node unlink and rename under a held descriptor | DATA |
+| DATA-10 | A 100k-entry directory listed while another pod deletes from it | DATA |
+| DATA-11 | Sparse write and read back; the hole punch recorded, not asserted, on 4.1 | DATA |
+| DATA-12 | fsync durability: every committed record intact after a server kill | DATA |
+| DATA-13 | Negative durability: un-fsynced records may be absent, never wrong | DATA |
 | SEC-01 | uid and gid preservation across pods on two nodes | SEC |
 | SEC-02 | What the export does to a root-owned write, and whether it does it coherently | SEC |
 | OBS-04 | A mount that cannot succeed reaches the operator as a Kubernetes Event | OBS |
 | CHAOS-01 | SIGKILL the server process during an active write | CHAOS |
 | CHAOS-02 | Delete the server pod during an active write, with a lock held across it | CHAOS |
 | CHAOS-05 | Five failovers in a row, each recovering on its own and entering grace once | CHAOS |
-| CHAOS-06 | Locks held on several files across a failover, reclaimed and still exclusive | CHAOS |
+| CHAOS-06 | Whole-file and disjoint byte-range locks across a failover, read from both ends | CHAOS |
 | CHAOS-07 | A second client attempting a new lock while the server is in grace | CHAOS |
 | OBS-02 | A failover reaches the operator with a timestamp and a measurable duration | OBS |
 | OBS-03 | Grace entry and exit are both observable, and the window is measurable | OBS |
@@ -157,11 +185,13 @@ CHAOS-05 records the wall clock over its five cycles and does not assert on it:
 on the default profile grace alone is ninety seconds, so five lawful recoveries
 do not fit inside the ten minutes the plan names, and a case that asserted it
 would fail with no defect present. Each cycle is asserted against the restart
-SLO instead. CHAOS-06 takes whole-file locks, which a Linux NFSv4 client sends
-to the server as a lock over the whole byte range, so reclaim and exclusivity
-travel the same protocol path a sub-file range would; two clients holding
-disjoint ranges of one file needs the `locktool` binary that arrives with
-DATA-06. CHAOS-07 reports **blocked** when the server does not make grace
+SLO instead. CHAOS-06 takes locks in both shapes: whole-file, which a Linux
+NFSv4 client sends to the server as a lock over the whole byte range, and
+disjoint sub-file ranges from two clients on one file, which is the only thing a
+byte range adds. It reads both ends of every lock afterwards, the server through
+`F_GETLK` and the client through `/proc/locks`, because a client that believes
+it holds a range the server has forgotten is visible only as the disagreement
+between them. CHAOS-07 reports **blocked** when the server does not make grace
 observable, because there is then no window to place a lock grant inside or
 outside of, and OBS-03 is the case that fails for that missing signal.
 
@@ -227,7 +257,7 @@ answer them:
 | `-storage-class` | pinning the class under test | optional: preflight otherwise probes each class by asking it for an RWX volume and mounting it from two nodes |
 | `-pvc-size` | claim size | defaults to 1Gi: a backing volume that cannot satisfy the request fails every case, and no case here needs more |
 | `-refresh-preflight` | forcing rediscovery | the cached result is reused until it ages out |
-| `-tools-image` | client pods and the node agent | needs `dd`, `sha256sum`, `flock`, `stat` and `nsenter`; defaults to `alpine:3.20`, whose busybox carries all five |
+| `-tools-image` | client pods and the node agent | needs `dd`, `sha256sum`, `flock`, `stat` and `nsenter`; defaults to `alpine:3.20`, whose busybox carries all five. DATA-07 and DATA-11 probe two things this image may not have, `dd`'s `oflag=direct` and `fallocate`'s `-p`, and report blocked naming this flag rather than filing a tool gap as a protocol gap |
 | `-server-process` | CHAOS-01 | derived from the server container's command; a server started through a shell wrapper or an image entrypoint hides it, and the case reports blocked rather than signalling the wrong process |
 | `-grace-enter-pattern`, `-grace-exit-pattern` | OBS-03, CHAOS-05, CHAOS-07 | nothing in the Kubernetes API states how a server words grace entry and exit; the built-in rule covers the common wordings, and these state it for a server it does not. Set both or neither: one alone would report every failover as a grace re-entry loop |
 | `-root-squash` | SEC-02 | nothing in the Kubernetes API states the export's squash setting; without it the case records what the export does instead of asserting a value nobody stated |
@@ -261,6 +291,20 @@ here would silently invalidate every timing assertion.
 
 The harness compiles, `go vet` is clean, and the unit tests in `pkg/slo` and
 `pkg/framework` pass.
+
+The data path cases were run against a three-worker GKE cluster on 2026-09-11,
+on Kubernetes v1.37 with the in-cluster `nfs-server-provisioner`. DATA-05
+through DATA-09, DATA-11, DATA-12, DATA-13 and CHAOS-06 passed, along with the
+SEC, OBS and CHAOS cases alongside them. DATA-11's hole-punch half reported
+blocked, which is the documented answer on a busybox image.
+
+Two things that suite does not cover today. **DATA-10 has not been run**, so
+whether a directory-backed export holds 100k entries is still unmeasured. And
+**DATA-14 is deferred**, so nothing covers sustained mixed load at scale; that
+gap belongs to SCALE-07. Section 3.2 of the test plan has the reasoning.
+
+An earlier run found two cases reporting more than they had measured; both are
+fixed and the reasoning is F-007.
 
 Notable findings from running the suite against real clusters are recorded in
 [`docs/findings.md`](docs/findings.md).

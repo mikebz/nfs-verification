@@ -8,6 +8,211 @@ New entries go at the top.
 
 ---
 
+## F-008: `nfs-server-provisioner` never announces grace, so the grace cases cannot run against it
+
+**Found:** 2026-09-11, GKE cluster `gke-w1`, Kubernetes v1.37, StorageClass `nfs`
+backed by `cluster.local/nfs-provisioner-nfs-server-provisioner:v4.0.8`. First
+run of CHAOS-07 on this deployment.
+
+**Severity:** none for the cluster, high for what can be concluded from a run on
+it. A whole class of assertion is unreachable here and the results do not look
+empty, they look green.
+
+### What happened
+
+CHAOS-07 ran for 366 seconds and reported blocked: the server emits no grace
+entry or exit line that the log stream can classify, so there is no window to
+place a lock grant inside or outside of.
+
+The case is right to report blocked rather than fail. What it cannot do is
+assert the thing it exists for.
+
+### Why
+
+Grace is the dominant term in every failover measurement in this plan, and the
+only way a client-side harness can see it is a signal the server chooses to
+emit. This provisioner emits none that the built-in wording rule matches, and
+`-grace-enter-pattern` cannot help unless someone first establishes that a line
+exists to match.
+
+### What it means for a run on this deployment
+
+Three assertions are out of reach, and two of them are silent about it:
+
+- **CHAOS-07** reports blocked, visibly. Nothing was learned about whether the
+  server bars new lock acquisition during grace.
+- **OBS-03** is the case that *fails* for this rather than skipping, and it
+  should be run here to put the finding on the record where an operator sees it.
+- **Every grace-window narrowing elsewhere** falls back to whatever the case
+  does without a window. CHAOS-06's reclaim assertion does not need one, which
+  is why it passed.
+
+The SLO profile on this run was the default one (60s lease, 90s grace) taken
+from flags, not from discovery. That is the documented fallback and it is sound,
+but it is worth stating that on this deployment the grace value is *declared*
+rather than observed, so a failover measured against it is measured against a
+number nobody confirmed.
+
+### What changed
+
+No code. This is a property of the deployment, and both cases already report it
+correctly. It is recorded so that a green CHAOS run against this provisioner is
+not read as evidence that grace behaves.
+
+---
+
+## F-007: Two cases in the data path phase reported results they had not measured
+
+**Found:** 2026-09-11, GKE cluster `gke-w1` with three workers, first real run of
+the step 6 cases from [PR #14](https://github.com/mikebz/nfs-verification/pull/14).
+
+**Severity:** high for the suite, none for the cluster. Both cases were green,
+and neither was wrong about anything it claimed. They were wrong about how much
+they had claimed.
+
+### What happened
+
+Every case in the phase that could run did: DATA-05 through DATA-09 and DATA-12
+and DATA-13 passed, DATA-11 skipped, DATA-14 skipped for want of an image, and
+CHAOS-06 passed with both its byte-range subtests. Mount tables on all three
+nodes were at baseline afterwards and nothing leaked.
+
+Two results did not say what they appeared to say.
+
+**DATA-12 verified three records and DATA-13 verified four.** Both passed.
+
+**DATA-11 reported SKIP for thirteen seconds of work.** The sparse write, the
+zero-filled hole, the byte past it and the logical size had all been asserted
+and had all passed before the hole-punch probe stopped the case.
+
+### Why
+
+The durability pair inherited its pre-fault warm-up from the recovery cases,
+which wait for three committed writes and then inject. That is the right warm-up
+for a case measuring an *interruption*: what matters there is that the workload
+was demonstrably running when the fault landed, and the assertion is about the
+gap, not about the records.
+
+The durability pair asserts over the records themselves, so the length of the
+set is the resolution of the measurement. At one record per second, three
+records is a three second window. DATA-13 is the worse of the two: its entire
+job is to record how many un-fsynced records came back absent or short, and over
+four records on a server whose host page cache survived the SIGKILL it was
+always going to report four correct and document nothing. A pass there looks
+identical to a pass over a set large enough to mean something.
+
+DATA-11 was one case with two halves gated by different things, and Go reports a
+case, not a half. The punch probe correctly found that the Alpine image's
+busybox `fallocate` parses `-l` and `-o` only, and correctly reported blocked
+rather than filing a tool gap as a protocol gap. But `t.Skipf` marks the whole
+case skipped whatever ran before it, so the sparse result went in the bin with
+it.
+
+### What changed
+
+The warm-up moved into `awaitRecords`, and the durability pair asks for thirty
+records rather than three. Thirty is a minute of load before the fault; nothing
+asserts on the number, and it is cheap against a case that already waits out a
+server restart. `requireDurabilitySet` fails either case whose set came back
+under ten, because a pass over a handful of records is worse than a failure: it
+looks the same as a real result.
+
+DATA-11 is now two subtests, `sparse-write-and-read-back` and `hole-punch`, so
+the half that can run on a busybox image reports its own result and only the
+half that cannot reports blocked.
+
+### What it says about the harness, not the system under test
+
+Nothing about NFS. It says that "the case passed" and "the case measured
+something" are different claims, and that the suite had no way to tell them
+apart in either of these shapes.
+
+The same pattern had already been caught twice in review on this branch, in
+DATA-05 and CHAOS-06, where a mount option blocking one half would have blocked
+a case that could still run the other. DATA-11 was the third instance and was
+missed because its two halves are gated by an image rather than by a mount
+option. A case with halves that can be blocked separately reports them
+separately; that is now true of every such case in the phase.
+
+The set-size problem is the more general one, and it has no structural fix here.
+A case that asserts over a set it produced has to state how large that set must
+be to carry its conclusion, and fail below it. Only the durability pair does
+that today.
+
+### What the run settled
+
+Four things the design had left open, recorded here because they are facts about
+a real image and a real cluster rather than decisions:
+
+- **busybox `dd` on `alpine:3.20` does carry `oflag=direct`.** DATA-07 passed.
+  Section 5.4 of the design holds, and `locktool` does not need a `dio`
+  subcommand.
+- **busybox `fallocate` does not carry `-p`**, as predicted, so the hole punch
+  is unreachable on the default image whatever the mount version is.
+- **A lock held by a force-deleted pod came back in 2.27 seconds**, which
+  DATA-06 classified as the descriptor-close path rather than lease expiry. On
+  this cluster kubelet is prompt, so an application losing a lock to a dying pod
+  is back in about a second; losing a *node* is the case that costs a lease, and
+  that is CHAOS-03 and SEC-07.
+- **The clone volume did not disturb the dynamic claim that owns the export.**
+  DATA-08 passed and open question 6 of the design is answered for this driver.
+
+Still unmeasured: DATA-10, which did not run, so whether 100k entries fit on a
+directory-backed export is still open; and DATA-14, which needed `-fio-image`.
+
+*Amended 2026-09-11:* DATA-14 was deferred rather than run. It is not a gap
+waiting on an image any more, it is a case this suite is not doing yet, and
+Section 3.2 of the test plan says why.
+
+---
+
+## F-006: `scripts/lock-probe.sh` passed `flock -w`, which busybox does not have
+
+**Found:** 2026-09-11, by reading the applet sources while writing
+[`04-data-path-and-locktool-design.md`](04-data-path-and-locktool-design.md).
+Not found by a run: on a workstation and on the default `alpine:3.20` tools
+image the probe works, because both carry the util-linux `flock`.
+
+**Severity:** high for the suite, none for the cluster. It makes a merged case
+pass while asserting nothing.
+
+### What happened
+
+`lock-probe.sh` ran `flock -w "$wait" -x 9` for each attempt.
+`hold-flock.sh`'s own comment two files away already said busybox `flock` has
+no timeout flag, and the probe contradicted it.
+
+### Why it matters
+
+busybox `util-linux/flock.c` parses `-s`, `-x`, `-u` and `-n` and nothing else.
+On an image carrying the applet, every attempt exits on a usage error before a
+lock is ever requested, so every record in the probe log is `ERR`.
+
+CHAOS-07 asserts **on grants**: no grant inside the grace window, and at least
+one after it. An all-`ERR` log satisfies the first half for free. The second
+half would have failed, which is the only reason this was ever going to be
+noticed, and it would have been read as "the server never resumed granting new
+state" rather than as a broken probe.
+
+### What changed
+
+The attempt is now a retry loop around `flock -n`, bounded by the same
+`wait-seconds` argument. `-n` is carried by busybox and by util-linux alike, so
+one loop serves both images, and the `timeout` bound around the attempt is
+unchanged.
+
+`TestScriptsUseOnlyPortableFlockOptions` now reads every embedded script and
+rejects any `flock` option outside busybox's four. The two existing probe tests
+could not catch this: they run against the workstation's `flock`, which accepts
+`-w`, so a portability defect has to be asserted against the option set rather
+than against behaviour.
+
+### What it says about the harness, not the system under test
+
+Nothing about NFS. It says that "assume nothing beyond busybox" is a rule the
+repository states and had no check for. Every case that reports on grants can
+pass vacuously if its instrument never gets as far as asking, and an instrument
+that fails the same way on every attempt looks exactly like a quiet system.
 ## F-005: Exponential mount propagation in GKE's `mount.nfs` wrapper wedges worker nodes
 
 **Found:** 2026-09-11, GKE cluster with e2-medium worker nodes, running PROV and DATA test suites.
