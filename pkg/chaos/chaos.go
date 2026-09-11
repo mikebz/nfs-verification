@@ -19,6 +19,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/mikebz/nfs-verification/pkg/framework"
 )
@@ -29,6 +30,7 @@ import (
 type Target struct {
 	Namespace string
 	Pod       string
+	UID       types.UID
 	Node      string
 	// Controller is the owning workload, empty when the pod is unmanaged.
 	Controller string
@@ -49,7 +51,7 @@ func ServerTarget(ctx context.Context, f *framework.Framework) (Target, error) {
 			"otherwise there is nothing for a chaos case to injure")
 	}
 	p := &pods[0]
-	t := Target{Namespace: p.Namespace, Pod: p.Name, Node: p.Spec.NodeName, Containers: p.Spec.Containers}
+	t := Target{Namespace: p.Namespace, Pod: p.Name, UID: p.UID, Node: p.Spec.NodeName, Containers: p.Spec.Containers}
 	for _, ref := range p.OwnerReferences {
 		if ref.Controller != nil && *ref.Controller {
 			t.Controller = ref.Kind + "/" + ref.Name
@@ -167,4 +169,41 @@ func DeleteServerPod(ctx context.Context, f *framework.Framework, t Target) erro
 // serves would otherwise be recorded as a recovery.
 func WaitServerBack(ctx context.Context, f *framework.Framework, timeout time.Duration) error {
 	return framework.WaitServersReady(ctx, f.C, timeout)
+}
+
+// WaitServerGone waits for the targeted server pod instance to disappear from the API.
+// For controllers like StatefulSets or DaemonSets where the replacement pod shares the same
+// name, a changed UID confirms the targeted instance was deleted and replaced.
+func WaitServerGone(ctx context.Context, f *framework.Framework, t Target, timeout time.Duration) error {
+	return framework.Poll(ctx, framework.PollInterval, timeout, func(ctx context.Context) (bool, error) {
+		pod, err := f.C.Kube.CoreV1().Pods(t.Namespace).Get(ctx, t.Pod, metav1.GetOptions{})
+		if err != nil {
+			return framework.IgnoreNotFound(err) == nil, nil
+		}
+		if pod.UID != t.UID {
+			return true, nil
+		}
+		if pod.DeletionTimestamp != nil {
+			return false, fmt.Errorf("server pod %s/%s still terminating", t.Namespace, t.Pod)
+		}
+		return false, fmt.Errorf("server pod %s/%s still present", t.Namespace, t.Pod)
+	})
+}
+
+// WaitServerReplaced waits for a replacement server pod instance (with a different UID or name)
+// to become Running and Ready after a fault.
+func WaitServerReplaced(ctx context.Context, f *framework.Framework, old Target, timeout time.Duration) error {
+	return framework.Poll(ctx, framework.PollInterval, timeout, func(ctx context.Context) (bool, error) {
+		pods, err := framework.ServerPods(ctx, f.C)
+		if err != nil {
+			return false, err
+		}
+		for i := range pods {
+			p := &pods[i]
+			if (p.UID != old.UID || p.Name != old.Pod) && framework.PodReady(p) {
+				return true, nil
+			}
+		}
+		return false, fmt.Errorf("no replacement server pod is ready yet")
+	})
 }

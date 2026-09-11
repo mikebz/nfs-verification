@@ -25,6 +25,11 @@ const (
 	// is a control plane round trip through the driver, and on a shared server
 	// it may be a quota change rather than a block resize.
 	ExpandTimeout = 5 * time.Minute
+	// SnapshotProbeTimeout bounds the wait for VolumeSnapshot ready status.
+	SnapshotProbeTimeout = 15 * time.Second
+	// ServerOutageObserveDuration is the window during which claim state is
+	// observed while the server pod is known to be down.
+	ServerOutageObserveDuration = 10 * time.Second
 )
 
 // Poll calls fn until it returns done, an error, or the deadline passes. The

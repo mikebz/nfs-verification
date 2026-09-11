@@ -128,7 +128,7 @@ func WaitServersReady(ctx context.Context, c *Client, timeout time.Duration) err
 			return false, err
 		}
 		for i := range pods {
-			if podReady(&pods[i]) {
+			if PodReady(&pods[i]) {
 				return true, nil
 			}
 		}
@@ -136,7 +136,8 @@ func WaitServersReady(ctx context.Context, c *Client, timeout time.Duration) err
 	})
 }
 
-func podReady(p *corev1.Pod) bool {
+// PodReady reports whether a pod is in PodRunning phase with all containers ready.
+func PodReady(p *corev1.Pod) bool {
 	if p.Status.Phase != corev1.PodRunning {
 		return false
 	}

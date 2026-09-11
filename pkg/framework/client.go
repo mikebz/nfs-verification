@@ -7,6 +7,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -15,8 +16,9 @@ import (
 // Client bundles the typed client and the rest config, which the exec helper
 // needs to open a SPDY stream to a pod.
 type Client struct {
-	Kube kubernetes.Interface
-	Rest *rest.Config
+	Kube    kubernetes.Interface
+	Dynamic dynamic.Interface
+	Rest    *rest.Config
 	// Context is the kubeconfig context in use. It names the cluster a cached
 	// preflight belongs to.
 	Context string
@@ -61,7 +63,12 @@ func NewClient() (*Client, error) {
 			clientErr = fmt.Errorf("building kube client: %w", err)
 			return
 		}
-		client = &Client{Kube: kube, Rest: restCfg, Context: contextName}
+		dyn, err := dynamic.NewForConfig(restCfg)
+		if err != nil {
+			clientErr = fmt.Errorf("building dynamic client: %w", err)
+			return
+		}
+		client = &Client{Kube: kube, Dynamic: dyn, Rest: restCfg, Context: contextName}
 	})
 	return client, clientErr
 }

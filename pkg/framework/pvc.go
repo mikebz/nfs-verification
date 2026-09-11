@@ -10,6 +10,8 @@ import (
 	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/util/retry"
 )
 
@@ -336,4 +338,213 @@ func (f *Framework) CreateBrokenNFSVolume(ctx context.Context, spec BrokenNFSSpe
 		return nil, nil, fmt.Errorf("creating the claim for the broken PV: %w", err)
 	}
 	return created, boundClaim, nil
+}
+
+// SetPVReclaimPolicy changes the reclaim policy on a PersistentVolume.
+func (f *Framework) SetPVReclaimPolicy(ctx context.Context, pvName string, policy corev1.PersistentVolumeReclaimPolicy) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		pv, err := f.C.Kube.CoreV1().PersistentVolumes().Get(ctx, pvName, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		pv.Spec.PersistentVolumeReclaimPolicy = policy
+		_, err = f.C.Kube.CoreV1().PersistentVolumes().Update(ctx, pv, metav1.UpdateOptions{})
+		return err
+	})
+}
+
+// ReleasePV clears the ClaimRef on a retained PersistentVolume so it transitions
+// from Released to Available and can be rebound by a new claim.
+func (f *Framework) ReleasePV(ctx context.Context, pvName string) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		pv, err := f.C.Kube.CoreV1().PersistentVolumes().Get(ctx, pvName, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		pv.Spec.ClaimRef = nil
+		_, err = f.C.Kube.CoreV1().PersistentVolumes().Update(ctx, pv, metav1.UpdateOptions{})
+		return err
+	})
+}
+
+// WaitPVPhase waits for a PersistentVolume to reach the desired phase (e.g. Released or Available).
+func (f *Framework) WaitPVPhase(ctx context.Context, pvName string, phase corev1.PersistentVolumePhase, timeout time.Duration) error {
+	return Poll(ctx, PollInterval, timeout, func(ctx context.Context) (bool, error) {
+		pv, err := f.C.Kube.CoreV1().PersistentVolumes().Get(ctx, pvName, metav1.GetOptions{})
+		if err != nil {
+			return false, err
+		}
+		if pv.Status.Phase == phase {
+			return true, nil
+		}
+		return false, fmt.Errorf("pv %s in phase %s, want %s", pvName, pv.Status.Phase, phase)
+	})
+}
+
+// BindPVToClaim creates a claim explicitly targeting a pre-existing PersistentVolume by name.
+func (f *Framework) BindPVToClaim(ctx context.Context, name, pvName, size string) (*corev1.PersistentVolumeClaim, error) {
+	if size == "" {
+		size = Cfg().PVCSize
+	}
+	qty, err := resource.ParseQuantity(size)
+	if err != nil {
+		return nil, fmt.Errorf("parsing size %q: %w", size, err)
+	}
+	if err := CheckObjectName("claim", f.Name(name)); err != nil {
+		return nil, err
+	}
+	pv, err := f.C.Kube.CoreV1().PersistentVolumes().Get(ctx, pvName, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("reading target PV %s: %w", pvName, err)
+	}
+	sc := pv.Spec.StorageClassName
+	claim := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: f.Name(name), Namespace: Namespace, Labels: f.Labels()},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany},
+			VolumeName:       pvName,
+			StorageClassName: &sc,
+			Resources: corev1.VolumeResourceRequirements{
+				Requests: corev1.ResourceList{corev1.ResourceStorage: qty},
+			},
+		},
+	}
+	return f.C.Kube.CoreV1().PersistentVolumeClaims(Namespace).Create(ctx, claim, metav1.CreateOptions{})
+}
+
+var (
+	// VolumeSnapshotGVR identifies the VolumeSnapshot custom resource.
+	VolumeSnapshotGVR = schema.GroupVersionResource{
+		Group:    "snapshot.storage.k8s.io",
+		Version:  "v1",
+		Resource: "volumesnapshots",
+	}
+	// VolumeSnapshotClassGVR identifies the VolumeSnapshotClass custom resource.
+	VolumeSnapshotClassGVR = schema.GroupVersionResource{
+		Group:    "snapshot.storage.k8s.io",
+		Version:  "v1",
+		Resource: "volumesnapshotclasses",
+	}
+)
+
+// VolumeSnapshotClasses returns names of all available VolumeSnapshotClass resources.
+func (c *Client) VolumeSnapshotClasses(ctx context.Context) ([]string, error) {
+	if c.Dynamic == nil {
+		return nil, fmt.Errorf("dynamic client not configured")
+	}
+	list, err := c.Dynamic.Resource(VolumeSnapshotClassGVR).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+	var names []string
+	for _, item := range list.Items {
+		names = append(names, item.GetName())
+	}
+	return names, nil
+}
+
+// CreateVolumeSnapshot creates a VolumeSnapshot resource targeting a PVC.
+func (f *Framework) CreateVolumeSnapshot(ctx context.Context, snapName, pvcName, className string) (*unstructured.Unstructured, error) {
+	if f.C.Dynamic == nil {
+		return nil, fmt.Errorf("dynamic client not configured")
+	}
+	spec := map[string]any{
+		"source": map[string]any{
+			"persistentVolumeClaimName": f.Name(pvcName),
+		},
+	}
+	if className != "" {
+		spec["volumeSnapshotClassName"] = className
+	}
+	obj := &unstructured.Unstructured{
+		Object: map[string]any{
+			"apiVersion": "snapshot.storage.k8s.io/v1",
+			"kind":       "VolumeSnapshot",
+			"metadata": map[string]any{
+				"name":      f.Name(snapName),
+				"namespace": Namespace,
+				"labels":    f.Labels(),
+			},
+			"spec": spec,
+		},
+	}
+	created, err := f.C.Dynamic.Resource(VolumeSnapshotGVR).Namespace(Namespace).Create(ctx, obj, metav1.CreateOptions{})
+	if err != nil {
+		return nil, err
+	}
+	f.Defer(func(ctx context.Context) {
+		_ = f.DeleteVolumeSnapshot(ctx, snapName)
+	})
+	return created, nil
+}
+
+// WaitVolumeSnapshotReady waits for a VolumeSnapshot to have status.readyToUse == true.
+func (f *Framework) WaitVolumeSnapshotReady(ctx context.Context, snapName string, timeout time.Duration) error {
+	if f.C.Dynamic == nil {
+		return fmt.Errorf("dynamic client not configured")
+	}
+	name := f.Name(snapName)
+	return Poll(ctx, PollInterval, timeout, func(ctx context.Context) (bool, error) {
+		snap, err := f.C.Dynamic.Resource(VolumeSnapshotGVR).Namespace(Namespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return false, err
+		}
+		status, ok := snap.Object["status"].(map[string]any)
+		if !ok {
+			return false, fmt.Errorf("snapshot %s has no status yet", name)
+		}
+		ready, _ := status["readyToUse"].(bool)
+		if ready {
+			return true, nil
+		}
+		return false, fmt.Errorf("snapshot %s readyToUse is false", name)
+	})
+}
+
+// DeleteVolumeSnapshot removes a VolumeSnapshot by logical name.
+func (f *Framework) DeleteVolumeSnapshot(ctx context.Context, snapName string) error {
+	if f.C.Dynamic == nil {
+		return fmt.Errorf("dynamic client not configured")
+	}
+	return IgnoreNotFound(f.C.Dynamic.Resource(VolumeSnapshotGVR).Namespace(Namespace).
+		Delete(ctx, f.Name(snapName), metav1.DeleteOptions{}))
+}
+
+// ChurnResult records the outcome of a rapid create/delete churn run.
+type ChurnResult struct {
+	Completed int
+	Errors    []error
+}
+
+// RunPVCLifecycleChurn executes cycles iterations of creating an RWX PVC, waiting for
+// it to bind, deleting it, and waiting for it to be removed.
+func (f *Framework) RunPVCLifecycleChurn(ctx context.Context, cycles int, namePrefix string) (ChurnResult, error) {
+	var res ChurnResult
+	for i := 1; i <= cycles; i++ {
+		select {
+		case <-ctx.Done():
+			return res, ctx.Err()
+		default:
+		}
+		cName := fmt.Sprintf("%s-%d", namePrefix, i)
+		pvc, err := f.CreatePVC(ctx, PVCSpec{Name: cName})
+		if err != nil {
+			res.Errors = append(res.Errors, fmt.Errorf("cycle %d create: %w", i, err))
+			return res, fmt.Errorf("cycle %d create failed: %w", i, err)
+		}
+		if _, err := f.WaitPVCBound(ctx, pvc.Name, BindTimeout); err != nil {
+			res.Errors = append(res.Errors, fmt.Errorf("cycle %d bind: %w", i, err))
+			return res, fmt.Errorf("cycle %d bind failed: %w", i, err)
+		}
+		if err := f.DeletePVC(ctx, pvc.Name); err != nil {
+			res.Errors = append(res.Errors, fmt.Errorf("cycle %d delete: %w", i, err))
+			return res, fmt.Errorf("cycle %d delete failed: %w", i, err)
+		}
+		if err := f.WaitPVCGone(ctx, pvc.Name, DeleteTimeout); err != nil {
+			res.Errors = append(res.Errors, fmt.Errorf("cycle %d wait gone: %w", i, err))
+			return res, fmt.Errorf("cycle %d wait gone failed: %w", i, err)
+		}
+		res.Completed++
+	}
+	return res, nil
 }
