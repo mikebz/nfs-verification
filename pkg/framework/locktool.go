@@ -243,9 +243,12 @@ func (f *Framework) installLockTool(ctx context.Context, pod string) error {
 	}
 	body, err := os.ReadFile(path)
 	if err != nil {
-		return fmt.Errorf("no locktool built for %s, which is what node %s runs: %w. "+
-			"Run `make locktool`, which builds one per architecture into bin/",
-			arch, p.Spec.NodeName, err)
+		// Blocked rather than failed. A node architecture nobody has built for
+		// is a fact about this checkout, not about the storage, and a mixed
+		// cluster is ordinary. The case reports it and names the command.
+		return Blockedf("no locktool built for %s, which is what node %s runs (%v). "+
+			"Run `make locktool`, which builds one per architecture into bin/; LOCKTOOL_ARCHES "+
+			"names the set it builds", arch, p.Spec.NodeName, err)
 	}
 	sum := sha256.Sum256(body)
 	want := hex.EncodeToString(sum[:])

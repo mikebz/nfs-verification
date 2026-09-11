@@ -108,6 +108,12 @@ func TestAwaitVolumeNotInUseFailsWhileStillMounted(t *testing.T) {
 
 // TestAwaitVolumeNotInUseSucceedsOnceReleased is the other direction, so that
 // the check above is not passing because the wait never succeeds at all.
+//
+// Steps:
+//  1. Offer a node whose volumesInUse is empty, which is what a finished
+//     unmount looks like on a driver that attaches.
+//  2. Assert the wait returns without error, so that the check above is failing
+//     on the state it names rather than because this wait never succeeds at all.
 func TestAwaitVolumeNotInUseSucceedsOnceReleased(t *testing.T) {
 	const node = "worker-1"
 	kube := fake.NewSimpleClientset(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: node}})

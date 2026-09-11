@@ -131,6 +131,12 @@ func TestLockToolHoldsAndRefusesByRange(t *testing.T) {
 // locks coexist and an exclusive one does not join them. A tool that treated
 // every lock as exclusive would make a read-lock case fail against a correct
 // server.
+//
+// Steps:
+//  1. Hold a shared lock on a range.
+//  2. Assert a second shared lock on the same range is granted, since shared
+//     locks coexist by definition.
+//  3. Assert an exclusive lock over that range is refused.
 func TestLockToolReadLocksShare(t *testing.T) {
 	tool := buildLockTool(t)
 	base := t.TempDir()

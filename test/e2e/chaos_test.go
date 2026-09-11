@@ -540,6 +540,22 @@ func TestChaosLockReclaimAcrossFailover(t *testing.T) {
 	// The same two the setup pinned its pods to, in the same order.
 	nodeA, nodeB := f.TwoNodes(ctx)
 
+	// The whole-file half is gated too, not only the ranges below.
+	// local_lock=flock keeps flock(2) on the client while byte-range locks
+	// still reach the server, and on such a mount the four cross-node probes
+	// this case opens with fail deterministically for a reason that is not the
+	// server's.
+	//
+	// Blocked for the whole case rather than for that half alone. The headline
+	// assertion here is the reclaimed fraction over several whole-file locks
+	// from two clients, and a run reporting that fraction over two byte ranges
+	// instead would be a different measurement wearing this case's number.
+	pv, err := f.PVForClaim(ctx, "chaos06")
+	if err != nil {
+		t.Fatalf("finding the volume behind the claim: %v", err)
+	}
+	requireServerSideLocking(ctx, t, f, pv.Name, framework.FlockLock, nodeA, nodeB)
+
 	// Three locks from the writer and one from the client on the other node, so
 	// the reclaim path is exercised from both clients rather than from one.
 	want := []struct{ held, probe, id string }{
@@ -688,9 +704,10 @@ func assertRangesSurvivedFailover(ctx context.Context, t *testing.T, f *framewor
 				q.r, q.heldBy, q.heldOn, f.Env.RecoveryStateBackend)
 			continue
 		}
-		if c := ans.Conflict; c.Known && (c.Start != q.r.Start || c.Len != q.r.Len) {
-			t.Errorf("after the failover %s came back as %s: the range the server reclaimed is not the "+
-				"range that was taken, so reclaim merged or moved it", q.r, c)
+		if c := ans.Conflict; c.Known && (c.Start != q.r.Start || c.Len != q.r.Len || c.Mode != q.r.Mode) {
+			t.Errorf("after the failover %s came back as %s: the lock the server reclaimed is not the "+
+				"one that was taken, so reclaim merged, moved or weakened it. A write lock that came "+
+				"back shared would let a second writer in", q.r, c)
 		}
 	}
 
@@ -737,40 +754,55 @@ func assertRangesSurvivedFailover(ctx context.Context, t *testing.T, f *framewor
 	if err := f.RecordNodeLocks(ctx, "after-failover", d.holderNode, d.otherNode); err != nil {
 		t.Logf("recording the client lock tables after the failover: %v", err)
 	}
-	assertClientHoldsRange(ctx, t, f, d.holderNode, rangeA, d.holderPod)
-	assertClientHoldsRange(ctx, t, f, d.otherNode, rangeB, d.otherPod)
+	// One inode, read once from either client: both mount the same file, and
+	// the number is the server's fileid as both clients see it.
+	inode, err := f.Inode(ctx, d.holderPod, d.path)
+	if err != nil {
+		t.Fatalf("reading the inode of %s, which is how a lock line is matched to a file: %v", d.path, err)
+	}
+	assertClientHoldsRange(ctx, t, f, d.holderNode, inode, rangeA, d.holderPod)
+	assertClientHoldsRange(ctx, t, f, d.otherNode, inode, rangeB, d.otherPod)
 }
 
-// assertClientHoldsRange checks a node's own lock table carries a POSIX lock
-// over exactly the range its pod took.
+// assertClientHoldsRange checks a node's own lock table carries a held POSIX
+// lock over exactly the range its pod took, on that file.
 //
-// The node agent reads /proc/mounts and /proc/locks in the host namespaces, so
-// this is every lock on the node, not only the case's. Matching is on the exact
-// range, and the ranges these cases use are at offsets no other case takes.
+// The node agent reads /proc/locks in the host namespaces, so this is every
+// lock on the node and not only the case's. Matching is on the inode as well as
+// the range: an unrelated lock over the same offsets in some other file would
+// otherwise stand in as proof that this one survived.
+//
+// An unavailable agent fails the assertion rather than skipping it. Preflight
+// creates the agent and refuses to pass without it, so it is not missing here
+// for any ordinary reason, and this is the half of the case no acquire can see:
+// passing on the server's answer alone would report a client-side loss as a
+// clean reclaim.
 func assertClientHoldsRange(ctx context.Context, t *testing.T, f *framework.Framework,
-	node string, r framework.LockRange, pod string) {
+	node string, inode int64, r framework.LockRange, pod string) {
 	t.Helper()
 	agent, err := framework.NodeAgent(ctx, f.C)
 	if err != nil {
-		t.Logf("the node agent is unavailable, so what %s believes it holds was not read: %v", node, err)
+		t.Errorf("the node agent is unavailable, so what %s believes it holds could not be read: %v. "+
+			"Preflight makes the agent a hard prerequisite, and this is the only side of the assertion "+
+			"the server cannot answer for", node, err)
 		return
 	}
 	locks, err := agent.Locks(ctx, node)
 	if err != nil {
-		t.Logf("reading /proc/locks on %s: %v", node, err)
+		t.Errorf("reading /proc/locks on %s: %v. The server's answer alone cannot show a client holding "+
+			"a range the server has forgotten, which is the failure this case exists for", node, err)
 		return
 	}
-	wantEnd := r.Start + r.Len - 1
 	for _, l := range locks {
-		if l.Kind == "POSIX" && !l.Waiting && l.Start == r.Start && !l.EndsAtEOF && l.End == wantEnd {
+		if l.Covers(inode, r) {
 			t.Logf("%s still believes it holds %s for %s: %s", node, r, pod, l)
 			return
 		}
 	}
-	t.Errorf("after the failover the client on %s has no POSIX lock over %s, which %s took and never "+
-		"released. The server was asked separately; a disagreement between the two is the failure this "+
-		"case exists for, and a client that has quietly dropped a lock lets the next acquirer in",
-		node, r, pod)
+	t.Errorf("after the failover the client on %s has no held POSIX lock over %s of inode %d, which %s "+
+		"took and never released. The server was asked separately; a disagreement between the two is "+
+		"the failure this case exists for, and a client that has quietly dropped a lock lets the next "+
+		"acquirer in", node, r, inode, pod)
 }
 
 // CHAOS-07: a second client attempting a lock it has never held, while the

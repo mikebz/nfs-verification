@@ -77,6 +77,14 @@ func TestExtractNFSSource(t *testing.T) {
 // export cannot be read must report blocked and say which fields were missing;
 // a guess that lands on the wrong attribute produces a clone over an export
 // nobody asked for, and the case then passes having compared two files.
+//
+// Steps:
+//  1. Read a CSI volume whose attributes use keys the harness does not know.
+//  2. Assert it is an error naming the volume, the driver, the attributes it
+//     did carry and the keys that were looked for, so an operator can see which
+//     key to add.
+//  3. Assert a nil volume, one with no source at all, and one naming a server
+//     but no path are each errors rather than half an export.
 func TestExtractNFSSourceRefusesToGuess(t *testing.T) {
 	unreadable := &corev1.PersistentVolume{
 		ObjectMeta: metav1.ObjectMeta{Name: "pvc-opaque"},

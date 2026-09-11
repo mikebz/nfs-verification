@@ -26,6 +26,25 @@ func (f *Framework) Sha256(ctx context.Context, pod, path string) (string, error
 		fmt.Sprintf("sha256sum %s | cut -d' ' -f1", shellQuote(path)))
 }
 
+// Inode returns a file's inode number as a pod sees it.
+//
+// It is how a lock line in /proc/locks is matched to the file a case locked.
+// The table covers every file on the node, so a byte range alone is not
+// identity: the same offsets in some other file would satisfy an assertion that
+// compared only the range.
+func (f *Framework) Inode(ctx context.Context, pod, path string) (int64, error) {
+	out, err := f.C.MustSh(ctx, Namespace, f.Name(pod), "main",
+		fmt.Sprintf("stat -c %%i %s", shellQuote(path)))
+	if err != nil {
+		return 0, err
+	}
+	inode, err := strconv.ParseInt(strings.TrimSpace(out), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("stat reported %q as the inode of %s, which is not a number", out, path)
+	}
+	return inode, nil
+}
+
 // Quote exposes shell quoting to test packages building their own scripts.
 func Quote(s string) string { return shellQuote(s) }
 
@@ -239,9 +258,18 @@ func (f *Framework) WriteDirect(ctx context.Context, pod, path, seed string, blo
 
 // ReadDirect reads one block at a block offset with O_DIRECT and returns its
 // sha256, as that pod sees it.
+//
+// The read lands in a file on the pod's own filesystem before it is hashed,
+// rather than being piped straight into sha256sum. A POSIX pipeline reports the
+// status of its last command, so a failed direct read would be hashed as an
+// empty stream and come back as a valid-looking checksum of nothing. The case
+// would then report a data mismatch where the truth is that the read failed,
+// which is a different defect filed against a different owner.
 func (f *Framework) ReadDirect(ctx context.Context, pod, path string, block, offset int) (string, error) {
+	const scratch = "/tmp/nfsv-direct-read"
 	script := fmt.Sprintf(
-		`set -e; dd if=%s bs=%d count=1 skip=%d iflag=direct 2>/dev/null | sha256sum | cut -d' ' -f1`,
-		shellQuote(path), block, offset)
+		`set -e; dd if=%s of=%s bs=%d count=1 skip=%d iflag=direct 2>/dev/null; `+
+			`sha256sum %s | cut -d' ' -f1`,
+		shellQuote(path), shellQuote(scratch), block, offset, shellQuote(scratch))
 	return f.C.MustSh(ctx, Namespace, f.Name(pod), "main", script)
 }

@@ -44,6 +44,7 @@ LOCKTOOL_ARCHES ?= amd64 arm64
 
 .PHONY: locktool
 locktool:
+	@mkdir -p bin
 	@for arch in $(LOCKTOOL_ARCHES); do \
 		echo "building bin/locktool-linux-$$arch"; \
 		CGO_ENABLED=0 GOOS=linux GOARCH=$$arch go build -trimpath -o bin/locktool-linux-$$arch ./cmd/locktool || exit 1; \

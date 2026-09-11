@@ -28,6 +28,12 @@
 # byte as cmp reports it, counting from 1, or -1 where cmp said nothing readable.
 # For the others it is the observed length.
 #
+# A record whose length cannot be read at all prints "unreadable <index> -1",
+# which is none of the four verdicts and lands in the parser's unreadable-lines
+# list. That is deliberate: a read that failed is not the same fact as a record
+# that is gone, and reporting it as "absent" would file a harness or mount
+# problem as data loss.
+#
 # The four verdicts are exhaustive over observed length. Below the full length
 # is absent or short, exactly the full length is correct or wrong, and above the
 # full length is wrong whatever the prefix says: a record that grew holds a byte
@@ -45,8 +51,18 @@ for i in "$@"; do
 		echo "absent $i 0"
 		continue
 	fi
-	size=$(wc -c < "$f" 2>/dev/null | tr -d ' ')
-	[ -n "$size" ] || size=0
+	# wc's own status, taken before its output is normalized. A pipeline would
+	# report tr's status instead, turning an unreadable record into a length of
+	# zero and then into "absent".
+	if ! size=$(wc -c < "$f" 2>/dev/null); then
+		echo "unreadable $i -1"
+		continue
+	fi
+	size=$(echo "$size" | tr -d ' ')
+	if [ -z "$size" ]; then
+		echo "unreadable $i -1"
+		continue
+	fi
 	if [ "$size" -eq 0 ]; then
 		echo "absent $i 0"
 		continue

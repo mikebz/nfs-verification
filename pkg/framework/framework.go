@@ -215,15 +215,38 @@ func (f *Framework) DeleteCaseObjects(ctx context.Context) error {
 		return fmt.Errorf("deleting pods: %w", err)
 	}
 	var stuck []corev1.Pod
+	// observed records whether the last thing this loop saw was a real list.
+	// Without it a failing List leaves stuck at its previous value, or at nil,
+	// and the code below then treats every claim as held by nobody and deletes
+	// it. That is the F-001 sequence with the guard reading as satisfied: the
+	// pods may all still be running and mounting.
+	observed := false
 	waitErr := Poll(ctx, PollInterval, PodTerminateTimeout, func(ctx context.Context) (bool, error) {
 		list, err := pods.List(ctx, ListOptions(f.Selector()))
 		if err != nil {
+			observed = false
 			return false, err
 		}
+		observed = true
 		stuck = list.Items
 		return len(stuck) == 0, fmt.Errorf("%d pods still terminating", len(stuck))
 	})
 	unproven := f.unprovenClaims()
+	if waitErr != nil && !observed {
+		// The API stopped answering, so nothing is known about what is still
+		// mounted. Keep every claim: a leaked claim is recoverable and a wedged
+		// node is not, and that trade does not change because the thing that
+		// failed was the question rather than the answer.
+		kept, err := f.listClaimNames(ctx)
+		if err != nil {
+			return fmt.Errorf("the pods of %s could not be listed (%w) and neither could its claims (%w); "+
+				"nothing was deleted, because deleting a claim whose pods are unknown can destroy an "+
+				"export under a live mount (docs/findings.md F-001)", f.CaseID, waitErr, err)
+		}
+		return fmt.Errorf("the pods of %s could not be listed, so it is unknown which claims are still "+
+			"mounted: %w. Kept %d claims (%s); clean these up by hand once the API is answering again",
+			f.CaseID, waitErr, len(kept), strings.Join(kept, ", "))
+	}
 	if waitErr == nil && len(unproven) == 0 {
 		if err := f.C.Kube.CoreV1().PersistentVolumeClaims(Namespace).
 			DeleteCollection(ctx, metav1.DeleteOptions{}, ListOptions(f.Selector())); err != nil {
@@ -262,6 +285,21 @@ func (f *Framework) DeleteCaseObjects(ctx context.Context) error {
 		return fmt.Errorf("%s: %w", msg, delErr)
 	}
 	return fmt.Errorf("%s: clean these up by hand once the node recovers", msg)
+}
+
+// listClaimNames returns the names of this case's claims, for a report that has
+// to say what it left behind.
+func (f *Framework) listClaimNames(ctx context.Context) ([]string, error) {
+	list, err := f.C.Kube.CoreV1().PersistentVolumeClaims(Namespace).List(ctx, ListOptions(f.Selector()))
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(list.Items))
+	for i := range list.Items {
+		names = append(names, list.Items[i].Name)
+	}
+	sort.Strings(names)
+	return names, nil
 }
 
 // claimsHeldBy returns the claims the given pods still mount.

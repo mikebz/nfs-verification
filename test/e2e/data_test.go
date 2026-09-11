@@ -81,38 +81,50 @@ func TestDataLocksAcrossNodes(t *testing.T) {
 	pvc := f.MustRWXPVC(ctx, "data05")
 	f.MustPod(ctx, toolsPod("holder", pvc.Name, nodeA))
 	f.MustPod(ctx, toolsPod("contender", pvc.Name, nodeB))
-	path := fileIn("data05.lock")
-
-	holder, err := f.HoldFlock(ctx, "holder", path, "data05")
+	pv, err := f.PVForClaim(ctx, "data05")
 	if err != nil {
-		t.Fatalf("acquiring the lock on %s: %v", nodeA, err)
-	}
-	granted, out, err := f.TryFlock(ctx, "contender", path)
-	if err != nil {
-		t.Fatalf("probing the lock from %s: %v", nodeB, err)
-	}
-	if granted {
-		t.Fatalf("mutual exclusion broken: a pod on %s was granted a lock held by a pod on %s (%s)", nodeB, nodeA, out)
+		t.Fatalf("finding the volume behind the claim: %v", err)
 	}
 
-	if err := holder.Release(ctx); err != nil {
-		t.Fatalf("releasing the lock: %v", err)
-	}
-	// The second acquirer must succeed once the first lets go, within a bound
-	// that has nothing to do with lease expiry: this is a clean release.
-	if err := framework.Poll(ctx, framework.FastPoll, time.Minute, func(ctx context.Context) (bool, error) {
-		granted, _, err := f.TryFlock(ctx, "contender", path)
-		return granted, err
-	}); err != nil {
-		t.Errorf("lock was never grantable after a clean release: %v", err)
-	}
-	t.Logf("lock changed hands across nodes %s and %s under the one server (profile %s)",
-		nodeA, nodeB, profile(t).Name)
+	// Both halves are subtests, each gated on the option that would make its
+	// own lock kind local. local_lock=flock keeps flock(2) on the client while
+	// byte-range locks still reach the server, and local_lock=posix the other
+	// way round, so one half can be meaningful on a mount where the other is
+	// not. Blocking the whole case for either would throw away a real result.
+	t.Run("whole-file-flock", func(t *testing.T) {
+		f := f.SubTest(t)
+		requireServerSideLocking(ctx, t, f, pv.Name, framework.FlockLock, nodeA, nodeB)
+		path := fileIn("data05.lock")
 
-	// A subtest, so that a mount keeping byte-range locks on the client blocks
-	// this half and leaves the flock half's result standing. The two halves are
-	// gated by different mount options and one can be meaningful where the
-	// other is not; a skip at the top level would throw away a real result.
+		holder, err := f.HoldFlock(ctx, "holder", path, "data05")
+		if err != nil {
+			t.Fatalf("acquiring the lock on %s: %v", nodeA, err)
+		}
+		granted, out, err := f.TryFlock(ctx, "contender", path)
+		if err != nil {
+			t.Fatalf("probing the lock from %s: %v", nodeB, err)
+		}
+		if granted {
+			t.Fatalf("mutual exclusion broken: a pod on %s was granted a lock held by a pod on %s (%s)",
+				nodeB, nodeA, out)
+		}
+
+		if err := holder.Release(ctx); err != nil {
+			t.Fatalf("releasing the lock: %v", err)
+		}
+		// The second acquirer must succeed once the first lets go, within a
+		// bound that has nothing to do with lease expiry: this was a clean
+		// release, not a client that vanished.
+		if err := framework.Poll(ctx, framework.FastPoll, time.Minute, func(ctx context.Context) (bool, error) {
+			granted, _, err := f.TryFlock(ctx, "contender", path)
+			return granted, err
+		}); err != nil {
+			t.Errorf("lock was never grantable after a clean release: %v", err)
+		}
+		t.Logf("lock changed hands across nodes %s and %s under the one server (profile %s)",
+			nodeA, nodeB, profile(t).Name)
+	})
+
 	t.Run("byte-ranges", func(t *testing.T) {
 		assertDisjointRangesAreIndependent(ctx, t, f.SubTest(t), disjointRanges{
 			holderPod: "holder", holderNode: nodeA,
@@ -161,7 +173,7 @@ func assertDisjointRangesAreIndependent(ctx context.Context, t *testing.T, f *fr
 
 	holderA, err := f.HoldLock(ctx, d.holderPod, d.path, d.id+"ra", rangeA)
 	if err != nil {
-		t.Fatalf("taking %s on %s in %s: %v", rangeA, d.path, d.holderNode, err)
+		failOrBlock(t, err, "taking %s on %s in %s", rangeA, d.path, d.holderNode)
 	}
 	f.Defer(func(ctx context.Context) { _ = holderA.Release(ctx) })
 
@@ -589,7 +601,7 @@ func TestDataLockReleasedAfterForcedPodLoss(t *testing.T) {
 
 	held, err := f.HoldLock(ctx, holder, path, "data06", rng)
 	if err != nil {
-		t.Fatalf("taking %s on %s in %s: %v", rng, path, nodeA, err)
+		failOrBlock(t, err, "taking %s on %s in %s", rng, path, nodeA)
 	}
 	// Registered before the case can fail, so a failing case does not leave a
 	// lock held on the share by a pod that outlives it.
@@ -597,7 +609,7 @@ func TestDataLockReleasedAfterForcedPodLoss(t *testing.T) {
 
 	refused, err := f.TryLock(ctx, acquirer, path, rng)
 	if err != nil {
-		t.Fatalf("probing %s from %s: %v", rng, nodeB, err)
+		failOrBlock(t, err, "probing %s from %s", rng, nodeB)
 	}
 	if refused.Free {
 		t.Fatalf("mutual exclusion broken before any fault: %s on %s was granted %s while %s on %s held it",

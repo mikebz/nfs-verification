@@ -60,14 +60,35 @@ func looksLikeAUsageError(output string) bool {
 // Probed against the path the case will use, because the answer is a property
 // of the tool and the filesystem together.
 func (f *Framework) ProbeDirectIO(ctx context.Context, pod, path string) ToolProbe {
+	if missing := f.probeToolPresent(ctx, pod, "dd"); missing != nil {
+		return *missing
+	}
+	// The status is captured before the cleanup runs. A trailing `rm -f` would
+	// otherwise be the last command in the list, and the probe would report OK
+	// whenever the cleanup succeeded, however the write went.
 	r := f.Sh(ctx, pod, fmt.Sprintf(
-		"dd if=/dev/zero of=%s bs=4096 count=1 oflag=direct 2>&1; rm -f %s",
-		shellQuote(path), shellQuote(path)))
+		"dd if=/dev/zero of=%[1]s bs=4096 count=1 oflag=direct 2>&1; rc=$?; rm -f %[1]s; exit $rc",
+		shellQuote(path)))
 	out := strings.TrimSpace(r.Combined())
 	if r.Err == nil && !looksLikeAUsageError(out) {
 		return ToolProbe{OK: true, Output: out}
 	}
 	return ToolProbe{Missing: true, Output: out}
+}
+
+// probeToolPresent reports a tool the image does not carry at all, which is a
+// third answer neither the usage-error test nor the exit status can give.
+//
+// A shell asked for a command it cannot find prints a not-found diagnostic that
+// matches no usage marker, so without this an absent applet reads as present
+// and working, and the case that follows it fails on the share for a reason
+// that is really a fact about the image.
+func (f *Framework) probeToolPresent(ctx context.Context, pod, tool string) *ToolProbe {
+	r := f.Sh(ctx, pod, "command -v "+shellQuote(tool))
+	if r.Err == nil && strings.TrimSpace(r.Stdout) != "" {
+		return nil
+	}
+	return &ToolProbe{Missing: true, Output: "this image carries no " + tool}
 }
 
 // ProbeHolePunch asks whether this image's fallocate parses -p, separately from
@@ -84,6 +105,9 @@ func (f *Framework) ProbeDirectIO(ctx context.Context, pod, path string) ToolPro
 // answer is about the applet alone. A local filesystem that refuses the punch
 // still proves the flag parsed, which is the whole question here.
 func (f *Framework) ProbeHolePunch(ctx context.Context, pod string) ToolProbe {
+	if missing := f.probeToolPresent(ctx, pod, "fallocate"); missing != nil {
+		return *missing
+	}
 	const probe = "/tmp/nfsv-punch-probe.dat"
 	r := f.Sh(ctx, pod, fmt.Sprintf(
 		"dd if=/dev/zero of=%[1]s bs=4096 count=2 2>/dev/null; fallocate -p -o 0 -l 4096 %[1]s 2>&1; "+

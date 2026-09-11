@@ -127,8 +127,15 @@ type ProcLock struct {
 	Enforcement string
 	Mode        string // READ or WRITE
 	// PID is the holder in the node's PID namespace.
-	PID   int
-	Start int64
+	PID int
+	// Device is the major:minor of the filesystem and Inode the file's number
+	// on it. Without them a lock line says only that *something* on this node
+	// holds these bytes: the table covers every file and every process, so an
+	// unrelated lock over the same offsets would satisfy an assertion that
+	// matched on the range alone.
+	Device string
+	Inode  int64
+	Start  int64
 	// End is the last locked byte. EndsAtEOF is true where the kernel printed
 	// EOF, which is a lock to the end of the file however long it becomes.
 	End       int64
@@ -147,7 +154,27 @@ func (l ProcLock) String() string {
 	if l.Waiting {
 		state = "waiting"
 	}
-	return fmt.Sprintf("%s %s %s pid=%d [%d..%s] %s", l.Kind, l.Enforcement, l.Mode, l.PID, l.Start, end, state)
+	return fmt.Sprintf("%s %s %s pid=%d %s:%d [%d..%s] %s",
+		l.Kind, l.Enforcement, l.Mode, l.PID, l.Device, l.Inode, l.Start, end, state)
+}
+
+// Covers reports whether this lock is a held POSIX lock over exactly the given
+// range of the given file.
+//
+// Exactly, and on that file: the range alone is not identity. The device and
+// inode come from the same kernel that printed the lock, and a pod reads the
+// same inode number for the same file through stat.
+func (l ProcLock) Covers(inode int64, r LockRange) bool {
+	if l.Kind != "POSIX" || l.Waiting || l.Inode != inode {
+		return false
+	}
+	if l.Start != r.Start {
+		return false
+	}
+	if r.Len == 0 {
+		return l.EndsAtEOF
+	}
+	return !l.EndsAtEOF && l.End == r.Start+r.Len-1
 }
 
 // ParseProcLocks parses the contents of /proc/locks. A pure function with a
@@ -178,6 +205,18 @@ func ParseProcLocks(contents string) []ProcLock {
 			continue
 		}
 		l.PID = pid
+		// major:minor:inode. The inode is the last component; the first two are
+		// kept together as the device, since that is how the kernel prints them
+		// and nothing here needs them apart.
+		device, inodeText, ok := cutLast(fields[4], ":")
+		if !ok {
+			continue
+		}
+		inode, err := strconv.ParseInt(inodeText, 10, 64)
+		if err != nil {
+			continue
+		}
+		l.Device, l.Inode = device, inode
 		start, err := strconv.ParseInt(fields[5], 10, 64)
 		if err != nil {
 			continue
@@ -195,6 +234,15 @@ func ParseProcLocks(contents string) []ProcLock {
 		out = append(out, l)
 	}
 	return out
+}
+
+// cutLast splits a string around the last occurrence of sep.
+func cutLast(s, sep string) (before, after string, found bool) {
+	i := strings.LastIndex(s, sep)
+	if i < 0 {
+		return s, "", false
+	}
+	return s[:i], s[i+len(sep):], true
 }
 
 // Locks reads a node's own lock table. No tool required: it is a kernel file,

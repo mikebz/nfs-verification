@@ -66,6 +66,23 @@ func blocked(t *testing.T, format string, args ...any) {
 	t.Skipf("blocked: "+format, args...)
 }
 
+// failOrBlock reports a harness error as a failure, unless it is a condition
+// that would not arise on a different cluster or image, in which case the case
+// reports blocked instead.
+//
+// The two answers are routed differently by whoever reads the run, and a helper
+// that could not tell them apart would file "no locktool built for arm64" as a
+// storage defect.
+func failOrBlock(t *testing.T, err error, format string, args ...any) {
+	t.Helper()
+	what := fmt.Sprintf(format, args...)
+	if framework.IsBlocked(err) {
+		blocked(t, "%s: %v", what, err)
+		return
+	}
+	t.Fatalf("%s: %v", what, err)
+}
+
 // requireServerSideLocking blocks a lock case running on a mount that keeps
 // locks on the client.
 //

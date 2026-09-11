@@ -75,6 +75,12 @@ func TestParseLockAnswer(t *testing.T) {
 // conflicting range, type and an opaque lock owner, and nothing that names a
 // process on another node. A parser that accepted one would invite an assertion
 // on a number that means nothing.
+//
+// Steps:
+//  1. Parse a refusal carrying a pid field.
+//  2. Assert it is rejected. A parser that accepted one would invite an
+//     assertion on a number that cannot name a process on another node, and a
+//     cross-node lock assertion built on it would be meaningless.
 func TestParseLockAnswerRejectsAPid(t *testing.T) {
 	if _, err := ParseLockAnswer("REFUSED type=w start=0 len=1 pid=4321"); err == nil {
 		t.Error("a pid field was accepted; the protocol carries none, so no assertion may read one")
@@ -82,8 +88,13 @@ func TestParseLockAnswerRejectsAPid(t *testing.T) {
 }
 
 // TestLockRangeArgs checks the arguments a range becomes on the tool's command
-// line, including the zero length that means "to end of file" rather than an
-// empty range.
+// line.
+//
+// Steps:
+//  1. Render a range as the tool's positional arguments and compare them.
+//  2. Assert a zero length renders as "to end of file" rather than as an empty
+//     range. The two are opposite meanings, and a whole-file lock asked for as
+//     an empty one would lock nothing and be granted.
 func TestLockRangeArgs(t *testing.T) {
 	got := WriteRange(4096, 0).args()
 	want := []string{"4096", "0", "write"}
@@ -100,9 +111,13 @@ func TestLockRangeArgs(t *testing.T) {
 	}
 }
 
-// TestLockToolCmdQuotesItsArguments covers the paths the tool is handed. They
-// come from a case and are interpolated into a shell command in a pod, and a
-// path with a space or a quote in it is exactly what a careless helper mangles.
+// TestLockToolCmdQuotesItsArguments covers the paths the tool is handed.
+//
+// Steps:
+//  1. Build an invocation over a path holding a space.
+//  2. Assert every argument arrived quoted. Paths come from a case and are
+//     interpolated into a shell command inside a pod, and a path with a space
+//     or a quote in it is exactly what a careless helper splits in two.
 func TestLockToolCmdQuotesItsArguments(t *testing.T) {
 	got := lockToolCmd("try", "/mnt/share/a lock file", WriteRange(0, 16))
 	want := `'/tmp/locktool' 'try' '/mnt/share/a lock file' '0' '16' 'write'`

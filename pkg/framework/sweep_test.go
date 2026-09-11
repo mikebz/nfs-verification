@@ -64,9 +64,14 @@ correct nine 4096
 	}
 }
 
-// TestRecordSweepIsEmptyWithoutResults covers the shape the summary takes when
-// there is nothing to report, so a case logging it does not print a first wrong
-// byte that does not exist.
+// TestRecordSweepIsEmptyWithoutResults covers the empty sweep.
+//
+// Steps:
+//  1. Parse no output at all.
+//  2. Assert it holds no results and no unreadable lines.
+//  3. Assert it reports no wrong record, and that its summary names no offset.
+//     A sweep over an empty set must say nothing rather than fabricate a
+//     corruption finding out of a zero value.
 func TestRecordSweepIsEmptyWithoutResults(t *testing.T) {
 	s := ParseRecordSweep("")
 	if len(s.Results) != 0 || len(s.Unparsed) != 0 {
@@ -80,9 +85,14 @@ func TestRecordSweepIsEmptyWithoutResults(t *testing.T) {
 	}
 }
 
-// TestRecordSweepTableListsEveryRecord covers the artifact. The bundle is what
-// a failure is filed with, and a table naming only the failures cannot say how
-// large the set was that they came from.
+// TestRecordSweepTableListsEveryRecord covers the artifact.
+//
+// Steps:
+//  1. Render the table of a sweep holding a correct record, a wrong one and an
+//     unreadable line.
+//  2. Assert all three appear. The bundle is what a failure is filed with, and
+//     a table naming only the failures cannot say how large the set was that
+//     they came from, nor that part of it could not be read.
 func TestRecordSweepTableListsEveryRecord(t *testing.T) {
 	table := ParseRecordSweep("correct 1 4096\nwrong 2 17\nunreadable line here\n").Table()
 	for _, want := range []string{"rec-1\tcorrect", "rec-2\twrong\t17", "unreadable\tunreadable line here"} {

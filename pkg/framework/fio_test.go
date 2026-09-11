@@ -62,6 +62,12 @@ func TestParseFioReport(t *testing.T) {
 // TestFioReportStringNamesFailures covers the line a run logs. A summary that
 // did not say how many jobs failed would make a clean hour and a corrupt one
 // look alike in a scrollback.
+//
+// Steps:
+//  1. Render the summary of a report holding one job that ended with an error.
+//  2. Assert it carries the fio version, the job count and the failed count,
+//     which are the three fields that separate a clean hour from a corrupt one
+//     in a scrollback.
 func TestFioReportStringNamesFailures(t *testing.T) {
 	r := FioReport{Version: "fio-3.36", Jobs: []FioJob{{Name: "soak", Error: 84}}}
 	got := r.String()
