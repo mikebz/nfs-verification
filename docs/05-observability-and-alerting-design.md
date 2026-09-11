@@ -395,6 +395,50 @@ about that server's behavior therefore comes from outside it, which is a real
 constraint on what any monitoring of this deployment can say, and it belongs in
 the record.
 
+**What the outside channel covers, and what it cannot.** When the server
+publishes nothing, its health and its operations are reported entirely by things
+watching it from outside: the kubelet watching a container, and the CSI stack
+watching its own calls. Those cover less of NFS than their volume of metrics
+suggests, so the boundary is stated here rather than discovered during a triage.
+
+| Question an operator asks | Answered from outside? | By what |
+|---|---|---|
+| Is the server process running | Yes | Container status, restart count, termination reason |
+| Did it restart, and when | Yes | Restart count, container start time, pod conditions |
+| How much CPU and memory is it using | Yes | cAdvisor and the Summary API |
+| Was it OOMKilled | Yes, when a limit exists to kill against | Termination reason, and 5.8 |
+| How full is a volume | Yes, when the driver implements it | `NodeGetVolumeStats` through the kubelet |
+| Did a mount, unmount or provision succeed, and how long did it take | Yes | Kubelet storage and CSI operation counters, which measure the **client and driver side**, not the server |
+| Is the server answering NFS at all | **No** | Nothing outside probes port 2049 (see below) |
+| What is the NFS operation rate, and its error rate by operation | **No** | Nothing counts READ, WRITE, COMMIT or LOCK, or the `NFS4ERR_*` it returned |
+| How many clients hold state, how many locks, how many open files | **No** | Client and lock state lives in the server |
+| Is the server in grace, and did reclaims succeed | **No** | Only a log line, and F-008 established this server emits none |
+| Which export is busy, or failing | **No** | Exports are invisible from outside the process |
+
+The line through that table is that the outside channel reports the **container**
+and the **Kubernetes storage plumbing**, and says nothing about the **NFS
+protocol**. An operator here learns that the pod is up and that mounts
+succeeded. They do not learn that the server is returning errors, that locks
+were lost, or that one export is starved. The first sign of any of those is a
+workload stalling, which is a report from a tenant rather than from monitoring.
+
+Two facts about this chart make the outside channel thinner than it looks, both
+read from its own StatefulSet template rather than assumed:
+
+- **It declares no liveness or readiness probe.** Twelve ports are named,
+  2049 among them, and nothing probes any of them. A pod's `Ready` condition
+  therefore tracks the container's lifecycle, not whether NFS answers: a server
+  wedged but not exited reads Ready, and its endpoints stay in the EndpointSlice
+  serving traffic that will hang. What OBS-01 asserts on this deployment is that
+  the signal exists and is timely for an outage that kills the container, which
+  is the outage a pod delete produces. It is not evidence that the signal
+  catches every outage, and 5.11 says so.
+- **It sets no resource limits by default.** The chart applies `resources` only
+  when values supply them. With no memory limit there is no ceiling to alert
+  against, which is the blocked path in 5.8, and no kubelet OOMKill either: the
+  node's OOM killer fires instead, which is both less visible and worse for
+  every other pod on that node.
+
 ### 5.4 Asserting that a reading responds to an event [decided: differential assertions, the suite is the sampler]
 
 "The metric is there" is a weak claim. A counter frozen at a value, a volume
@@ -636,6 +680,15 @@ Stated plainly so nobody reads a green OBS run as more than it is.
 - It does not show that a threshold is set anywhere, or set sensibly.
 - It does not show that the data is retained. Every reading here is live, and
   retention is a property of a backend this suite does not query.
+- It does not show that the availability signal catches every outage. The fault
+  is a pod delete, which kills the container and therefore moves every
+  container-derived signal by construction. A server wedged but still running is
+  the case that would defeat a deployment with no readiness probe (5.3), and no
+  fault in this phase produces one. Stopping the server process without exiting
+  it would, and that belongs with the chaos cases in step 10, not here.
+- It does not observe NFS itself. Nothing in this phase counts an NFS operation
+  or an NFS error, because on a server that publishes nothing there is no
+  channel that does. The table in 5.3 is the boundary.
 
 What a green run does show is that an operator on this deployment has readable,
 timely, correct inputs to build all of that on, and a red or blocked run names
@@ -820,7 +873,8 @@ the node, the pod and the profile named.
 |---|---|
 | Whether the CSI driver in use implements `NodeGetVolumeStats`. It is optional in the CSI specification, and without it the kubelet reports no volume entry and OBS-06 blocks. | PR 1, against the F-008 cluster. A block there is a real finding: no per-volume usage data means no per-volume capacity monitoring for anyone. |
 | Whether the export is directory-backed with no per-volume quota, in which case `df` reports the backing filesystem and the two sources may agree with each other while both describe the wrong thing. | The precheck in 5.6. If `df`'s total is not the claim's capacity, the agreement assertion still holds but the finding is recorded, and what a capacity rule could mean on that deployment is the open part. |
-| Whether the server declares a memory limit at all. `nfs-server-provisioner` charts commonly ship without resource limits. | PR 3. No limit blocks OBS-05 and is recorded in `environment.json`. |
+| Whether the server declares a memory limit at all. The chart applies `resources` only when values supply them, so the default is none. | PR 3, which reads the pod spec. No limit blocks OBS-05, is recorded in `environment.json`, and means the node's OOM killer rather than the kubelet is what would fire. |
+| The availability signal is only tested against an outage that kills the container. A server wedged but running would expose a deployment with no readiness probe, and nothing here produces one. | Whether step 10 adds a stop-without-exit fault. The node agent already signals processes, so the operation is small; the question is whether it belongs in CHAOS rather than OBS, and it does. |
 | Whether a bounded small-file storm moves the server's working set measurably within a case budget. | The delta reported by PR 3. If it does not move at all, either the reading is broken or the server's memory is not workload-driven, and the two are told apart by the same reading under the heavier SCALE-04 load in step 9. |
 | `nodes/proxy` may be refused on a locked-down cluster, which blocks three of the four cases at once. | The first run. The classification is already in the design; what is open is whether a kubeconfig that can exec into pods but not proxy to nodes is common enough to need a second path. |
 | The availability window from the API and the outage measured from a client pod are two clocks and two definitions. | The existing guard band. Overlap is asserted, the difference is reported, and nothing fails on a margin narrower than the guard. |
