@@ -22,22 +22,26 @@ import (
 // surfaces weeks later as a quota failure with no obvious cause.
 //
 // Steps:
-//  1. Create an RWX claim and a pod that mounts it, in that order, and confirm
-//     the claim bound once a pod consumed it.
-//  2. Write a megabyte and read the checksum back.
-//  3. Delete the pod gracefully and wait for it to leave the API.
-//  4. Delete the claim and wait for it to go.
-//  5. On a Delete reclaim policy, the PV must go too. On Retain, skip: that is
+//  1. Create an RWX claim and mount it in a writer on node A and a reader on node B.
+//  2. Confirm the claim bound once a pod consumed it.
+//  3. Write a megabyte from the writer and read the checksum back from the reader
+//     across the wire, avoiding writer page cache.
+//  4. Delete both pods gracefully and wait for them to leave the API.
+//  5. Delete the claim and wait for it to go.
+//  6. On a Delete reclaim policy, the PV must go too. On Retain, skip: that is
 //     PROV-06's case, not a leak.
 func TestProvProvisionMountWriteDelete(t *testing.T) {
 	f := framework.New(t, "PROV-01")
+	requireCap(t, f.Caps.MultiNode, "cross-node verification needs two schedulable workers")
 	ctx, cancel := caseCtx(t, 15*time.Minute)
 	defer cancel()
 
+	nodeA, nodeB := f.TwoNodes(ctx)
 	pvc := f.MustRWXPVC(ctx, "prov01")
-	// The pod comes before the bind check: a class that binds on first consumer
+	// The pods come before the bind check: a class that binds on first consumer
 	// has nothing to bind to until something is scheduled.
-	pod := f.MustPod(ctx, toolsPod("writer", pvc.Name, ""))
+	writer := f.MustPod(ctx, toolsPod("writer", pvc.Name, nodeA))
+	reader := f.MustPod(ctx, toolsPod("reader", pvc.Name, nodeB))
 	if _, err := f.WaitPVCBound(ctx, pvc.Name, framework.BindTimeout); err != nil {
 		t.Fatalf("claim did not bind once a pod consumed it: %v", err)
 	}
@@ -46,24 +50,28 @@ func TestProvProvisionMountWriteDelete(t *testing.T) {
 		t.Fatalf("resolving the bound PV: %v", err)
 	}
 	t.Logf("claim %s bound to %s on StorageClass %s", pvc.Name, pv.Name, f.Env.StorageClass)
-	want, err := f.WriteFile(ctx, pod.Name, fileIn("prov01.dat"), 1<<20, "prov01")
+	want, err := f.WriteFile(ctx, writer.Name, fileIn("prov01.dat"), 1<<20, "prov01")
 	if err != nil {
-		t.Fatalf("writing to the share: %v", err)
+		t.Fatalf("writing to the share from writer pod %s on %s: %v", writer.Name, nodeA, err)
 	}
-	got, err := f.Sha256(ctx, pod.Name, fileIn("prov01.dat"))
+	got, err := f.Sha256(ctx, reader.Name, fileIn("prov01.dat"))
 	if err != nil {
-		t.Fatalf("reading back: %v", err)
+		t.Fatalf("reader pod %s on %s failed reading file written by writer pod %s on %s (profile %s, want %s): %v",
+			reader.Name, nodeB, writer.Name, nodeA, profile(t).Name, want, err)
 	}
 	if got != want {
-		t.Fatalf("checksum mismatch on read back: got %s want %s", got, want)
+		t.Fatalf("reader on %s did not see what writer on %s closed (profile %s): got %s want %s",
+			nodeB, nodeA, profile(t).Name, got, want)
 	}
 
-	// Graceful, and waited out: the claim below must not outlive the mount.
-	if err := f.DeletePod(ctx, pod.Name); err != nil {
-		t.Fatalf("deleting the pod: %v", err)
-	}
-	if err := f.WaitPodGone(ctx, pod.Name, framework.DeleteTimeout); err != nil {
-		t.Fatalf("pod did not go away: %v", err)
+	// Graceful, and waited out: the claim below must not outlive the mounts.
+	for _, pod := range []*corev1.Pod{writer, reader} {
+		if err := f.DeletePod(ctx, pod.Name); err != nil {
+			t.Fatalf("deleting pod %s: %v", pod.Name, err)
+		}
+		if err := f.WaitPodGone(ctx, pod.Name, framework.DeleteTimeout); err != nil {
+			t.Fatalf("pod %s did not go away: %v", pod.Name, err)
+		}
 	}
 	if err := f.C.Kube.CoreV1().PersistentVolumeClaims(framework.Namespace).Delete(ctx, pvc.Name, metav1.DeleteOptions{}); err != nil {
 		t.Fatalf("deleting the claim: %v", err)
