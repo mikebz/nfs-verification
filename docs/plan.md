@@ -147,7 +147,7 @@ Each step is one pull request. Later steps depend only on earlier ones.
 | 4 | Grace and lock reclaim: CHAOS-05, CHAOS-06, CHAOS-07, OBS-02, OBS-03, designed in [`03-grace-and-lock-reclaim-design.md`](03-grace-and-lock-reclaim-design.md) | done, [PR #8](https://github.com/mikebz/nfs-verification/pull/8) |
 | 5 | Close out Provisioning (PROV): PROV-02, PROV-05 to PROV-11 | done, [PR #10](https://github.com/mikebz/nfs-verification/pull/10) |
 | 6 | Close out Concurrency and Data Integrity (DATA): DATA-06 to DATA-13, locktool helper, designed in [`04-data-path-and-locktool-design.md`](04-data-path-and-locktool-design.md) | run on GKE 2026-09-11: DATA-05 to DATA-09 and DATA-11 to DATA-13 pass, with CHAOS-06; DATA-11's punch half reports blocked on a busybox image; DATA-10 not yet run; DATA-14 deferred, see test plan Section 3.2 |
-| 7 | Close out Observability (OBS): OBS-01, OBS-05, OBS-06, OBS-07 | |
+| 7 | Close out Observability (OBS): OBS-01, OBS-05, OBS-06, OBS-07, designed in [`05-observability-and-alerting-design.md`](05-observability-and-alerting-design.md) | next, design written |
 | 8 | Close out Security and Identity (SEC): SEC-03 to SEC-09 | |
 | 9 | Close out Scale and Performance (SCALE): SCALE-01 to SCALE-07 | |
 | 10 | Close out Resiliency and Chaos (CHAOS): CHAOS-03, CHAOS-04, CHAOS-08 to CHAOS-18 | |
@@ -471,6 +471,14 @@ check to a content check; and the fix for `scripts/lock-probe.sh` passing
 
 ## 3f. What step 7 contains (Close out OBS)
 
+Designed first in
+[`05-observability-and-alerting-design.md`](05-observability-and-alerting-design.md),
+which carries the rule that decides every case here: a monitoring API the suite
+cannot reach is blocked, and one that answers and has nothing to say about the
+server is a failure. That is F-008's rule applied to the metrics channel. The
+doc also says why OBS-06's fill half can refuse to run, and why no case here
+drives the server to OOMKill.
+
 Closes out Section 3.5 entirely. Four cases asserting operational observability,
 health alerting, memory ceiling warnings, capacity alerts, and metrics continuity:
 
@@ -483,9 +491,15 @@ health alerting, memory ceiling warnings, capacity alerts, and metrics continuit
 - OBS-07: metrics survive server restart. Post-recovery metrics counters either
   reset cleanly or persist continuously, leaving no gaps that obscure an outage.
 
-**Harness added**: a metrics and alert querying client (Prometheus API or
-Kubernetes metrics endpoints), threshold-fill workload helpers, and server
-memory pressure simulation.
+**Harness added**: a read-only client for a Prometheus-compatible HTTP API and
+for the kubelet Summary API, both reached through the API server's proxy
+subresource; endpoint discovery confirmed by probe and recorded in
+`environment.json`; a bounded ingress partition of the server pod, which
+CHAOS-04 inherits; a bounded capacity fill gated on the export being
+quota-enforced; and a bounded small-file storm for the memory ceiling case.
+
+Delivered as four pull requests, smallest runnable slice first: the metrics
+reach with OBS-07, then OBS-06, then OBS-01, then OBS-05.
 
 ---
 
