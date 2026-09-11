@@ -465,7 +465,7 @@ of CHAOS-06, both deferred here by
 [`03-grace-and-lock-reclaim-design.md`](03-grace-and-lock-reclaim-design.md)
 section 5.5; the upgrade of CHAOS-01, CHAOS-02 and PROV-11 from an existence
 check to a content check; and the fix for `scripts/lock-probe.sh` passing
-`flock -w`, recorded as F-005 in [`findings.md`](findings.md).
+`flock -w`, recorded as F-006 in [`findings.md`](findings.md).
 
 ---
 

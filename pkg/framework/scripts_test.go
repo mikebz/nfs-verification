@@ -99,7 +99,7 @@ func TestRunScriptRejectsABadID(t *testing.T) {
 // (util-linux/flock.c). util-linux accepts a superset, which is why a
 // portability defect here cannot be caught by running the script: the
 // workstation and the default tools image both accept more than the rule
-// allows. See F-005 in docs/findings.md.
+// allows. See F-006 in docs/findings.md.
 var busyboxFlockOptions = map[string]bool{"-s": true, "-x": true, "-u": true, "-n": true}
 
 // TestScriptsUseOnlyPortableFlockOptions holds the scripts to what the
