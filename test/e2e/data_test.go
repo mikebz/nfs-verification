@@ -417,7 +417,7 @@ func TestDataNoVisibilityBeforeClose(t *testing.T) {
 // before it is filed against the server.
 const appendCaveat = "\n\nNote before filing: NFSv4.1 has no append operation. A client implements O_APPEND " +
 	"by writing at the offset it believes to be end of file, so concurrent appends from several clients " +
-	"are an implementation property and not something the protocol promises (see gap 1 in docs/plan.md). " +
+	"are an implementation property and not something the protocol promises (see gap 1 in docs/02-implementation-plan.md). " +
 	"Route this to the boundary discussion, not to the server owner, unless records are torn rather than lost: " +
 	"a torn record is corruption under any reading."
 

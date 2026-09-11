@@ -1,5 +1,5 @@
 # Targets for the NFS RWX verification suite. Budgets follow Section 4.2 of
-# docs/01-test-plan.md; see docs/plan.md for the delivery order.
+# docs/01-test-plan.md; see docs/02-implementation-plan.md for the delivery order.
 #
 # Every target takes FLAGS for cluster-specific values, for example:
 #
@@ -34,7 +34,7 @@ vet:
 # pod over pods/exec. No image and no registry: a binary this repository owns,
 # gated on a registry an operator has to populate, would mean the byte-range
 # cases never run anywhere, and a case that is skipped everywhere does not
-# exist. See docs/04-data-path-and-locktool-design.md section 5.3.
+# exist. See docs/05-data-path-and-locktool-design.md section 5.3.
 #
 # One binary per node architecture; the harness picks the matching one from what
 # the node itself reports. CGO_ENABLED=0 makes them static, so they run on a

@@ -1,5 +1,8 @@
 # Findings
 
+Author: mikebz@
+Updated: 2026-09-11
+
 Things learned by running the suite against a real cluster that are worth
 remembering. Each entry says what happened, why, what changed in the code, and
 what it implies for the system under test as opposed to the harness.
@@ -169,7 +172,7 @@ Section 3.2 of the test plan says why.
 ## F-006: `scripts/lock-probe.sh` passed `flock -w`, which busybox does not have
 
 **Found:** 2026-09-11, by reading the applet sources while writing
-[`04-data-path-and-locktool-design.md`](04-data-path-and-locktool-design.md).
+[`05-data-path-and-locktool-design.md`](05-data-path-and-locktool-design.md).
 Not found by a run: on a workstation and on the default `alpine:3.20` tools
 image the probe works, because both carry the util-linux `flock`.
 
@@ -246,7 +249,7 @@ exec unshare --mount --propagation shared -- bash -c '
 The bug is the combination of `--propagation shared` with `mount --bind` *before* `mount --make-private`:
 
 1. `unshare --mount --propagation shared` places the new namespace root and `/etc` into the **same shared peer group** as the host namespace.
-2. Inside that shared namespace, executing `mount --bind /etc /etc` causes Linux VFS mount propagation to immediately clone the new bind mount across all peers in the group—including the host namespace.
+2. Inside that shared namespace, executing `mount --bind /etc /etc` causes Linux VFS mount propagation to immediately clone the new bind mount across all peers in the group, including the host namespace.
 3. The subsequent `mount --make-private /etc` only makes the child namespace's mount private; the cloned mount in the host namespace remains shared.
 4. Each subsequent NFS mount starts with $2^N$ mounts on the host, duplicating all existing peer mounts on every execution: $1 \to 2 \to 4 \to 8 \to 16 \dots \to 8192$.
 5. By mount 13, the kernel mount table holds over 16,384 mounts. Every subsequent operation iterating mounts (container creation, exec, `cat /proc/mounts`, kubelet housekeeping) acquires `namespace_sem` and spends excessive CPU traversing stacked mounts. Worker threads enter uninterruptible D-state, container runtimes hang, and the node becomes unresponsive.

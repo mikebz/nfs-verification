@@ -8,8 +8,11 @@ This guide is about **how to work here**: how to approach a change, how to write
 a case, what to claim when you are done, how to behave in review. It is not a
 description of what gets tested, and it must not become one. Read these first:
 
+- `docs/README.md`: the map of every document and the order to read it in,
+  plus the NFS, Kubernetes and CSI sources every assertion traces to.
 - `docs/01-test-plan.md`: the requirements. Case IDs, Section 0 preconditions,
   the SLO table, what is in scope for v1.
+- `docs/02-implementation-plan.md`: the delivery order, and what is done.
 - `docs/findings.md`: what running the suite against a real cluster taught us.
   **Read this before touching teardown, deletion, or anything that unmounts.**
 - `README.md`: layout, flags, and how to build and run.
@@ -39,9 +42,21 @@ description of what gets tested, and it must not become one. Read these first:
 - **A large change is two PRs.** Anything you estimate at 1000 lines or more
   lands as a design doc first, approved before implementation code is written.
   Code written ahead of an approved design gets thrown away.
-  - The doc is a numbered file in `docs/`, for example
-    `docs/02-chaos-operations-design.md`, and it links the cases in the test
-    plan it serves so the requirement traces back to one place.
+  - The doc is the next numbered file in `docs/`, for example
+    `docs/07-something-design.md`, and it links the cases in the test plan it
+    serves so the requirement traces back to one place. Add its row to the table
+    in `docs/README.md` in the same change.
+  - It opens with a header block: `Author:`, `Created:`, `Updated:`, `Status:`
+    (designed, shipped, or superseded, with the step and the PR), and `Serves:`
+    (the case IDs and the test plan sections). A reader who gets no further than
+    the header should still know whether the document describes code that exists.
+  - Keep it short enough to be read in one sitting. Decisions and the reasons
+    for them, the rules a reviewer can accept or reject the phase from, the data
+    contract, and what was deferred. Not a restatement of the test plan's case
+    table, and not a narrative of every draft.
+  - When a later phase overturns a decision, record the supersession in the
+    later document and in the earlier one's "what changed after this was
+    written" section. The decision itself stays where it was made.
   - The design PR contains only the doc. **No code inside the doc either.**
     State object shapes, exec flows and interfaces in prose and tables, not Go
     or YAML: code in a design doc goes stale the moment implementation starts,
@@ -82,6 +97,9 @@ it. What it does not do is change the assertion.
 **State the assumption, and say where it came from.** Every assertion rests on
 something somebody wrote down, and the citation is what lets a reviewer disagree
 with the assertion rather than with you:
+
+The specific documents, with links, are listed in `docs/README.md` under
+*Sources the assertions rest on*. In order of authority:
 
 - **NFSv4.1 semantics**: RFC 8881, and RFC 7530 where v4.0 behaviour is being
   contrasted. Close-to-open, post-COMMIT durability, lock reclaim during grace

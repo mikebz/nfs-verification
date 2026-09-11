@@ -2,16 +2,20 @@
 
 End-to-end verification of NFS RWX persistent volumes on Kubernetes.
 
-- [`docs/01-test-plan.md`](docs/01-test-plan.md) is the test plan: what gets
-  verified and why.
-- [`docs/plan.md`](docs/plan.md) is the implementation plan: the test approach, and the
-  order the plan gets built in.
-- [`docs/findings.md`](docs/findings.md) records what running the suite against a
-  real cluster taught us.
+[`docs/README.md`](docs/README.md) is the map of the documentation and the order
+to read it in. The three you need first:
 
-This repository currently holds the harness skeleton, preflight, twenty-six cases,
-the fault injection engine, and grace observability. The remaining cases land in the steps listed in
-[`docs/plan.md`](docs/plan.md).
+- [`docs/01-test-plan.md`](docs/01-test-plan.md): what gets verified and why.
+- [`docs/02-implementation-plan.md`](docs/02-implementation-plan.md): the test
+  approach, the delivery order, and what is done.
+- [`docs/findings.md`](docs/findings.md): what running the suite against a real
+  cluster taught us.
+
+This repository holds the harness, preflight, the fault injection package, grace
+observability, `locktool`, and the thirty-four cases listed below: all of PROV,
+all of DATA except the deferred soak, both SEC cases that predate step 8, five
+CHAOS cases and three OBS cases. The rest land in the steps listed in
+[`docs/02-implementation-plan.md`](docs/02-implementation-plan.md).
 
 ## Layout
 
@@ -157,14 +161,14 @@ charged to every case eats the `go test -timeout` budget for the package.
 | DATA-13 | Negative durability: un-fsynced records may be absent, never wrong | DATA |
 | SEC-01 | uid and gid preservation across pods on two nodes | SEC |
 | SEC-02 | What the export does to a root-owned write, and whether it does it coherently | SEC |
+| OBS-02 | A failover reaches the operator with a timestamp and a measurable duration | OBS |
+| OBS-03 | Grace entry and exit are both observable, and the window is measurable | OBS |
 | OBS-04 | A mount that cannot succeed reaches the operator as a Kubernetes Event | OBS |
 | CHAOS-01 | SIGKILL the server process during an active write | CHAOS |
 | CHAOS-02 | Delete the server pod during an active write, with a lock held across it | CHAOS |
 | CHAOS-05 | Five failovers in a row, each recovering on its own and entering grace once | CHAOS |
 | CHAOS-06 | Whole-file and disjoint byte-range locks across a failover, read from both ends | CHAOS |
 | CHAOS-07 | A second client attempting a new lock while the server is in grace | CHAOS |
-| OBS-02 | A failover reaches the operator with a timestamp and a measurable duration | OBS |
-| OBS-03 | Grace entry and exit are both observable, and the window is measurable | OBS |
 
 Several are deliberately careful about what they blame. SEC-01 reports
 **blocked**, with the export's own error in the message, when an ordinary uid
@@ -266,7 +270,21 @@ Lease and grace must match one of the two profiles in `pkg/slo`: tuned (20s/30s)
 or default (60s/90s). A third value fails preflight rather than silently
 invalidating every timing assertion.
 
-## Two details that bite on real clusters
+The rest are operational rather than descriptive of the deployment, and `-h`
+prints all of them with their defaults:
+
+| Flag | Default | What it does |
+|---|---|---|
+| `-kubeconfig`, `-context` | `$KUBECONFIG` then `~/.kube/config`, current context | which cluster, resolved once by client-go |
+| `-artifacts-dir`, `-run-id` | `artifacts`, a UTC timestamp | where the bundle lands and what names the objects; a relative directory is anchored to the repository root |
+| `-profile` | either accepted | require a lease/grace profile, `tuned` or `default` |
+| `-preflight-max-age`, `-env-file` | 8h, none | how long a cached preflight result stays usable, and a specific record to reuse instead |
+| `-csi-driver` | taken from the StorageClass | names the driver when the class does not |
+| `-delegations` | `auto` | whether delegations are enabled; gates CHAOS-18, which is not written yet |
+| `-keep-objects`, `-v-harness` | off | leave a case's objects behind for triage, and log every harness action |
+| `-platform`, `-gcloud-project`, `-gcloud-zone`, `-node-power-cmd` | `auto`, empty | how a node would be powered off. Recorded in `environment.json` and read by the capability probe that gates CHAOS-03; the node power operations themselves land in step 10 |
+
+## Three details that bite on real clusters
 
 **StorageClasses that bind on first consumer.** GKE's Filestore classes, and
 plenty of others, set `volumeBindingMode: WaitForFirstConsumer`. Such a claim
@@ -298,10 +316,13 @@ through DATA-09, DATA-11, DATA-12, DATA-13 and CHAOS-06 passed, along with the
 SEC, OBS and CHAOS cases alongside them. DATA-11's hole-punch half reported
 blocked, which is the documented answer on a busybox image.
 
-Two things that suite does not cover today. **DATA-10 has not been run**, so
-whether a directory-backed export holds 100k entries is still unmeasured. And
-**DATA-14 is deferred**, so nothing covers sustained mixed load at scale; that
-gap belongs to SCALE-07. Section 3.2 of the test plan has the reasoning.
+Three gaps in what runs today. **DATA-10 has not been run**, so whether a
+directory-backed export holds 100k entries is still unmeasured. **DATA-14 is
+deferred**, so nothing covers sustained mixed load at scale; that gap belongs to
+SCALE-07, and Section 3.2 of the test plan has the reasoning. And **step 7,
+observability, is designed but not implemented**: OBS-05, OBS-06, OBS-07 and the
+configuration half of OBS-01 have a design doc and no code
+([`docs/06-observability-design.md`](docs/06-observability-design.md)).
 
 An earlier run found two cases reporting more than they had measured; both are
 fixed and the reasoning is F-007.

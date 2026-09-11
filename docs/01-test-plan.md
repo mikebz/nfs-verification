@@ -1,7 +1,14 @@
 # E2E Test Plan: NFS RWX Persistent Volumes on Kubernetes
 
+Author: mikebz@
 Version: 1.0 (v1 scope)
-Mode: GENERATE
+Updated: 2026-09-11
+
+This is the requirements document: what gets verified, and why. How it gets
+built is [`02-implementation-plan.md`](02-implementation-plan.md); what is
+implemented today is [`../README.md`](../README.md);
+[`README.md`](README.md) maps the rest.
+
 Scope note: this plan is written against a userspace NFS server architecture. NFS-Ganesha is the reference implementation used to derive failure modes, but no case depends on Ganesha-specific APIs, config syntax, or binaries. Every assertion is made through the NFS protocol, the Kubernetes API, or the pod filesystem.
 
 ---
@@ -106,7 +113,7 @@ Explicitly **not** archetypes C or D. There is no distributed lock manager, no c
 | Client mount type | Kernel `nfs4`, hard mount. Blocks indefinitely rather than returning EIO. Verified in preflight, not assumed. |
 | Network path | Pod or node network, no dedicated storage network, no isolation from tenant traffic. NetworkPolicy or CNI restart interrupts the data path. |
 | Version ownership | Determined at preflight. If independently versioned, defect routing per Section 4.3. |
-| Semantic claim | Protocol semantics, not POSIX. The server is an NFS server; the guarantee is whatever NFSv4.1 specifies (RFC 8881), not what a local filesystem provides. |
+| Semantic claim | Protocol semantics, not POSIX. The server is an NFS server; the guarantee is whatever NFSv4.1 specifies ([RFC 8881](https://www.rfc-editor.org/rfc/rfc8881.html)), not what a local filesystem provides. |
 
 ### 2.4 Consequences for test emphasis
 
@@ -158,7 +165,7 @@ Assertions here are calibrated to the protocol claim in 2.3. Do not tighten them
 | DATA-08 | `noac` mount variant, cross-pod visibility without close | Immediate visibility, confirming the difference from DATA-04 |
 | DATA-09 | Rename, unlink, and re-create while another pod holds the file open | Open fd remains valid; silly-rename behavior correct |
 | DATA-10 | Large directory (100k entries) readdir concurrent with deletes | Listing completes, no server crash, no use-after-free. Derived from a documented directory-chunk reuse crash in READDIR under cache pressure. |
-| DATA-11 | Sparse file write, hole punch, read back | Correct zero regions; reported size consistent. Hole punching is NFSv4.2 (`DEALLOCATE`, RFC 7862); on the 4.1 mount Section 0 pins, the punch is **recorded as unsupported, not asserted**, and the case fails only if a punch reports success without zeroing. |
+| DATA-11 | Sparse file write, hole punch, read back | Correct zero regions; reported size consistent. Hole punching is NFSv4.2 (`DEALLOCATE`, [RFC 7862](https://www.rfc-editor.org/rfc/rfc7862.html)); on the 4.1 mount Section 0 pins, the punch is **recorded as unsupported, not asserted**, and the case fails only if a punch reports success without zeroing. |
 | DATA-12 | fsync and COMMIT durability: write, fsync, kill server | Post-recovery data present |
 | DATA-13 | Negative durability: write without fsync, kill server | Data may be absent. Asserted as acceptable, documented. |
 | DATA-14 | Mixed 70/30 read/write, 4KiB to 1GiB files, 20 pods, 1h | Zero checksum mismatches. **Deferred, not implemented.** See below. |
@@ -251,7 +258,7 @@ that data cannot be alerted on by anyone, whatever rules they write, so each
 case fails rather than skipping when the data is absent.
 
 How the data is read, and what a green run does and does not establish, is in
-[`05-observability-design.md`](05-observability-design.md).
+[`06-observability-design.md`](06-observability-design.md).
 
 ### 3.6 Security and identity (SEC)
 
@@ -309,13 +316,13 @@ Note on determinism: a server may lift grace early once it concludes no further 
 
 **Floor note: 90s for ungraceful node loss is not reachable on Kubernetes defaults.** Two platform defaults sit in front of the storage system and neither has anything to do with NFS:
 
-1. Kubernetes automatically adds tolerations for `node.kubernetes.io/not-ready` and `node.kubernetes.io/unreachable` with `tolerationSeconds=300` unless the pod sets them explicitly, so a pod on a dead node stays bound for five minutes before eviction.
+1. Kubernetes automatically adds tolerations for `node.kubernetes.io/not-ready` and `node.kubernetes.io/unreachable` with `tolerationSeconds=300` unless the pod sets them explicitly ([taints and tolerations](https://kubernetes.io/docs/concepts/scheduling-eviction/taint-and-toleration/)), so a pod on a dead node stays bound for five minutes before eviction.
 2. Once evicted, an RWO backing volume must detach from the dead node before it can attach elsewhere. The attach-detach controller waits `maxWaitForUnmountDuration` (6 minutes) before force-detaching, and that value is not currently configurable.
 
 Worst case on stock settings is therefore around 11 minutes, not 90 seconds. Two required configuration changes on the test cluster, both recorded in `environment.json` and asserted at preflight:
 
 - The server workload sets `tolerationSeconds: 30` explicitly on both taints.
-- Ungraceful node loss applies the `node.kubernetes.io/out-of-service=nodeshutdown:NoExecute` taint to trigger immediate volume detach, which is the GA path for exactly this case.
+- Ungraceful node loss applies the `node.kubernetes.io/out-of-service=nodeshutdown:NoExecute` taint to trigger immediate volume detach, which is the GA path for exactly this case ([non-graceful node shutdown](https://kubernetes.io/docs/concepts/architecture/nodes/)).
 
 If either is absent, CHAOS-03 is reported as **blocked on cluster configuration**, not failed. Distinguishing the two matters: a 6-minute recovery caused by a controller default is a deployment defect, and filing it against the NFS server wastes a week.
 
@@ -327,10 +334,10 @@ If either is absent, CHAOS-03 is reported as **blocked on cluster configuration*
 
 - Language: Go. `client-go` for orchestration, standard `testing` for structure, table-driven cases. No Ginkgo.
 - The harness runs **on the operator's workstation**, outside the cluster. It authenticates with a kubeconfig, creates PVCs, pods and DaemonSets, injects faults, collects logs, and asserts. It creates no namespaces: everything lands in `default`. No component of the suite is deployed into the cluster ahead of time.
-- The harness is a Kubernetes client, not an NFS client. It never mounts the share itself. All I/O comes from in-cluster pods running portable binaries: `fio` for load, `dd` for simple patterns, `flock` and a small static Go binary for lock semantics, `sha256sum` for verification.
-- Optional and off by default: `-external-mount=<server>:<path>` lets the workstation mount the export directly with a plain Linux NFS client. Used only for triage step 6 (reproducing outside Kubernetes to route a defect upstream). It is skipped, never failed, when the server is unreachable from the workstation, which is the normal case on a private GKE cluster.
-- Node-level assertions (`/proc/mounts`, dmesg, process signals) go through a privileged DaemonSet with host namespace access. This is the only privileged component, and its absence is a preflight failure rather than a silent skip.
-- No distro-specific APIs. Chaos is expressed as Kubernetes operations (pod delete, node cordon and drain, NetworkPolicy apply, node shutdown via whatever the platform provides) behind an interface with a GKE implementation and a bare-metal implementation.
+- The harness is a Kubernetes client, not an NFS client. It never mounts the share itself. All I/O comes from in-cluster pods running portable binaries: `dd` for simple patterns, `flock` and `locktool`, a small static Go binary in this repository, for lock semantics, `sha256sum` for verification, `stat` and `df` for what the client sees. `fio` arrives with the scale cases, from an operator-supplied image.
+- Triage step 6, reproducing outside Kubernetes against the server with a plain Linux NFS client, is done by hand. An earlier draft of this plan gave the harness an `-external-mount` flag for it; no such flag exists, because the server is normally unreachable from the workstation on a private cluster and a flag nothing uses is a flag that rots.
+- Node-level assertions (`/proc/mounts`, `/proc/locks`, dmesg, process signals) go through a privileged DaemonSet with host namespace access. This is the only privileged component, and its absence is a preflight failure rather than a silent skip.
+- No distro-specific APIs. Chaos is expressed as Kubernetes operations or a signal through the node agent, so the same case runs on GKE and on bare metal. `pkg/chaos` holds two operations today, both portable; the per-platform interface arrives with node power in step 10, which is the one thing that genuinely differs.
 - Every case is skippable by capability, never by platform name. `if !caps.CanKillNode { t.Skip() }`, never `if platform == "gke"`.
 
 ### 4.2 Execution by Category
@@ -392,7 +399,7 @@ Each maps to a real reported defect class, not speculation.
 - Upgrade of any component. Deferred to v2.
 - Multi-cluster and cross-region.
 - Kerberos and `sec=krb5*`. AUTH_SYS only.
-- RPC-over-TLS (RFC 9289), certificate rotation under load, and TLS handshake storm cases. Deferred to v2 and **contingent on SEC-08**: server-side support is not a given, and the Linux client side needs both an `xprtsec=` capable kernel and a handshake helper daemon on the node, neither of which is controllable on a managed node image. Probe first, then plan. CNI-level encryption (WireGuard, IPsec) is a platform property and belongs in the platform suite, not here.
+- RPC-over-TLS ([RFC 9289](https://www.rfc-editor.org/rfc/rfc9289.html)), certificate rotation under load, and TLS handshake storm cases. Deferred to v2 and **contingent on SEC-08**: server-side support is not a given, and the Linux client side needs both an `xprtsec=` capable kernel and a handshake helper daemon on the node, neither of which is controllable on a managed node image. Probe first, then plan. CNI-level encryption (WireGuard, IPsec) is a platform property and belongs in the platform suite, not here.
 - pNFS and RDMA transports.
 - GKE Autopilot (no privileged pods, so no node-level assertions).
 - Any case asserting POSIX coherence across clients. Out of scope by architecture, not by budget.

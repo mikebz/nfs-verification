@@ -5,7 +5,7 @@
 // flock(2), whose system call has no range argument; util-linux ships no
 // byte-range lock command at all; and the alternatives that would work all need
 // a runtime the repository does not assume. Section 5.2 of
-// docs/04-data-path-and-locktool-design.md lists what was checked.
+// docs/05-data-path-and-locktool-design.md lists what was checked.
 //
 // Byte ranges are not an exotic thing to reach for here: NFSv4.1 carries LOCK,
 // LOCKT and LOCKU with an offset and a length in the protocol itself (RFC 8881),
