@@ -658,14 +658,34 @@ func TestProvProvisionServerDown(t *testing.T) {
 
 	// For WaitForFirstConsumer, schedule the consumer pod during the outage so the
 	// scheduler and CSI driver attempt volume provisioning during the outage.
+	// We create the pod directly without waiting for Ready because the volume cannot
+	// be provisioned/mounted until the server recovers.
 	var pod *corev1.Pod
 	if mode == storagev1.VolumeBindingWaitForFirstConsumer {
-		pod = f.MustPod(ctx, toolsPod("holder", pvc.Name, ""))
+		spec := toolsPod("holder", pvc.Name, "")
+		obj, err := f.PodBuilder(spec)
+		if err != nil {
+			t.Fatalf("building consumer pod: %v", err)
+		}
+		pod, err = f.C.Kube.CoreV1().Pods(framework.Namespace).Create(ctx, obj, metav1.CreateOptions{})
+		if err != nil {
+			t.Fatalf("creating consumer pod without waiting: %v", err)
+		}
 	}
 
 	// Sustained check: verify the claim remains Pending while the server is down.
+	checkedAtLeastOnce := false
 	deadline := time.Now().Add(framework.ServerOutageObserveDuration)
 	for time.Now().Before(deadline) {
+		live, err := f.GetPVC(ctx, pvc.Name)
+		if err != nil {
+			t.Fatalf("re-reading claim: %v", err)
+		}
+		if live.Status.Phase == corev1.ClaimBound {
+			t.Fatalf("claim %s bound prematurely while server was down", pvc.Name)
+		}
+		checkedAtLeastOnce = true
+
 		pods, err := framework.ServerPods(ctx, f.C)
 		if err == nil {
 			recovered := false
@@ -681,14 +701,10 @@ func TestProvProvisionServerDown(t *testing.T) {
 			}
 		}
 
-		live, err := f.GetPVC(ctx, pvc.Name)
-		if err != nil {
-			t.Fatalf("re-reading claim: %v", err)
-		}
-		if live.Status.Phase == corev1.ClaimBound {
-			t.Fatalf("claim %s bound prematurely while server was down", pvc.Name)
-		}
 		time.Sleep(framework.PollInterval)
+	}
+	if !checkedAtLeastOnce {
+		t.Fatalf("outage observation window ended before verifying claim was pending")
 	}
 	t.Logf("claim %s remained Pending throughout server outage", pvc.Name)
 
@@ -704,6 +720,12 @@ func TestProvProvisionServerDown(t *testing.T) {
 
 	if pod == nil {
 		pod = f.MustPod(ctx, toolsPod("holder", pvc.Name, ""))
+	} else {
+		var err error
+		pod, err = f.WaitPodReady(ctx, pod.Name, framework.PodReadyTimeout)
+		if err != nil {
+			t.Fatalf("consumer pod did not become ready after server recovery: %v", err)
+		}
 	}
 
 	want, err := f.WriteFile(ctx, pod.Name, fileIn("prov07.dat"), 1<<20, "prov07")
