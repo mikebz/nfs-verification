@@ -396,9 +396,43 @@ So: `make locktool` cross-compiles with `CGO_ENABLED=0` into
 runtime the harness reads the target node's architecture from
 `node.Status.NodeInfo.Architecture`, streams the matching file into the ordinary
 client pod over `pods/exec` with stdin attached to `cat > /tmp/locktool`, and
-chmods it. This is what `kubectl cp` does, so the path is well travelled: the
-exec stream is binary-clean, and no encoding step is needed. The one harness
-addition is stdin on `Client.Exec`, which it does not wire today.
+chmods it. The exec stream is binary-clean, so no encoding step is needed. The
+one harness addition is stdin on `Client.Exec`, which it does not wire today:
+`PodExecOptions.Stdin` and `remotecommand.StreamOptions.Stdin` are both already
+in the vendored API, so it is a handful of lines on a path every case already
+uses.
+
+**Why not `kubectl cp`.** It is the obvious answer and it is the wrong one
+here, for four reasons that compound:
+
+- **The suite has no `kubectl` dependency, and this would create one.** The
+  harness is a client-go program authenticating with a kubeconfig; `os/exec`
+  appears only in unit tests, deliberately, to run generated shell under a real
+  shell. Shelling out would put a binary on the operator's PATH in the README's
+  requirements for one file copy.
+- **Two independent resolutions of the same cluster.** `-kubeconfig` and
+  `-context` are resolved by client-go today. `kubectl` would resolve them
+  again, from its own flags and environment. A multi-path `KUBECONFIG` or a
+  different current-context makes those two answers diverge, and the failure is
+  that the binary lands in one cluster while the case runs in another. Nothing
+  about that failure looks like what it is.
+- **`kubectl cp` needs `tar` in the container.** It works by streaming a tar
+  archive into `tar -xmf -` inside the target, and its own documentation says
+  "Requires that the 'tar' binary is present in your container image. If 'tar'
+  is not present, 'kubectl cp' will fail." busybox has `tar`, so this is not
+  fatal, but it is a dependency bought for nothing: `cat > file` needs no tool
+  at all, which is the same standard every other script in this repository is
+  held to.
+- **It is not less code, and it is worse code.** Against ten lines of stdin on
+  an existing helper: locate the binary, thread three flags, quote the paths,
+  and parse a combined-output blob instead of the wrapped error naming the
+  namespace and pod that `MustSh` already produces. Bounding it on the case's
+  context is weaker too, and every wait in this harness is bounded by a named
+  constant.
+
+Importing `k8s.io/kubectl/pkg/cmd/cp` as a library is the third shape, and it
+is rejected for a plainer reason: it pulls the cobra command surface in behind
+it, and that package exists to back a command, not to be called.
 
 Three guards, because a silently wrong binary is worse than a missing one:
 
@@ -902,6 +936,8 @@ Export path: unchanged, `artifacts/<run-id>/<CASE-ID>/`.
 | An existing byte-range lock tool | Use what Linux ships | Nothing ships one. Section 5.2 has the candidates that were checked and what each is missing |
 | Python's `fcntl.lockf` | Real record locking from a one-line snippet, no binary | Needs Python in the tools image; the repository assumes nothing beyond busybox, so every range case would skip by default |
 | locktool as a published image | Build and push an image, name it with a flag, skip without it | A binary this repository owns, gated on a registry the operator must populate, means the byte-range cases never run anywhere |
+| `kubectl cp` | Shell out to copy the binary in | Adds a PATH dependency and a second resolution of kubeconfig and context that can disagree with client-go's; needs `tar` in the container; more code than stdin on the exec helper the suite already has. Section 5.3 |
+| `k8s.io/kubectl/pkg/cmd/cp` as a library | Import the copy logic instead of shelling out | Pulls the cobra command surface in; the package backs a command rather than a caller |
 | locktool embedded with `go:embed` | Commit the compiled binaries and embed them in the test binary | Committed binaries cannot be reviewed, and the repository would carry two per release |
 | Compile locktool inside the pod | Ship the source and build it there | No toolchain on a busybox image, and adding one makes the image the thing under test |
 | A `TestNightly` gate | A third prefix for the plan's gate-N cases | Names a schedule nothing in this repository keeps. Section 5.14 |
@@ -988,5 +1024,6 @@ locking, RFC 7862 for the NFSv4.2 sparse-file operations, the Linux kernel's
 `fs/nfs/file.c`, `fs/nfs/fs_context.c`, `fs/nfs/nfs4state.c` and
 `Documentation/filesystems/nfs/client-identifier.rst` for client behavior, the
 busybox `coreutils/dd.c`, `util-linux/flock.c` and `util-linux/fallocate.c`
-applets for what a stock image can do, and the Kubernetes `NodeStatus` and
-`CSIDriverSpec` API definitions for section 5.6.
+applets for what a stock image can do, the Kubernetes `NodeStatus` and
+`CSIDriverSpec` API definitions for section 5.6, and `kubectl`'s own
+`pkg/cmd/cp` for the `tar` requirement in section 5.3.
