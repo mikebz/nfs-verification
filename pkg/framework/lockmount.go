@@ -88,7 +88,7 @@ func (f *Framework) PodVolumeMount(ctx context.Context, node, pvName string) (Mo
 		return MountLine{}, fmt.Errorf("reading /proc/mounts on %s: %w", node, err)
 	}
 	for _, m := range mounts {
-		if isNFS(m.FSType) && strings.Contains(m.MountPoint, pvName) {
+		if isNFS(m.FSType) && MountPointHolds(m.MountPoint, pvName) {
 			return m, nil
 		}
 	}
@@ -98,6 +98,25 @@ func (f *Framework) PodVolumeMount(ctx context.Context, node, pvName string) (Mo
 
 // isNFS reports whether a /proc/mounts filesystem type is an NFS one.
 func isNFS(fsType string) bool { return fsType == "nfs" || fsType == "nfs4" }
+
+// MountPointHolds reports whether a mount path names a volume.
+//
+// A whole path component, not a substring. Kubelet puts the volume's name in
+// one component, and a substring test matches any volume whose name merely
+// contains this one. That cuts both ways and both are wrong: a lock case would
+// read the options of the wrong mount, and an unmount wait would keep seeing a
+// different volume and time out after the one it wanted had gone.
+func MountPointHolds(mountPoint, pvName string) bool {
+	if pvName == "" {
+		return false
+	}
+	for _, part := range strings.Split(mountPoint, "/") {
+		if part == pvName {
+			return true
+		}
+	}
+	return false
+}
 
 // CheckLockMount reads back the options of the mount a pod locks through and
 // says whether locks of that kind reach the server.
@@ -158,14 +177,59 @@ func (l ProcLock) String() string {
 		l.Kind, l.Enforcement, l.Mode, l.PID, l.Device, l.Inode, l.Start, end, state)
 }
 
-// Covers reports whether this lock is a held POSIX lock over exactly the given
-// range of the given file.
+// FileID is a file's identity as the kernel prints it in /proc/locks: the
+// device its filesystem sits on, and its inode number on that device.
 //
-// Exactly, and on that file: the range alone is not identity. The device and
-// inode come from the same kernel that printed the lock, and a pod reads the
-// same inode number for the same file through stat.
-func (l ProcLock) Covers(inode int64, r LockRange) bool {
-	if l.Kind != "POSIX" || l.Waiting || l.Inode != inode {
+// Both halves are needed. Inode numbers are unique per filesystem, not per
+// node, and the lock table covers every filesystem mounted there, so an inode
+// number alone can collide with an unrelated file somewhere else.
+type FileID struct {
+	// Device is major:minor, two hex digits each, as /proc/locks prints it.
+	Device string
+	Inode  int64
+}
+
+func (f FileID) String() string { return f.Device + ":" + strconv.FormatInt(f.Inode, 10) }
+
+// Known reports whether enough of the identity was readable to match on.
+func (f FileID) Known() bool { return f.Inode != 0 }
+
+// DeviceFromStatDev converts an st_dev as stat reports it into the major:minor
+// string /proc/locks prints.
+//
+// The two describe the same device in different encodings. stat returns the
+// packed userspace dev_t the kernel builds in new_encode_dev: the minor's low
+// eight bits at the bottom, the major's low twelve above them, and the high
+// bits of the minor above that. /proc/locks prints the two halves separately in
+// hex. One of them has to be converted before they can be compared, and doing
+// it here keeps it in reach of a unit test.
+func DeviceFromStatDev(dev uint64) string {
+	major := ((dev >> 8) & 0xfff) | ((dev >> 32) &^ uint64(0xfff))
+	minor := (dev & 0xff) | ((dev >> 12) &^ uint64(0xff))
+	return fmt.Sprintf("%02x:%02x", major, minor)
+}
+
+// Covers reports whether this lock is a held POSIX lock of the right mode over
+// exactly the given range of the given file.
+//
+// Every clause earns its place. The kind, because flock and OFD locks are
+// different APIs asking different questions. Not waiting, because a client
+// queued for a range does not hold it. The file, because a range is not
+// identity. And the mode, because a write lock that came back shared would let
+// a second writer in, which is the failure the cases using this exist to catch.
+//
+// A file whose device could not be read is matched on inode alone. That is
+// weaker and the caller says so; it is still far better than matching on a
+// range, and refusing to match at all would turn an unreadable stat into a
+// reported protocol failure.
+func (l ProcLock) Covers(id FileID, r LockRange) bool {
+	if l.Kind != "POSIX" || l.Waiting || l.Inode != id.Inode {
+		return false
+	}
+	if id.Device != "" && l.Device != id.Device {
+		return false
+	}
+	if !l.modeMatches(r.Mode) {
 		return false
 	}
 	if l.Start != r.Start {
@@ -175,6 +239,17 @@ func (l ProcLock) Covers(inode int64, r LockRange) bool {
 		return l.EndsAtEOF
 	}
 	return !l.EndsAtEOF && l.End == r.Start+r.Len-1
+}
+
+// modeMatches compares the kernel's READ/WRITE against a range's read/write.
+func (l ProcLock) modeMatches(mode string) bool {
+	switch strings.ToUpper(mode) {
+	case "READ":
+		return l.Mode == "READ"
+	case "WRITE":
+		return l.Mode == "WRITE"
+	}
+	return false
 }
 
 // ParseProcLocks parses the contents of /proc/locks. A pure function with a

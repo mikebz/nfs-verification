@@ -2,6 +2,7 @@ package framework
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -9,8 +10,10 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 )
 
 // testFixture builds a fixture over a fake clientset. Fields are not assembled
@@ -106,22 +109,52 @@ func TestAwaitVolumeNotInUseFailsWhileStillMounted(t *testing.T) {
 	}
 }
 
-// TestAwaitVolumeNotInUseSucceedsOnceReleased is the other direction, so that
-// the check above is not passing because the wait never succeeds at all.
+// TestAwaitVolumeNotInUseNeedsToSeeTheVolumeFirst covers the transition, which
+// is the only thing that proves an unmount.
+//
+// An absence does not. Node status lags the mount it describes, so a volume
+// that is genuinely mounted can be missing from the list at the moment the
+// first poll looks. Accepting that reports a live mount as released, and
+// teardown then deletes the claim under it, which is the F-001 failure this
+// helper exists to prevent.
 //
 // Steps:
-//  1. Offer a node whose volumesInUse is empty, which is what a finished
-//     unmount looks like on a driver that attaches.
-//  2. Assert the wait returns without error, so that the check above is failing
-//     on the state it names rather than because this wait never succeeds at all.
-func TestAwaitVolumeNotInUseSucceedsOnceReleased(t *testing.T) {
-	const node = "worker-1"
-	kube := fake.NewSimpleClientset(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: node}})
-	f := testFixture(kube)
+//  1. Offer a node whose volumesInUse never held the volume.
+//  2. Assert the wait refuses to answer rather than reporting success, so the
+//     caller falls back to reading the node's own mount table.
+//  3. Offer a node that holds the volume and then releases it.
+//  4. Assert the wait succeeds on that transition, so the refusal above is a
+//     real distinction and not this path never succeeding at all.
+func TestAwaitVolumeNotInUseNeedsToSeeTheVolumeFirst(t *testing.T) {
+	const (
+		node   = "worker-1"
+		unique = "kubernetes.io/csi/nfs.csi.k8s.io^pvc-123"
+	)
+	empty := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: node}}
+	f := testFixture(fake.NewSimpleClientset(empty))
 
-	if err := f.awaitVolumeNotInUse(context.Background(), node,
-		"kubernetes.io/csi/nfs.csi.k8s.io^pvc-123", 5*time.Second); err != nil {
-		t.Fatalf("the wait never finished against a node holding nothing: %v", err)
+	err := f.awaitVolumeNotInUse(context.Background(), node, unique, 2*time.Second)
+	if !errors.Is(err, errVolumeNeverSeenInUse) {
+		t.Fatalf("the wait returned %v against a node that never listed the volume; it must decline to "+
+			"answer, because an absence it never saw appear proves nothing about a mount", err)
+	}
+
+	// Listed, then released. The fake clientset has no way to mutate status
+	// between polls on its own, so a reactor answers in use once and empty
+	// afterwards, which is the shape the real transition has.
+	kube := fake.NewSimpleClientset(empty)
+	var gets int
+	kube.PrependReactor("get", "nodes", func(k8stesting.Action) (bool, runtime.Object, error) {
+		gets++
+		n := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: node}}
+		if gets == 1 {
+			n.Status.VolumesInUse = []corev1.UniqueVolumeName{unique}
+		}
+		return true, n, nil
+	})
+	moving := testFixture(kube)
+	if err := moving.awaitVolumeNotInUse(context.Background(), node, unique, 10*time.Second); err != nil {
+		t.Fatalf("the wait did not finish against a node that held the volume and then released it: %v", err)
 	}
 }
 

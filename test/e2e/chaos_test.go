@@ -147,7 +147,7 @@ func waitRecovered(ctx context.Context, t *testing.T, s chaosSetup, faultAt time
 	// Waited out well past the budget on purpose: a case that gives up at the
 	// SLO reports "timed out" where it could report how long recovery actually
 	// took, and the second is what a defect report needs.
-	waitFor := s.budget + 5*time.Minute
+	waitFor := s.budget + slo.ObservationMargin
 	var resumed framework.LoadRecord
 	err := framework.Poll(ctx, framework.PollInterval, waitFor, func(ctx context.Context) (bool, error) {
 		rep, err := s.load.Report(ctx)
@@ -730,6 +730,29 @@ func assertRangesSurvivedFailover(ctx context.Context, t *testing.T, f *framewor
 		}
 	}
 
+	// The client's own belief, next to the server's answer above. This is the
+	// half no acquire can see: a client holding a range the server has
+	// forgotten shows up here and nowhere else.
+	//
+	// It runs before the third client, deliberately. The third client is an
+	// extra pod that may report blocked on a mixed-architecture cluster, and a
+	// skip there would take these assertions with it.
+	if err := f.RecordNodeLocks(ctx, "after-failover", d.holderNode, d.otherNode); err != nil {
+		t.Logf("recording the client lock tables after the failover: %v", err)
+	}
+	// One identity, read once from either client: both mount the same file, and
+	// the device and inode are what the node's lock table prints.
+	id, err := f.FileIdentity(ctx, d.holderPod, d.path)
+	if err != nil {
+		t.Fatalf("reading the identity of %s, which is how a lock line is matched to a file: %v", d.path, err)
+	}
+	if id.Device == "" {
+		t.Logf("stat did not report a device for %s, so the lock lines below are matched on inode and "+
+			"range alone, which is weaker", d.path)
+	}
+	assertClientHoldsRange(ctx, t, f, d.holderNode, id, rangeA, d.holderPod)
+	assertClientHoldsRange(ctx, t, f, d.otherNode, id, rangeB, d.otherPod)
+
 	// A third client, on neither holder's range. On a cluster with a spare node
 	// it sits on one, so both refusals cross the server; on a two-node cluster
 	// it shares a node with one holder, and that refusal is the client's own
@@ -758,6 +781,14 @@ func assertRangesSurvivedFailover(ctx context.Context, t *testing.T, f *framewor
 	for _, r := range []framework.LockRange{rangeA, rangeB} {
 		ans, err := f.TryLock(ctx, third, d.path, r)
 		if err != nil {
+			// Blocked rather than fatal: a spare node on another architecture
+			// has no locktool, and that is a fact about this checkout. The
+			// assertions above have already run and stand on their own.
+			if framework.IsBlocked(err) {
+				t.Logf("the third client on %s cannot be used: %v. The two holders' own ranges were "+
+					"still checked from both ends above", thirdNode, err)
+				return
+			}
 			t.Fatalf("probing %s from the third client on %s: %v", r, thirdNode, err)
 		}
 		if ans.Free {
@@ -766,21 +797,6 @@ func assertRangesSurvivedFailover(ctx context.Context, t *testing.T, f *framewor
 				"neither is acceptable", thirdNode, r)
 		}
 	}
-
-	// And the client's own belief, next to the server's answer above. This is
-	// the half no acquire can see: a client holding a range the server has
-	// forgotten shows up here and nowhere else.
-	if err := f.RecordNodeLocks(ctx, "after-failover", d.holderNode, d.otherNode); err != nil {
-		t.Logf("recording the client lock tables after the failover: %v", err)
-	}
-	// One inode, read once from either client: both mount the same file, and
-	// the number is the server's fileid as both clients see it.
-	inode, err := f.Inode(ctx, d.holderPod, d.path)
-	if err != nil {
-		t.Fatalf("reading the inode of %s, which is how a lock line is matched to a file: %v", d.path, err)
-	}
-	assertClientHoldsRange(ctx, t, f, d.holderNode, inode, rangeA, d.holderPod)
-	assertClientHoldsRange(ctx, t, f, d.otherNode, inode, rangeB, d.otherPod)
 }
 
 // assertClientHoldsRange checks a node's own lock table carries a held POSIX
@@ -797,7 +813,7 @@ func assertRangesSurvivedFailover(ctx context.Context, t *testing.T, f *framewor
 // passing on the server's answer alone would report a client-side loss as a
 // clean reclaim.
 func assertClientHoldsRange(ctx context.Context, t *testing.T, f *framework.Framework,
-	node string, inode int64, r framework.LockRange, pod string) {
+	node string, id framework.FileID, r framework.LockRange, pod string) {
 	t.Helper()
 	agent, err := framework.NodeAgent(ctx, f.C)
 	if err != nil {
@@ -813,15 +829,15 @@ func assertClientHoldsRange(ctx context.Context, t *testing.T, f *framework.Fram
 		return
 	}
 	for _, l := range locks {
-		if l.Covers(inode, r) {
+		if l.Covers(id, r) {
 			t.Logf("%s still believes it holds %s for %s: %s", node, r, pod, l)
 			return
 		}
 	}
-	t.Errorf("after the failover the client on %s has no held POSIX lock over %s of inode %d, which %s "+
+	t.Errorf("after the failover the client on %s has no held POSIX lock over %s of file %s, which %s "+
 		"took and never released. The server was asked separately; a disagreement between the two is "+
 		"the failure this case exists for, and a client that has quietly dropped a lock lets the next "+
-		"acquirer in", node, r, inode, pod)
+		"acquirer in", node, r, id, pod)
 }
 
 // CHAOS-07: a second client attempting a lock it has never held, while the

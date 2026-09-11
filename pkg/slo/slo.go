@@ -124,6 +124,19 @@ func GraceExitBound(p Profile) time.Duration { return 2 * p.Lease }
 // is the bound the plan states.
 func LockReleaseBound(p Profile) time.Duration { return p.Lease }
 
+// ObservationMargin is how far past a bound a case keeps watching before it
+// gives up.
+//
+// A case that stops at its own SLO reports "timed out" where it could report
+// how long the thing actually took, and the second is what a defect report
+// needs. It is a diagnostic allowance, never part of any assertion: the bound
+// decides pass or fail, and this only decides how much is known about a
+// failure.
+//
+// Named here rather than written as a literal in each case, so that it cannot
+// drift out of step with the bounds beside it.
+const ObservationMargin = 5 * time.Minute
+
 // PromptLockRelease separates the two mechanisms that can release such a lock,
 // so that a pass says which one was observed rather than only that the bound
 // held. Below it the descriptors closed and the client sent LOCKU; near the

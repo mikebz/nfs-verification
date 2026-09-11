@@ -18,12 +18,24 @@ import (
 // image's applet has no -p".
 
 // ToolProbe is the outcome of asking whether the image can do something.
+//
+// Three outcomes, not two, because the two obvious ones cannot hold the third.
+// A tool that did the thing, a tool that did not understand the request, and a
+// tool that understood it and was refused are different facts with different
+// owners: the first is a pass, the second is a fact about the image, and the
+// third is a fact about the filesystem. Folding the third into the second files
+// an I/O failure as a missing flag and skips the case that would have reported
+// it.
 type ToolProbe struct {
 	// OK is true when the tool did the thing.
 	OK bool
-	// Missing is true when the tool did not understand the request at all,
-	// which is a fact about the image and reports blocked.
+	// Missing is true when the tool is absent or did not understand the
+	// request, which is a fact about the image and reports blocked.
 	Missing bool
+	// Failed is true when the tool ran and the operation was refused. That is
+	// an answer from the filesystem, and it belongs to the case rather than to
+	// the image.
+	Failed bool
 	// Output is what the tool said, kept verbatim for the report.
 	Output string
 }
@@ -70,10 +82,18 @@ func (f *Framework) ProbeDirectIO(ctx context.Context, pod, path string) ToolPro
 		"dd if=/dev/zero of=%[1]s bs=4096 count=1 oflag=direct 2>&1; rc=$?; rm -f %[1]s; exit $rc",
 		shellQuote(path)))
 	out := strings.TrimSpace(r.Combined())
-	if r.Err == nil && !looksLikeAUsageError(out) {
+	switch {
+	case r.Err == nil && !looksLikeAUsageError(out):
 		return ToolProbe{OK: true, Output: out}
+	case looksLikeAUsageError(out):
+		return ToolProbe{Missing: true, Output: out}
+	default:
+		// dd understood the flag and the write was refused. This probe runs on
+		// the share, so that is the filesystem answering: EINVAL, ENOSPC or an
+		// RPC failure. Reporting it as a missing flag would skip the case that
+		// exists to surface it.
+		return ToolProbe{Failed: true, Output: out}
 	}
-	return ToolProbe{Missing: true, Output: out}
 }
 
 // probeToolPresent reports a tool the image does not carry at all, which is a
@@ -117,7 +137,8 @@ func (f *Framework) ProbeHolePunch(ctx context.Context, pod string) ToolProbe {
 		return ToolProbe{Missing: true, Output: out}
 	}
 	// The flag parsed. Whether this local filesystem honoured it is not the
-	// question: the share is where that gets asked.
+	// question, so a refusal here is still OK: the share is where the operation
+	// gets asked, and this probe answers only whether it can be asked at all.
 	return ToolProbe{OK: true, Output: out}
 }
 

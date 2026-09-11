@@ -26,23 +26,39 @@ func (f *Framework) Sha256(ctx context.Context, pod, path string) (string, error
 		fmt.Sprintf("sha256sum %s | cut -d' ' -f1", shellQuote(path)))
 }
 
-// Inode returns a file's inode number as a pod sees it.
+// FileIdentity returns a file's device and inode as a pod sees them.
 //
 // It is how a lock line in /proc/locks is matched to the file a case locked.
-// The table covers every file on the node, so a byte range alone is not
-// identity: the same offsets in some other file would satisfy an assertion that
-// compared only the range.
-func (f *Framework) Inode(ctx context.Context, pod, path string) (int64, error) {
+// The table covers every file on every filesystem on the node, so neither a
+// byte range nor an inode number alone is identity: the same offsets in another
+// file, or the same inode number on another device, would satisfy an assertion
+// that compared only one of them.
+//
+// A device that cannot be read is not an error. stat's device field is the one
+// part of this a stripped-down image might not print, and an identity with only
+// an inode still rules out almost everything; the caller reports that it is
+// matching on less.
+func (f *Framework) FileIdentity(ctx context.Context, pod, path string) (FileID, error) {
 	out, err := f.C.MustSh(ctx, Namespace, f.Name(pod), "main",
-		fmt.Sprintf("stat -c %%i %s", shellQuote(path)))
+		fmt.Sprintf("stat -c '%%i %%d' %s", shellQuote(path)))
 	if err != nil {
-		return 0, err
+		return FileID{}, err
 	}
-	inode, err := strconv.ParseInt(strings.TrimSpace(out), 10, 64)
+	fields := strings.Fields(out)
+	if len(fields) == 0 {
+		return FileID{}, fmt.Errorf("stat reported nothing for %s", path)
+	}
+	inode, err := strconv.ParseInt(fields[0], 10, 64)
 	if err != nil {
-		return 0, fmt.Errorf("stat reported %q as the inode of %s, which is not a number", out, path)
+		return FileID{}, fmt.Errorf("stat reported %q as the inode of %s, which is not a number", out, path)
 	}
-	return inode, nil
+	id := FileID{Inode: inode}
+	if len(fields) > 1 {
+		if dev, err := strconv.ParseUint(fields[1], 10, 64); err == nil {
+			id.Device = DeviceFromStatDev(dev)
+		}
+	}
+	return id, nil
 }
 
 // Quote exposes shell quoting to test packages building their own scripts.
@@ -254,6 +270,28 @@ func (f *Framework) WriteDirect(ctx context.Context, pod, path, seed string, blo
 			`sha256sum /tmp/nfsv-direct-block | cut -d' ' -f1`,
 		shellQuote(path), shellQuote(seed), block, offset)
 	return f.C.MustSh(ctx, Namespace, f.Name(pod), "main", script)
+}
+
+// CountNonZeroBytes reads one block at a block offset and returns how many of
+// its bytes are not zero.
+//
+// The read lands in a file before it is counted, for the reason ReadDirect does
+// the same: a POSIX pipeline reports its last command's status, so piping a
+// failed read into a counter yields a confident zero, and "the hole read back
+// as zeros" would be indistinguishable from "the hole could not be read".
+func (f *Framework) CountNonZeroBytes(ctx context.Context, pod, path string, block, offset int) (int, error) {
+	const scratch = "/tmp/nfsv-hole-read"
+	out, err := f.C.MustSh(ctx, Namespace, f.Name(pod), "main", fmt.Sprintf(
+		`set -e; dd if=%s of=%s bs=%d count=1 skip=%d 2>/dev/null; tr -d '\000' < %s | wc -c`,
+		shellQuote(path), shellQuote(scratch), block, offset, shellQuote(scratch)))
+	if err != nil {
+		return 0, err
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(out))
+	if err != nil {
+		return 0, fmt.Errorf("counting the non-zero bytes of block %d of %s: the pod said %q", offset, path, out)
+	}
+	return n, nil
 }
 
 // ReadDirect reads one block at a block offset with O_DIRECT and returns its

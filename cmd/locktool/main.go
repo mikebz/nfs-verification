@@ -183,8 +183,20 @@ func setLock(f *os.File, a lockArgs, typ int16) (granted bool, conflict syscall.
 	// Refused. A second call asks who holds it, and may find the conflict has
 	// already cleared: the refusal still happened, so it is reported either
 	// way, with the range only when there is one to report.
+	//
+	// A query that itself fails is reported on stderr rather than swallowed or
+	// turned into an error. The acquire really was refused, and promoting a
+	// transient RPC failure on the follow-up query into an exit code 2 would
+	// fail cases whose expected result is a refusal. But losing the fact
+	// entirely leaves an unattributed refusal that looks exactly like a
+	// conflict that cleared, which is a different thing.
 	c, gerr := getLock(f, a, typ)
-	if gerr != nil || c.Type == syscall.F_UNLCK {
+	if gerr != nil {
+		fmt.Fprintf(os.Stderr, "locktool: the lock was refused and the follow-up query failed, so the "+
+			"refusal cannot be attributed: %v\n", gerr)
+		return false, syscall.Flock_t{}, false, nil
+	}
+	if c.Type == syscall.F_UNLCK {
 		return false, syscall.Flock_t{}, false, nil
 	}
 	return false, c, true, nil

@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"regexp"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -179,9 +178,13 @@ func assertDisjointRangesAreIndependent(ctx context.Context, t *testing.T, f *fr
 	// lock covered more than it was asked for.
 	holderB, err := f.HoldLock(ctx, d.otherPod, d.path, d.id+"rb", rangeB)
 	if err != nil {
-		t.Fatalf("taking %s on %s in %s while %s held %s on the same file: %v. Two clients holding "+
-			"different parts of one file is the only thing a byte range adds over a whole-file lock, "+
-			"and it is what this half exists to show", rangeB, d.path, d.otherNode, d.holderNode, rangeA, err)
+		// Blocked first. This pod can be on another architecture with no
+		// locktool built for it, and reporting that as a mutual-exclusion
+		// failure files a storage defect against a missing local binary.
+		failOrBlock(t, err, "taking %s on %s in %s while %s held %s on the same file. Two clients "+
+			"holding different parts of one file is the only thing a byte range adds over a whole-file "+
+			"lock, and it is what this half exists to show",
+			rangeB, d.path, d.otherNode, d.holderNode, rangeA)
 	}
 	f.Defer(func(ctx context.Context) { _ = holderB.Release(ctx) })
 	t.Logf("%s on %s holds %s and %s on %s holds %s, on one file, at once",
@@ -211,7 +214,7 @@ func assertRangesExcludeEachOther(ctx context.Context, t *testing.T, f *framewor
 	for _, p := range probes {
 		ans, err := f.TryLock(ctx, p.by, d.path, p.want)
 		if err != nil {
-			t.Fatalf("probing %s from %s on %s: %v", p.want, p.by, p.node, err)
+			failOrBlock(t, err, "probing %s from %s on %s", p.want, p.by, p.node)
 		}
 		if ans.Free {
 			t.Errorf("%s on %s was granted %s, which overlaps %s held by %s. Two clients believing they "+
@@ -222,11 +225,23 @@ func assertRangesExcludeEachOther(ctx context.Context, t *testing.T, f *framewor
 		// The refusal must name the range actually held. A whole-file lock
 		// standing in for a range would refuse with a range to end of file, and
 		// the assertion above would pass while the case measured nothing.
-		if c := ans.Conflict; c.Known && (c.Start != p.held.Start || c.Len != p.held.Len) {
+		//
+		// An unattributed refusal means that guard did not run, so the case
+		// says so rather than passing on the bare refusal. The tool reports one
+		// when the conflict cleared between the acquire and the query, or when
+		// the query itself failed; neither should happen here, because the
+		// holder is still holding.
+		c := ans.Conflict
+		if !c.Known {
+			t.Errorf("%s on %s was refused %s but the refusal could not be attributed to a lock, so "+
+				"nothing checked that the refusal came from %s's %s rather than from a lock covering "+
+				"more than it was asked for", p.by, p.node, p.want, p.heldBy, p.held)
+			continue
+		}
+		if c.Start != p.held.Start || c.Len != p.held.Len || c.Mode != p.held.Mode {
 			t.Errorf("%s on %s was refused %s by a lock over %s, but %s holds %s. A refusal naming a "+
-				"different range means the lock covers more than it was asked for, which is a whole-file "+
-				"lock wearing a range's arguments",
-				p.by, p.node, p.want, c, p.heldBy, p.held)
+				"different lock means it covers more than it was asked for, or is not the lock that "+
+				"was taken", p.by, p.node, p.want, c, p.heldBy, p.held)
 		}
 	}
 	t.Logf("each client is refused on the other's range and on a range overlapping it, by the range " +
@@ -629,10 +644,10 @@ func TestDataLockReleasedAfterForcedPodLoss(t *testing.T) {
 	}
 	// Waited out past the bound on purpose: a case that gives up at the SLO
 	// reports "timed out" where it could report how long the release took, and
-	// the second is what a defect report needs.
-	waitFor := bound + 5*time.Minute
+	// the second is what a defect report needs. The margin is named in pkg/slo
+	// beside the bounds it extends, so the two cannot drift apart.
+	waitFor := bound + slo.ObservationMargin
 	grants := make(chan grant, 1)
-	start := time.Now()
 	go func() {
 		err := framework.Poll(ctx, framework.PollInterval, waitFor, func(ctx context.Context) (bool, error) {
 			ans, err := f.TryLock(ctx, acquirer, path, rng)
@@ -644,7 +659,12 @@ func TestDataLockReleasedAfterForcedPodLoss(t *testing.T) {
 		grants <- grant{at: time.Now(), err: err}
 	}()
 
-	if err := f.ForceDeletePodAndAwaitUnmount(ctx, holder, "data06"); err != nil {
+	// The clock starts at the delete itself, reported back by the helper. The
+	// helper reads the pod and the volume first, and charging those round trips
+	// to the lock release is the difference between classifying a prompt
+	// descriptor close correctly and reporting it as a lease expiry.
+	start, err := f.ForceDeletePodAt(ctx, holder, "data06")
+	if err != nil {
 		t.Fatalf("force-deleting %s and waiting for %s to release the mount: %v", holder, nodeA, err)
 	}
 	t.Logf("%s released the mount after the force delete, so teardown may touch the claim", nodeA)
@@ -712,10 +732,26 @@ func TestDataDirectIOFromTwoPods(t *testing.T) {
 	f.MustPod(ctx, toolsPod(podA, pvc.Name, nodeA))
 	f.MustPod(ctx, toolsPod(podB, pvc.Name, nodeB))
 
-	if probe := f.ProbeDirectIO(ctx, podA, fileIn("data07.probe")); !probe.OK {
-		blocked(t, "this tools image's dd cannot open a file with O_DIRECT, so there is no direct I/O to "+
-			"contrast: %q. busybox builds it behind FEATURE_DD_IBS_OBS. Pass -tools-image naming an image "+
-			"whose dd carries oflag=direct", probe.Output)
+	// Every node that will do direct I/O, not just the first. Two workers can
+	// run different kernels and different NFS clients, and a second node that
+	// rejects O_DIRECT after the first probe passed would have its refusal
+	// reported as a data failure.
+	for _, p := range []struct{ pod, node string }{{podA, nodeA}, {podB, nodeB}} {
+		probe := f.ProbeDirectIO(ctx, p.pod, fileIn("data07.probe-"+p.pod))
+		switch {
+		case probe.OK:
+		case probe.Missing:
+			blocked(t, "the tools image's dd on %s cannot open a file with O_DIRECT, so there is no "+
+				"direct I/O to contrast: %q. busybox builds it behind FEATURE_DD_IBS_OBS. Pass "+
+				"-tools-image naming an image whose dd carries oflag=direct", p.node, probe.Output)
+		default:
+			// dd understood the flag and the share refused the write. That is
+			// an answer from the filesystem, not a gap in the image, and it is
+			// this case's to report rather than to skip.
+			t.Fatalf("a 4KiB O_DIRECT write to the share from %s was refused, and dd understood the "+
+				"flag: %q. Direct I/O that the export rejects outright is a finding about the export",
+				p.node, probe.Output)
+		}
 	}
 
 	path := fileIn("data07.dat")
@@ -1236,8 +1272,13 @@ func TestDataSparseFileAndHolePunch(t *testing.T) {
 		farBlock  = 8
 		totalSize = (farBlock + 1) * block
 	)
-	f.MustShf(ctx, pod, "rm -f %[1]s; dd if=/dev/zero of=%[1]s bs=%[2]d count=1 2>/dev/null; "+
-		"yes data11-far | head -c %[2]d | dd of=%[1]s bs=%[2]d seek=%[3]d conv=notrunc 2>/dev/null",
+	// set -e, because the status of a command list is the status of its last
+	// command: without it a failed first write is masked by a successful seeked
+	// one, and the case then asserts a size and a hole over a file whose start
+	// was never written.
+	f.MustShf(ctx, pod, "set -e; rm -f %[1]s; dd if=/dev/zero of=%[1]s bs=%[2]d count=1 2>/dev/null; "+
+		"yes data11-far | head -c %[2]d > /tmp/nfsv-far-block; "+
+		"dd if=/tmp/nfsv-far-block of=%[1]s bs=%[2]d seek=%[3]d conv=notrunc 2>/dev/null",
 		framework.Quote(path), block, farBlock)
 
 	// Two subtests, because the halves are gated differently and on a busybox
@@ -1255,7 +1296,7 @@ func TestDataSparseFileAndHolePunch(t *testing.T) {
 		t.Logf("the sparse file reports %s allocated blocks for %d logical bytes",
 			f.MustShf(ctx, pod, "stat -c %%b %s", framework.Quote(path)), totalSize)
 
-		if nonZero := readNonZeroBytes(ctx, t, f, pod, path, block, holeBlock); nonZero != 0 {
+		if nonZero := countNonZero(ctx, t, f, pod, path, block, holeBlock); nonZero != 0 {
 			t.Errorf("the hole at block %d holds %d bytes that are not zero: a region nobody wrote must "+
 				"read as zeros", holeBlock, nonZero)
 		}
@@ -1293,7 +1334,7 @@ func TestDataSparseFileAndHolePunch(t *testing.T) {
 		// that becomes reachable the day preflight accepts 4.2, and the case
 		// does not need rewriting for it.
 		t.Logf("the hole punch succeeded on this %s mount", f.Env.NFSVersion)
-		if nonZero := readNonZeroBytes(ctx, t, f, pod, path, block, holeBlock); nonZero != 0 {
+		if nonZero := countNonZero(ctx, t, f, pod, path, block, holeBlock); nonZero != 0 {
 			t.Errorf("fallocate -p reported success and the punched region still holds %d bytes that "+
 				"are not zero. A punch that reports success and does not zero is worse than one that "+
 				"refuses: an application told the data is gone can still read it", nonZero)
@@ -1305,15 +1346,14 @@ func TestDataSparseFileAndHolePunch(t *testing.T) {
 	})
 }
 
-// readNonZeroBytes returns how many bytes of one block are not zero, which is
-// how a region nobody wrote is checked without moving a block through exec.
-func readNonZeroBytes(ctx context.Context, t *testing.T, f *framework.Framework, pod, path string, block, index int) int {
+// countNonZero returns how many bytes of one block are not zero, which is how a
+// region nobody wrote is checked without moving a block through exec.
+func countNonZero(ctx context.Context, t *testing.T, f *framework.Framework, pod, path string, block, index int) int {
 	t.Helper()
-	out := f.MustShf(ctx, pod, "dd if=%s bs=%d count=1 skip=%d 2>/dev/null | tr -d '\\000' | wc -c",
-		framework.Quote(path), block, index)
-	n, err := strconv.Atoi(strings.TrimSpace(out))
+	n, err := f.CountNonZeroBytes(ctx, pod, path, block, index)
 	if err != nil {
-		t.Fatalf("counting the non-zero bytes of block %d: the pod said %q", index, out)
+		t.Fatalf("reading block %d of %s: %v. A hole that cannot be read is not a hole that read back "+
+			"as zeros, and this case must not report the second when it saw the first", index, path, err)
 	}
 	return n
 }

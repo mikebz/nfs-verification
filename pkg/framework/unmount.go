@@ -2,6 +2,7 @@ package framework
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -77,29 +78,44 @@ func (f *Framework) attachRequired(ctx context.Context, driver string) bool {
 // enough on its own: Defer callbacks return nothing, and the force-deleted pod
 // is not in the API for teardown to notice.
 func (f *Framework) ForceDeletePodAndAwaitUnmount(ctx context.Context, pod, claim string) error {
+	_, err := f.ForceDeletePodAt(ctx, pod, claim)
+	return err
+}
+
+// ForceDeletePodAt is ForceDeletePodAndAwaitUnmount, reporting the moment the
+// delete request actually went.
+//
+// A case timing how long something took after the delete cannot start its clock
+// before calling this: the helper reads the pod and the volume first, and on a
+// slow API server those round trips land inside the measurement. Two seconds of
+// control plane latency is the difference between "the descriptors closed" and
+// "the lease expired" in DATA-06's classification.
+func (f *Framework) ForceDeletePodAt(ctx context.Context, pod, claim string) (time.Time, error) {
 	name := f.Name(pod)
 	p, err := f.C.Kube.CoreV1().Pods(Namespace).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
-		return fmt.Errorf("reading pod %s before force-deleting it: %w", name, err)
+		return time.Time{}, fmt.Errorf("reading pod %s before force-deleting it: %w", name, err)
 	}
 	node := p.Spec.NodeName
 	if node == "" {
-		return fmt.Errorf("pod %s is not scheduled, so there is no node to watch for its unmount", name)
+		return time.Time{}, fmt.Errorf("pod %s is not scheduled, so there is no node to watch for its unmount", name)
 	}
 	pv, err := f.PVForClaim(ctx, claim)
 	if err != nil {
-		return fmt.Errorf("finding the volume behind claim %s: %w", claim, err)
+		return time.Time{}, fmt.Errorf("finding the volume behind claim %s: %w", claim, err)
 	}
 
 	f.MarkClaimUnproven(f.Name(claim), fmt.Sprintf("pod %s was force-deleted while mounting it on %s", name, node))
+	// Everything above is setup. The clock starts here.
+	deletedAt := time.Now()
 	if err := f.DeletePodNow(ctx, pod); err != nil {
-		return fmt.Errorf("force-deleting pod %s: %w", name, err)
+		return time.Time{}, fmt.Errorf("force-deleting pod %s: %w", name, err)
 	}
 	if err := f.AwaitUnmount(ctx, node, pv, UnmountTimeout); err != nil {
-		return err
+		return deletedAt, err
 	}
 	f.ClearClaimUnproven(f.Name(claim))
-	return nil
+	return deletedAt, nil
 }
 
 // AwaitUnmount waits until a node has released a volume, by whichever of the
@@ -112,7 +128,12 @@ func (f *Framework) ForceDeletePodAndAwaitUnmount(ctx context.Context, pod, clai
 // instead of an exec into a privileged pod.
 func (f *Framework) AwaitUnmount(ctx context.Context, node string, pv *corev1.PersistentVolume, timeout time.Duration) error {
 	if unique, ok := f.uniqueVolumeName(ctx, pv); ok {
-		return f.awaitVolumeNotInUse(ctx, node, unique, timeout)
+		err := f.awaitVolumeNotInUse(ctx, node, unique, timeout)
+		if !errors.Is(err, errVolumeNeverSeenInUse) {
+			return err
+		}
+		// The optimisation did not apply after all. Fall through to the node,
+		// which shows the mount itself rather than a record of it.
 	}
 	return f.awaitMountGone(ctx, node, pv.Name, timeout)
 }
@@ -137,19 +158,50 @@ func (f *Framework) uniqueVolumeName(ctx context.Context, pv *corev1.PersistentV
 	return unique, true
 }
 
-// awaitVolumeNotInUse watches node.status.volumesInUse for an attaching driver.
+// volumeInUse reports whether a node currently lists a volume as in use.
+func (f *Framework) volumeInUse(ctx context.Context, node, unique string) (bool, error) {
+	n, err := f.C.Kube.CoreV1().Nodes().Get(ctx, node, metav1.GetOptions{})
+	if err != nil {
+		return false, err
+	}
+	for _, v := range n.Status.VolumesInUse {
+		if string(v) == unique {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// awaitVolumeNotInUse watches node.status.volumesInUse for an attaching driver,
+// having first seen the volume there.
+//
+// The transition is what proves the unmount, not the absence. Node status lags
+// the mount it describes, so a volume that is genuinely mounted can be missing
+// from the list at the moment the first poll looks, and accepting that would
+// report a live mount as released. Teardown would then delete the claim under
+// it, which is the F-001 failure this whole helper exists to prevent.
+//
+// So an absence on the first look is not an answer, it is a reason to stop
+// using this path: the caller falls back to reading the node's own mount table,
+// which shows the mount rather than a controller's record of it.
 func (f *Framework) awaitVolumeNotInUse(ctx context.Context, node, unique string, timeout time.Duration) error {
-	err := Poll(ctx, PollInterval, timeout, func(ctx context.Context) (bool, error) {
-		n, err := f.C.Kube.CoreV1().Nodes().Get(ctx, node, metav1.GetOptions{})
+	inUse, err := f.volumeInUse(ctx, node, unique)
+	if err != nil {
+		return fmt.Errorf("reading node %s to confirm it holds %s before waiting for the unmount: %w",
+			node, unique, err)
+	}
+	if !inUse {
+		return errVolumeNeverSeenInUse
+	}
+	err = Poll(ctx, PollInterval, timeout, func(ctx context.Context) (bool, error) {
+		still, err := f.volumeInUse(ctx, node, unique)
 		if err != nil {
 			// Not proven gone. An unreadable Node is a reason to keep waiting,
 			// never a reason to report the volume released.
 			return false, err
 		}
-		for _, v := range n.Status.VolumesInUse {
-			if string(v) == unique {
-				return false, fmt.Errorf("node %s still reports %s in volumesInUse", node, unique)
-			}
+		if still {
+			return false, fmt.Errorf("node %s still reports %s in volumesInUse", node, unique)
 		}
 		return true, nil
 	})
@@ -161,6 +213,11 @@ func (f *Framework) awaitVolumeNotInUse(ctx context.Context, node, unique string
 	}
 	return nil
 }
+
+// errVolumeNeverSeenInUse says the API path cannot answer, because the volume
+// was not in the node's list to begin with.
+var errVolumeNeverSeenInUse = errors.New("the node does not list this volume as in use, so its " +
+	"disappearance from that list would prove nothing")
 
 // awaitMountGone watches /proc/mounts on the node, for a driver that does not
 // attach and for in-tree spec.nfs volumes.
@@ -177,7 +234,10 @@ func (f *Framework) awaitMountGone(ctx context.Context, node, pvName string, tim
 		}
 		var still []string
 		for _, m := range mounts {
-			if isNFS(m.FSType) && strings.Contains(m.MountPoint, pvName) {
+			// A whole path component, as PodVolumeMount matches: a substring
+			// test keeps seeing an unrelated volume whose name contains this
+			// one, and the wait then times out after the target had gone.
+			if isNFS(m.FSType) && MountPointHolds(m.MountPoint, pvName) {
 				still = append(still, m.MountPoint)
 			}
 		}
