@@ -643,19 +643,6 @@ func TestProvProvisionServerDown(t *testing.T) {
 		t.Fatalf("reading binding mode of StorageClass %s: %v", f.Env.StorageClass, err)
 	}
 
-	// Create claim before/during the outage.
-	pvc, err := f.CreatePVC(ctx, framework.PVCSpec{Name: "prov07"})
-	if err != nil {
-		t.Fatalf("creating claim: %v", err)
-	}
-
-	// For WaitForFirstConsumer, schedule the consumer pod before the outage so the
-	// scheduler and CSI driver attempt volume provisioning during the outage.
-	var pod *corev1.Pod
-	if mode == storagev1.VolumeBindingWaitForFirstConsumer {
-		pod = f.MustPod(ctx, toolsPod("holder", pvc.Name, ""))
-	}
-
 	if err := chaos.DeleteServerPod(ctx, f, target); err != nil {
 		t.Fatalf("injuring server pod: %v", err)
 	}
@@ -663,9 +650,37 @@ func TestProvProvisionServerDown(t *testing.T) {
 		t.Fatalf("target server pod did not leave API: %v", err)
 	}
 
+	// Create claim during the outage.
+	pvc, err := f.CreatePVC(ctx, framework.PVCSpec{Name: "prov07"})
+	if err != nil {
+		t.Fatalf("creating claim: %v", err)
+	}
+
+	// For WaitForFirstConsumer, schedule the consumer pod during the outage so the
+	// scheduler and CSI driver attempt volume provisioning during the outage.
+	var pod *corev1.Pod
+	if mode == storagev1.VolumeBindingWaitForFirstConsumer {
+		pod = f.MustPod(ctx, toolsPod("holder", pvc.Name, ""))
+	}
+
 	// Sustained check: verify the claim remains Pending while the server is down.
 	deadline := time.Now().Add(framework.ServerOutageObserveDuration)
 	for time.Now().Before(deadline) {
+		pods, err := framework.ServerPods(ctx, f.C)
+		if err == nil {
+			recovered := false
+			for i := range pods {
+				if (pods[i].UID != target.UID || pods[i].Name != target.Pod) && framework.PodReady(&pods[i]) {
+					recovered = true
+					break
+				}
+			}
+			if recovered {
+				t.Logf("replacement server pod became ready; concluding outage observation")
+				break
+			}
+		}
+
 		live, err := f.GetPVC(ctx, pvc.Name)
 		if err != nil {
 			t.Fatalf("re-reading claim: %v", err)
