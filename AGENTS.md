@@ -115,8 +115,8 @@ with the assertion rather than with you:
   may implement. Volume statistics, expansion and snapshots are all optional
   capabilities, and a driver that omits one is not defective.
 - **The implementation in front of us**: the provisioner's flags, its chart
-  templates, its source. Weakest of the four, and enough for a statement about
-  this deployment as long as it is labelled as one.
+  templates, its source. Least authoritative of these, and enough for a
+  statement about this deployment as long as it is labelled as one.
 
 Where no document settles it, say that in the same breath as the assertion:
 "this is this implementation's behaviour, not a protocol guarantee" is a
