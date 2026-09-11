@@ -138,10 +138,16 @@ func (s *KubeletSummary) VolumeUsageFor(namespace, pod, claim string) (VolumeUsa
 			if v.PVCRef.Namespace != "" && v.PVCRef.Namespace != namespace {
 				continue
 			}
-			// A reading with no used bytes is not a reading. The kubelet has an
-			// entry for the volume and no numbers in it, which is what a driver
+			// A partial reading is not a reading. The kubelet has an entry for
+			// the volume and not all the numbers in it, which is what a driver
 			// that does not implement volume statistics produces.
-			if v.UsedBytes == nil || v.CapacityBytes == nil {
+			//
+			// All three are required, available included, even though no
+			// assertion compares it. The three are recorded rather than derived
+			// from each other precisely because they can disagree, so an
+			// omitted one substituted with zero would put a full volume in the
+			// table of a run that passed on the two numbers beside it.
+			if v.UsedBytes == nil || v.CapacityBytes == nil || v.AvailableBytes == nil {
 				return VolumeUsage{}, false
 			}
 			return VolumeUsage{
@@ -149,19 +155,12 @@ func (s *KubeletSummary) VolumeUsageFor(namespace, pod, claim string) (VolumeUsa
 				Claim:          claim,
 				CapacityBytes:  *v.CapacityBytes,
 				UsedBytes:      *v.UsedBytes,
-				AvailableBytes: derefBytes(v.AvailableBytes),
+				AvailableBytes: *v.AvailableBytes,
 				At:             v.Time.Time,
 			}, true
 		}
 	}
 	return VolumeUsage{}, false
-}
-
-func derefBytes(p *int64) int64 {
-	if p == nil {
-		return 0
-	}
-	return *p
 }
 
 // DescribeVolumes says what the kubelet did publish for a pod, which is what a
@@ -231,28 +230,23 @@ var (
 // kubelet's schedule.
 func (f *Framework) FreshKubeletUsage(ctx context.Context, node, pod, claim string,
 	notBefore time.Time, timeout time.Duration) (VolumeUsage, error) {
-	var (
-		latest VolumeUsage
-		found  bool
-		// refused stops the loop: a permission the kubeconfig does not have is
-		// not going to arrive within the timeout, and polling on it would
-		// spend the case's budget to report the same thing.
-		refused error
-	)
-	waitErr := Poll(ctx, PollInterval, timeout, func(ctx context.Context) (bool, error) {
+	var w usageWait
+	w.waitErr = Poll(ctx, PollInterval, timeout, func(ctx context.Context) (bool, error) {
 		s, err := NodeSummary(ctx, f.C, node)
 		if err != nil {
 			if IsBlocked(err) {
-				refused = err
+				w.refused = err
 				return true, nil
 			}
+			w.readErr = err
 			return false, err
 		}
+		w.inspected = true
 		u, ok := s.VolumeUsageFor(Namespace, f.Name(pod), f.Name(claim))
 		if !ok {
 			return false, fmt.Errorf("%s", s.DescribeVolumes(Namespace, f.Name(pod)))
 		}
-		latest, found = u, true
+		w.latest, w.found = u, true
 		// The two timestamps come from different clocks, the kubelet's from its
 		// node and the workload reading's from the workstation, so the guard
 		// band that narrows every other two-clock comparison decides what
@@ -263,15 +257,54 @@ func (f *Framework) FreshKubeletUsage(ctx context.Context, node, pod, claim stri
 		}
 		return true, nil
 	})
+	return w.result(node, f.Name(claim), timeout)
+}
+
+// usageWait is what one wait for a control plane reading saw. It is a value so
+// that the routing below can be decided in one place and tested without a
+// cluster: which of these fields is set decides who a failure is reported to,
+// and getting that wrong files a harness problem against the deployment.
+type usageWait struct {
+	latest VolumeUsage
+	// found is a reading for this claim, fresh or not.
+	found bool
+	// inspected is at least one summary read and searched. Without it, nothing
+	// is known about what the kubelet publishes.
+	inspected bool
+	// refused is a source the suite may not read. It stops the loop: a
+	// permission the kubeconfig does not have is not going to arrive within the
+	// timeout, and polling on it would spend the case's budget to report the
+	// same thing.
+	refused error
+	// readErr is the last ordinary failure to read the summary, as opposed to
+	// the last failure to find the claim in one.
+	readErr error
+	waitErr error
+}
+
+// result turns what the wait saw into the error its caller routes on.
+func (w usageWait) result(node, claim string, timeout time.Duration) (VolumeUsage, error) {
 	switch {
-	case refused != nil:
-		return VolumeUsage{}, refused
-	case waitErr != nil && !found:
+	case w.refused != nil:
+		return VolumeUsage{}, w.refused
+	case w.waitErr != nil && !w.inspected:
+		// The kubelet never answered. That is not this deployment publishing
+		// nothing: no summary was ever searched, so the case learned nothing
+		// about what the driver reports, and saying otherwise would file an
+		// unreachable API server as a missing CSI capability.
+		cause := w.readErr
+		if cause == nil {
+			cause = w.waitErr
+		}
+		return VolumeUsage{}, fmt.Errorf("no stats summary could be read from the kubelet on node %s "+
+			"within %s, so nothing is known about what this deployment publishes for claim %s: %w",
+			node, timeout, claim, cause)
+	case w.waitErr != nil && !w.found:
 		return VolumeUsage{}, fmt.Errorf("%w: the kubelet on %s published none for claim %s within %s: %v",
-			ErrNoVolumeStats, node, f.Name(claim), timeout, waitErr)
-	case waitErr != nil:
+			ErrNoVolumeStats, node, claim, timeout, w.waitErr)
+	case w.waitErr != nil:
 		return VolumeUsage{}, fmt.Errorf("%w: within %s the freshest reading from the kubelet on %s was %s: %v",
-			ErrStaleVolumeStats, timeout, node, latest, waitErr)
+			ErrStaleVolumeStats, timeout, node, w.latest, w.waitErr)
 	}
-	return latest, nil
+	return w.latest, nil
 }

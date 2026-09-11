@@ -1,6 +1,7 @@
 package framework
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -89,6 +90,11 @@ func TestKubeletSummaryVolumeLookup(t *testing.T) {
 // compares the workload's view against a published zero, and a deployment
 // nobody can monitor for capacity reports a passing OBS-06.
 //
+// Available is required along with the other two even though no assertion
+// compares it: substituting a zero for it would put a full volume in the table
+// of a run that passed on the numbers beside it, and the table is what the next
+// run is compared against.
+//
 // Steps:
 //  1. Look up a claim whose entry carries no usedBytes.
 //  2. Look up a claim whose entry carries no capacityBytes.
@@ -101,6 +107,9 @@ func TestKubeletSummaryReportsAbsentUsage(t *testing.T) {
 		"no capacityBytes": `{"pods": [{"podRef": {"name": "p", "namespace": "default"},
 			"volume": [{"time": "2026-09-11T10:00:00Z", "usedBytes": 10240, "name": "vol0",
 			"pvcRef": {"name": "c", "namespace": "default"}}]}]}`,
+		"no availableBytes": `{"pods": [{"podRef": {"name": "p", "namespace": "default"},
+			"volume": [{"time": "2026-09-11T10:00:00Z", "capacityBytes": 1048576, "usedBytes": 10240,
+			"name": "vol0", "pvcRef": {"name": "c", "namespace": "default"}}]}]}`,
 		"no pvcRef": `{"pods": [{"podRef": {"name": "p", "namespace": "default"},
 			"volume": [{"time": "2026-09-11T10:00:00Z", "capacityBytes": 1048576, "usedBytes": 10240,
 			"name": "c"}]}]}`,
@@ -144,4 +153,92 @@ func decodeSummary(t *testing.T, doc string) *KubeletSummary {
 		t.Fatalf("decoding the summary: %v", err)
 	}
 	return s
+}
+
+// TestUsageWaitResultRouting covers who each way of failing to get a control
+// plane reading is reported to.
+//
+// The rows are not interchangeable. Blocked says the suite could not reach the
+// source and nothing was learned; the two sentinels say the deployment answered
+// and what it answered with. A kubelet that never responded landing in either
+// sentinel would file an unreachable API server, a network fault or an expired
+// credential as a missing CSI capability, and the case's message names the
+// driver by name: someone would go and read that driver's code.
+//
+// Steps:
+//  1. Route a refusal, which is blocked.
+//  2. Route a wait where no summary was ever read, which is neither sentinel.
+//  3. Route a wait that read summaries and never found the claim.
+//  4. Route a wait that found the claim and never saw it catch up.
+//  5. Route a wait that succeeded.
+func TestUsageWaitResultRouting(t *testing.T) {
+	reading := VolumeUsage{Source: SourceKubeletSummary, Claim: "c", UsedBytes: 10240}
+	unreachable := errors.New("dial tcp: i/o timeout")
+	timedOut := errors.New("timed out after 3m0s")
+
+	for name, tc := range map[string]struct {
+		wait      usageWait
+		wantErr   error
+		wantNoErr bool
+		// wantCause is text the message has to carry, so that whoever reads the
+		// failure is told what actually went wrong.
+		wantCause string
+	}{
+		"refused": {
+			wait:      usageWait{refused: Blockedf("get on nodes/proxy was refused"), waitErr: nil},
+			wantCause: "nodes/proxy",
+		},
+		"never answered": {
+			wait:      usageWait{readErr: unreachable, waitErr: timedOut},
+			wantCause: unreachable.Error(),
+		},
+		"never answered, and no read error to name": {
+			wait:      usageWait{waitErr: timedOut},
+			wantCause: timedOut.Error(),
+		},
+		"answered, no entry for the claim": {
+			wait:    usageWait{inspected: true, waitErr: timedOut},
+			wantErr: ErrNoVolumeStats,
+		},
+		"answered, entry never caught up": {
+			wait:    usageWait{inspected: true, found: true, latest: reading, waitErr: timedOut},
+			wantErr: ErrStaleVolumeStats,
+		},
+		"answered with a fresh reading": {
+			wait:      usageWait{inspected: true, found: true, latest: reading},
+			wantNoErr: true,
+		},
+	} {
+		got, err := tc.wait.result("worker-1", "c", 3*time.Minute)
+		switch {
+		case tc.wantNoErr:
+			if err != nil {
+				t.Errorf("%s: %v", name, err)
+			}
+			if got.UsedBytes != reading.UsedBytes {
+				t.Errorf("%s: returned %+v, want the reading the wait found", name, got)
+			}
+			continue
+		case err == nil:
+			t.Errorf("%s: no error, so the case would compare against an empty reading", name)
+			continue
+		}
+		if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
+			t.Errorf("%s: %v, want %v", name, err, tc.wantErr)
+		}
+		// The two ways of not reaching the kubelet must never be reported as
+		// the deployment publishing nothing, which is the finding that sends
+		// someone to read the CSI driver's source.
+		if tc.wantErr == nil {
+			if errors.Is(err, ErrNoVolumeStats) || errors.Is(err, ErrStaleVolumeStats) {
+				t.Errorf("%s: %v reads as a deployment finding, and the suite did not reach the source", name, err)
+			}
+			if name == "refused" && !IsBlocked(err) {
+				t.Errorf("%s: %v is not blocked, so a permission gap would be filed as a storage defect", name, err)
+			}
+		}
+		if tc.wantCause != "" && !strings.Contains(err.Error(), tc.wantCause) {
+			t.Errorf("%s: %v does not say what went wrong, expected it to carry %q", name, err, tc.wantCause)
+		}
+	}
 }
