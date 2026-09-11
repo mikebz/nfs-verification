@@ -296,6 +296,14 @@ here would silently invalidate every timing assertion.
 The harness compiles, `go vet` is clean, and the unit tests in `pkg/slo` and
 `pkg/framework` pass.
 
+The data path cases were run against a three-worker GKE cluster on 2026-09-11.
+DATA-05 through DATA-09, DATA-12, DATA-13 and CHAOS-06 passed, along with the
+SEC, OBS and CHAOS cases alongside them. DATA-11's hole-punch half and DATA-14
+reported blocked on the default image, which is the documented answer for both.
+**DATA-10 has not been run**, so whether a directory-backed export holds 100k
+entries is still unmeasured. That run also found two cases reporting more than
+they had measured; both are fixed and the reasoning is F-007.
+
 Notable findings from running the suite against real clusters are recorded in
 [`docs/findings.md`](docs/findings.md).
 

@@ -146,7 +146,7 @@ Each step is one pull request. Later steps depend only on earlier ones.
 | 3 | Chaos operations package plus CHAOS-01 and CHAOS-02, the SLO measurement path, fault timelines | done, [PR #4](https://github.com/mikebz/nfs-verification/pull/4) |
 | 4 | Grace and lock reclaim: CHAOS-05, CHAOS-06, CHAOS-07, OBS-02, OBS-03, designed in [`03-grace-and-lock-reclaim-design.md`](03-grace-and-lock-reclaim-design.md) | done, [PR #8](https://github.com/mikebz/nfs-verification/pull/8) |
 | 5 | Close out Provisioning (PROV): PROV-02, PROV-05 to PROV-11 | done, [PR #10](https://github.com/mikebz/nfs-verification/pull/10) |
-| 6 | Close out Concurrency and Data Integrity (DATA): DATA-06 to DATA-14, locktool helper, designed in [`04-data-path-and-locktool-design.md`](04-data-path-and-locktool-design.md) | code complete, not yet run against a cluster |
+| 6 | Close out Concurrency and Data Integrity (DATA): DATA-06 to DATA-14, locktool helper, designed in [`04-data-path-and-locktool-design.md`](04-data-path-and-locktool-design.md) | run on GKE 2026-09-11: DATA-05 to DATA-09, DATA-12, DATA-13 and CHAOS-06 pass; DATA-11's punch half and DATA-14 report blocked on the default image; DATA-10 not yet run |
 | 7 | Close out Observability (OBS): OBS-01, OBS-05, OBS-06, OBS-07 | |
 | 8 | Close out Security and Identity (SEC): SEC-03 to SEC-09 | |
 | 9 | Close out Scale and Performance (SCALE): SCALE-01 to SCALE-07 | |

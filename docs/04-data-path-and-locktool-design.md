@@ -1091,10 +1091,11 @@ Export path: unchanged, `artifacts/<run-id>/<CASE-ID>/`.
    merged case, one line to fix (`-n` in a retry loop, which is what the bound
    already provides), and it lands as its own PR with a finding before this
    phase starts. locktool later gives the probe a real timed acquire.
-2. **Whether the tools image's `dd` carries `direct`.** It is behind
-   `FEATURE_DD_IBS_OBS` in busybox. **Decided by** the probe in section 5.7 on
-   the first real run. If it is absent, section 5.4 is revisited and locktool
-   grows a `dio` subcommand rather than DATA-07 being permanently blocked.
+2. ~~**Whether the tools image's `dd` carries `direct`.**~~ **Answered**
+   2026-09-11 on GKE: `alpine:3.20`'s busybox carries `oflag=direct` and DATA-07
+   passed. Section 5.4 holds and locktool does not grow a `dio` subcommand.
+   `fallocate -p` is absent on the same image, as predicted, so DATA-11's punch
+   half reports blocked there. See F-007 in [`findings.md`](findings.md).
 3. **Whether `make test-data` still fits 45 minutes with thirteen cases in it.**
    Section 5.14 takes DATA-14's hour out to its own target, which is the part
    that made the budget impossible. What remains is a real question: DATA-05
@@ -1113,19 +1114,26 @@ Export path: unchanged, `artifacts/<run-id>/<CASE-ID>/`.
    needs them to vary, so there is no duration flag, which means exercising the
    fio path costs an hour. **Decided by** the first attempt to debug it: if that
    hour is spent twice, the flag has earned its place and gets a README row.
-6. **The clone PV's reclaim policy.** It is `Retain` and the fixture deletes the
-   object, because nothing provisioned it. If a driver treats an unknown static
-   PV over a managed export as something to reconcile, the clone could disturb
-   the dynamic claim that owns the export. **Decided by** watching the dynamic
-   PV's phase across DATA-08 on a real cluster. Unresolved, and it is the reason
-   DATA-08 is not in the MVP.
+6. ~~**The clone PV's reclaim policy.**~~ **Answered for one driver**,
+   2026-09-11 on GKE: DATA-08 passed and the clone did not disturb the dynamic
+   claim that owns the export. It stays worth re-checking on a driver that
+   reconciles static PVs, since the hazard is a property of the driver rather
+   than of the clone.
 7. **Sizing risk on the nodes.** F-002 is 2GB workers rebooting under a 1MiB
    write and a page cache. DATA-10 and DATA-14 are heavier than anything the
    suite has run. A case that reboots a node reports a storage defect that is a
    node pool defect. Mitigation is the README's existing minimum of 8GB per
    worker for anything past the quick cases, and the fact that neither runs
    unless someone asks for its target; there is no mitigation inside the case.
-8. **Nothing now records that a case is expensive.** [PR #11](https://github.com/mikebz/nfs-verification/pull/11) removed the gate
+8. **A case that asserts over a set it produced has to state how large that set
+   must be.** The durability pair inherited a three-record warm-up from the
+   recovery cases and passed having verified three and four records. Fixed for
+   that pair with `durabilityRecords` and `requireDurabilitySet`, and recorded
+   as F-007 in [`findings.md`](findings.md). **Open** for everything else: no
+   other case in the suite states a floor on the set it measures, and the ones
+   that produce a set (DATA-10's directory, DATA-14's files) should be looked at
+   before anyone trusts a small pass from them.
+9. **Nothing now records that a case is expensive.** [PR #11](https://github.com/mikebz/nfs-verification/pull/11) removed the gate
    column, so DATA-10's 100k entries and DATA-14's hour read in the plan exactly
    like a case that takes twenty seconds. **Decided by** whether anyone is
    surprised by a category target's runtime. If they are, the answer is a cost

@@ -1211,6 +1211,10 @@ func TestDataLargeDirectoryReaddirUnderDeletes(t *testing.T) {
 //  4. Probe whether the image's fallocate parses -p at all.
 //  5. Attempt the punch. A refusal is recorded as unsupported. Success is
 //     asserted: the region must read as zeros and the size must not change.
+//
+// Steps 2 and 3 are one subtest and steps 4 and 5 another, because on a busybox
+// image only the first can run. Reported as one case, the whole thing reads as
+// SKIP and the sparse result it did establish is invisible.
 func TestDataSparseFileAndHolePunch(t *testing.T) {
 	f := framework.New(t, "DATA-11")
 	ctx, cancel := caseCtx(t, 15*time.Minute)
@@ -1238,59 +1242,69 @@ func TestDataSparseFileAndHolePunch(t *testing.T) {
 		"yes data11-far | head -c %[2]d | dd of=%[1]s bs=%[2]d seek=%[3]d conv=notrunc 2>/dev/null",
 		framework.Quote(path), block, farBlock)
 
-	if got := f.MustShf(ctx, pod, "stat -c %%s %s", framework.Quote(path)); got != fmt.Sprint(totalSize) {
-		t.Errorf("the sparse file reports a logical size of %s, want %d: a hole is part of the file's "+
-			"length whether or not it is stored", got, totalSize)
-	}
-	// Recorded, not asserted. Whether the backing filesystem stores the hole
-	// sparsely is a property of that filesystem, not of NFS.
-	t.Logf("the sparse file reports %s allocated blocks for %d logical bytes",
-		f.MustShf(ctx, pod, "stat -c %%b %s", framework.Quote(path)), totalSize)
+	// Two subtests, because the halves are gated differently and on a busybox
+	// image only one of them can run. Without the split the case reports SKIP
+	// for the whole of itself, and a reader cannot tell that the sparse
+	// assertions ran and passed before the punch probe stopped it.
+	t.Run("sparse-write-and-read-back", func(t *testing.T) {
+		f := f.SubTest(t)
+		if got := f.MustShf(ctx, pod, "stat -c %%s %s", framework.Quote(path)); got != fmt.Sprint(totalSize) {
+			t.Errorf("the sparse file reports a logical size of %s, want %d: a hole is part of the "+
+				"file's length whether or not it is stored", got, totalSize)
+		}
+		// Recorded, not asserted. Whether the backing filesystem stores the
+		// hole sparsely is a property of that filesystem, not of NFS.
+		t.Logf("the sparse file reports %s allocated blocks for %d logical bytes",
+			f.MustShf(ctx, pod, "stat -c %%b %s", framework.Quote(path)), totalSize)
 
-	if nonZero := readNonZeroBytes(ctx, t, f, pod, path, block, holeBlock); nonZero != 0 {
-		t.Errorf("the hole at block %d holds %d bytes that are not zero: a region nobody wrote must "+
-			"read as zeros", holeBlock, nonZero)
-	}
-	if got := f.MustShf(ctx, pod, "dd if=%s bs=%d count=1 skip=%d 2>/dev/null | head -c 11",
-		framework.Quote(path), block, farBlock); got != "data11-far" {
-		t.Errorf("the byte written past the hole reads back as %q at block %d: a sparse write put the "+
-			"data at the wrong offset", got, farBlock)
-	}
+		if nonZero := readNonZeroBytes(ctx, t, f, pod, path, block, holeBlock); nonZero != 0 {
+			t.Errorf("the hole at block %d holds %d bytes that are not zero: a region nobody wrote must "+
+				"read as zeros", holeBlock, nonZero)
+		}
+		if got := f.MustShf(ctx, pod, "dd if=%s bs=%d count=1 skip=%d 2>/dev/null | head -c 11",
+			framework.Quote(path), block, farBlock); got != "data11-far" {
+			t.Errorf("the byte written past the hole reads back as %q at block %d: a sparse write put "+
+				"the data at the wrong offset", got, farBlock)
+		}
+	})
 
-	probe := f.ProbeHolePunch(ctx, pod)
-	if probe.Missing {
-		blocked(t, "this tools image's fallocate does not parse -p, so the punch was never requested and "+
-			"nothing about the protocol has been learned: %q. The busybox applet parses -l and -o only. "+
-			"Pass -tools-image naming an image whose fallocate carries -p", probe.Output)
-	}
+	t.Run("hole-punch", func(t *testing.T) {
+		f := f.SubTest(t)
+		probe := f.ProbeHolePunch(ctx, pod)
+		if probe.Missing {
+			blocked(t, "this tools image's fallocate does not parse -p, so the punch was never requested "+
+				"and nothing about the protocol has been learned: %q. The busybox applet parses -l and "+
+				"-o only. Pass -tools-image naming an image whose fallocate carries -p", probe.Output)
+		}
 
-	punch := f.Sh(ctx, pod, fmt.Sprintf("fallocate -p -o %d -l %d %s 2>&1",
-		holeBlock*block, block, framework.Quote(path)))
-	if punch.Err != nil {
-		// Rule 9: an operation the protocol does not define is recorded, not
-		// failed. On a 4.1 mount this is the expected branch, and it is the
-		// refusal of the operation rather than of the flag, because the probe
-		// above established that -p parses.
-		t.Logf("the hole punch was refused on this %s mount, which is the documented answer: NFSv4.1 "+
-			"carries no DEALLOCATE, and ALLOCATE, DEALLOCATE and READ_PLUS arrived with NFSv4.2 in "+
-			"RFC 7862. Recorded as unsupported, not failed: %s",
-			f.Env.NFSVersion, strings.TrimSpace(punch.Combined()))
-		return
-	}
+		punch := f.Sh(ctx, pod, fmt.Sprintf("fallocate -p -o %d -l %d %s 2>&1",
+			holeBlock*block, block, framework.Quote(path)))
+		if punch.Err != nil {
+			// Rule 9: an operation the protocol does not define is recorded,
+			// not failed. On a 4.1 mount this is the expected branch, and it is
+			// the refusal of the operation rather than of the flag, because the
+			// probe above established that -p parses.
+			t.Logf("the hole punch was refused on this %s mount, which is the documented answer: "+
+				"NFSv4.1 carries no DEALLOCATE, and ALLOCATE, DEALLOCATE and READ_PLUS arrived with "+
+				"NFSv4.2 in RFC 7862. Recorded as unsupported, not failed: %s",
+				f.Env.NFSVersion, strings.TrimSpace(punch.Combined()))
+			return
+		}
 
-	// The punch reported success, so it is asserted. This is the branch that
-	// becomes reachable the day preflight accepts 4.2, and the case does not
-	// need rewriting for it.
-	t.Logf("the hole punch succeeded on this %s mount", f.Env.NFSVersion)
-	if nonZero := readNonZeroBytes(ctx, t, f, pod, path, block, holeBlock); nonZero != 0 {
-		t.Errorf("fallocate -p reported success and the punched region still holds %d bytes that are "+
-			"not zero. A punch that reports success and does not zero is worse than one that refuses: "+
-			"an application told the data is gone can still read it", nonZero)
-	}
-	if got := f.MustShf(ctx, pod, "stat -c %%s %s", framework.Quote(path)); got != fmt.Sprint(totalSize) {
-		t.Errorf("the file reports a logical size of %s after the punch, want %d: punching a hole "+
-			"removes storage, not length", got, totalSize)
-	}
+		// The punch reported success, so it is asserted. This is the branch
+		// that becomes reachable the day preflight accepts 4.2, and the case
+		// does not need rewriting for it.
+		t.Logf("the hole punch succeeded on this %s mount", f.Env.NFSVersion)
+		if nonZero := readNonZeroBytes(ctx, t, f, pod, path, block, holeBlock); nonZero != 0 {
+			t.Errorf("fallocate -p reported success and the punched region still holds %d bytes that "+
+				"are not zero. A punch that reports success and does not zero is worse than one that "+
+				"refuses: an application told the data is gone can still read it", nonZero)
+		}
+		if got := f.MustShf(ctx, pod, "stat -c %%s %s", framework.Quote(path)); got != fmt.Sprint(totalSize) {
+			t.Errorf("the file reports a logical size of %s after the punch, want %d: punching a hole "+
+				"removes storage, not length", got, totalSize)
+		}
+	})
 }
 
 // readNonZeroBytes returns how many bytes of one block are not zero, which is
@@ -1411,6 +1425,40 @@ func assertNoNewKernelErrors(ctx context.Context, t *testing.T, f *framework.Fra
 	}
 }
 
+// The durability pair writes at one record per second and asserts over the set
+// it produced, so the length of the set is the resolution of the measurement.
+//
+// The first real run made that concrete: the pair inherited the recovery cases'
+// warm-up, which waits for three committed writes, and DATA-12 verified three
+// records while DATA-13 verified four. Both passed, and neither said anything.
+// DATA-13's whole job is to record how many un-fsynced records came back absent
+// or short; over four records on a server whose page cache survived the kill,
+// it was always going to report four correct and document nothing.
+//
+// Thirty is a minute of load before the fault. It is not a tuned number and
+// nothing asserts on it: it is enough records that "some were short" is an
+// observation rather than a coin toss, and cheap against a case that already
+// waits out a server restart.
+const durabilityRecords = 30
+
+// minDurabilitySet is the smallest set either durability case will assert over.
+// Below it the pair is reporting on a handful of records and should say so
+// rather than pass. The gap to durabilityRecords is slack for writes that were
+// in flight when the fault landed.
+const minDurabilitySet = 10
+
+// requireDurabilitySet stops a durability case whose record set is too small to
+// carry its own conclusion.
+func requireDurabilitySet(t *testing.T, n int, what string) {
+	t.Helper()
+	if n < minDurabilitySet {
+		t.Fatalf("the workload %s %d records before the fault, and this case asserts over that set. "+
+			"Below %d it reports on a handful of records and a pass says almost nothing, which is worse "+
+			"than a failure because it looks the same as a real result", what, n, minDurabilitySet)
+	}
+	t.Logf("%d records %s before the fault", n, what)
+}
+
 // DATA-12: fsync and COMMIT durability. Write records with conv=fsync, SIGKILL
 // the server under the load, and assert every record the server acknowledged
 // before the fault is still there and still says what it said.
@@ -1441,6 +1489,7 @@ func TestDataFsyncDurabilityAcrossServerKill(t *testing.T) {
 	defer cancel()
 
 	s := startChaosCase(ctx, t, f, "data12")
+	awaitRecords(ctx, t, s.load, durabilityRecords)
 
 	faultAt, err := f.PodNow(ctx, s.writer)
 	if err != nil {
@@ -1451,10 +1500,7 @@ func TestDataFsyncDurabilityAcrossServerKill(t *testing.T) {
 		t.Fatalf("reading the workload log: %v", err)
 	}
 	committed := before.CommittedBefore(faultAt)
-	if len(committed) == 0 {
-		t.Fatalf("the workload committed nothing before the fault, so this case would assert over an " +
-			"empty set and pass having checked nothing")
-	}
+	requireDurabilitySet(t, len(committed), "committed")
 
 	killed, err := chaos.KillServerProcess(ctx, f, s.target, "KILL")
 	if err != nil {
@@ -1513,6 +1559,7 @@ func TestDataDurabilityWithoutFsync(t *testing.T) {
 	defer cancel()
 
 	s := startChaosCaseWith(ctx, t, f, "data13", framework.WriteLoadSpec{NoFsync: true})
+	awaitRecords(ctx, t, s.load, durabilityRecords)
 
 	faultAt, err := f.PodNow(ctx, s.writer)
 	if err != nil {
@@ -1527,10 +1574,7 @@ func TestDataDurabilityWithoutFsync(t *testing.T) {
 	// a sweep restricted to that set would miss a record that reached the share
 	// by a route nothing asserted on.
 	attempted := before.Attempted()
-	if len(attempted) == 0 {
-		t.Fatalf("the workload attempted nothing before the fault, so this case would sweep an empty " +
-			"set and pass having checked nothing")
-	}
+	requireDurabilitySet(t, len(attempted), "attempted")
 
 	killed, err := chaos.KillServerProcess(ctx, f, s.target, "KILL")
 	if err != nil {

@@ -76,18 +76,37 @@ func startChaosCaseWith(ctx context.Context, t *testing.T, f *framework.Framewor
 	}
 	f.Defer(func(ctx context.Context) { _, _ = running.Stop(ctx) })
 	// A few records before the fault, so that the case is measuring an
-	// interruption to something rather than a cold start.
-	if err := framework.Poll(ctx, framework.PollInterval, 2*time.Minute, func(ctx context.Context) (bool, error) {
-		rep, err := running.Report(ctx)
+	// interruption to something rather than a cold start. Cases that assert
+	// over the set itself ask for more with awaitRecords.
+	awaitRecords(ctx, t, running, 3)
+	return chaosSetup{f: f, target: target, load: running, dir: dir,
+		writer: "writer", verifier: "verifier", budget: budget}
+}
+
+// awaitRecords waits until the workload has attempted at least n records.
+//
+// The recovery cases need only a handful: they measure an interruption, and
+// what matters is that the workload was demonstrably running when the fault
+// landed. The durability pair needs a real set, because it asserts over the
+// records themselves rather than over the interruption. See
+// durabilityRecords for why the difference matters.
+func awaitRecords(ctx context.Context, t *testing.T, load *framework.WriteLoad, n int) {
+	t.Helper()
+	// One record per second by design, so the wait is about n seconds plus the
+	// time the first write takes to reach a cold mount.
+	within := time.Duration(n)*time.Second + 2*time.Minute
+	var got int
+	if err := framework.Poll(ctx, framework.PollInterval, within, func(ctx context.Context) (bool, error) {
+		rep, err := load.Report(ctx)
 		if err != nil {
 			return false, err
 		}
-		return len(rep.Committed()) >= 3, nil
+		got = len(rep.Records)
+		return got >= n, fmt.Errorf("the workload has attempted %d of %d records", got, n)
 	}); err != nil {
-		t.Fatalf("the workload never got going before the fault: %v", err)
+		t.Fatalf("the workload attempted %d of the %d records this case needs before the fault, in %s: %v",
+			got, n, within, err)
 	}
-	return chaosSetup{f: f, target: target, load: running, dir: dir,
-		writer: "writer", verifier: "verifier", budget: budget}
 }
 
 func describeController(t chaos.Target) string {
