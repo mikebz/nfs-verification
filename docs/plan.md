@@ -444,8 +444,10 @@ sparse file hole punches, and fsync/COMMIT durability:
   killed. Asserts that missing uncommitted data is acceptable and documented,
   not failed.
 - DATA-14: mixed 70/30 read/write workload across 20 pods with file sizes from
-  4KiB to 1GiB for 1 hour. Asserts zero checksum mismatches. Gated in weekly
-  soak (`Gate: W`).
+  4KiB to 1GiB for 1 hour. Asserts zero checksum mismatches. An hour does not
+  fit `make test-data`, so it gets its own target; see
+  [`04-data-path-and-locktool-design.md`](04-data-path-and-locktool-design.md)
+  section 5.14.
 
 **Harness added**: `locktool`, a small static Go binary for `fcntl` byte-range
 locks and lease-period observation; `noac` mount option injection in PVC/PV
@@ -516,13 +518,13 @@ density, metadata volume, noisy-neighbor contention, and sustained throughput:
 - SCALE-03: pod fan-out (1, 10, 50, 100 pods on one volume). Records the
   throughput degradation curve and asserts no timeout or connection cliff.
 - SCALE-04: small-file write storm (1M files, 1–64KiB). Server RSS remains
-  bounded without OOMKill. Gated in weekly soak (`Gate: W`).
+  bounded without OOMKill.
 - SCALE-05: metadata-heavy workload (100k stat/create/unlink per minute). Asserts
   no server restart and records operation latencies.
 - SCALE-06: noisy neighbor across exports on a shared server (enabled only if
   fan-out > 1). Load on one export does not starve another beyond stated bounds.
 - SCALE-07: sustained 8h throughput soak. Asserts no degradation trend exceeding
-  10% and no resource leak. Gated in weekly soak (`Gate: W`).
+  10% and no resource leak.
 
 **Harness added**: batch volume and pod generator, metadata stress scripts,
 fio distributed benchmark orchestrator, and noisy neighbor test fixtures.
@@ -552,7 +554,7 @@ infrastructure, node, network, and endurance fault injection:
 - CHAOS-14: colocation deadlock. Server pod scheduled on same node as clients
   under heavy memory pressure; asserts no page-reclaim deadlock.
 - CHAOS-15: client node OOM with dirty pages on NFS mount. Asserts bounded
-  failure without node kernel hang. Gated in weekly soak (`Gate: W`).
+  failure without node kernel hang.
 - CHAOS-16: 24h chaos soak with randomized kills, network partitions, and pod
   evictions. Asserts zero data corruption, zero unrecovered mounts, and zero core dumps.
 - CHAOS-17: recovery state store lost or corrupted, then server restarted. Asserts

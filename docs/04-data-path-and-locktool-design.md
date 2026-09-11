@@ -81,17 +81,21 @@ section without reading code.
    injected and asserts only what that one releases. The first drops one pod's
    locks when its descriptors close; the second drops the locks of every pod on
    that node when the node's lease expires.
-2. Locks are asserted only on a mount that sends them to the server. A mount
-   carrying `nolock` or `local_lock=` reports blocked, because on such a mount
-   every lock is local and cross-node exclusion does not exist to be tested.
+2. Locks are asserted only on a mount that sends them to the server, per lock
+   type: `nolock` and `local_lock=all` block every lock case, `local_lock=flock`
+   blocks the `flock` half and `local_lock=posix` the byte-range half.
+   `local_lock=none` is the default and blocks nothing. On a blocked mount the
+   lock never reaches the server, so cross-node exclusion does not exist to be
+   tested and a failure would name the server for a mount option's fault.
 3. A lock the harness cannot express is never silently replaced by a weaker one.
    A whole-file lock stands only where the case says whole file.
 4. A mount option a case depends on is read back from `/proc/mounts` on the node
    that mounted it, before anything is asserted on it. An option the driver
    dropped must fail the case, not pass it vacuously.
 5. A case that force-deletes a pod does not return until that node has released
-   the mount, established from the Kubernetes API where the driver attaches and
-   from the node itself where it does not.
+   the mount, and teardown refuses to delete a claim whose unmount was never
+   proven. Neither is best effort: an unproven unmount keeps the claim and fails
+   loudly, because a leaked claim is recoverable and a wedged node is not.
 6. Data that was never committed may be absent. That is never a failure.
 7. A record that is short is acceptable exactly where no fsync was issued. A
    byte that differs from what was written, at an offset that was written, is a
@@ -117,7 +121,8 @@ section without reading code.
   Section 5.2 says why nothing off the shelf does this.
 - A `/proc/locks` reader on the node agent, for the client's own view of what it
   believes it holds, with ranges. No tool required; it is a kernel file.
-- A mount-option check on the lock cases: `nolock` and `local_lock=` block them.
+- A mount-option check on the lock cases, per lock type: `nolock` and
+  `local_lock=all|flock|posix` block the halves they make local.
 - The byte-range half of DATA-05 and the disjoint-range extension of CHAOS-06,
   both of which [`03-grace-and-lock-reclaim-design.md`](03-grace-and-lock-reclaim-design.md)
   section 5.5 deferred to this phase by name.
@@ -133,8 +138,9 @@ section without reading code.
 
 - Any new container image. Section 5.3.
 - Renaming or re-targeting any case outside DATA. [PR #11](https://github.com/mikebz/nfs-verification/pull/11) sorted the whole suite
-  by category; this phase adds to that and changes none of it. The one open
-  question it raises is where DATA-14's hour runs, in section 5.14.
+  by category; this phase adds to that and changes none of it. It does add one
+  target, `make test-data-soak`, for DATA-14's hour, in the PR that lands
+  DATA-14: section 5.14.
 - NFSv4.2. Preflight pins the mount at `vers=4.1` and fails otherwise, so
   `ALLOCATE`, `DEALLOCATE` and `READ_PLUS` are out of reach. DATA-11 is written
   so that the day preflight accepts 4.2, the punch-hole half becomes an
@@ -165,9 +171,31 @@ token or an integer, so the parser is a `strings.Fields` and a switch.
 
 | Subcommand | Arguments | Blocks | Prints |
 |---|---|---|---|
-| `hold` | path, start, len, mode, run-file, state-file | until granted, then until the run-file is removed | `launched` on the first pass |
-| `try` | path, start, len, mode | no | `GRANTED` or `REFUSED pid=<n> type=<r\|w> start=<n> len=<n>` |
-| `getlk` | path, start, len, mode | no | `FREE` or `HELD pid=<n> type=<r\|w> start=<n> len=<n>` |
+| `hold` | path, start, len, mode, run-file, state-file | no: retries `F_SETLK` once a second while the run-file exists | `launched` on the first pass |
+| `try` | path, start, len, mode | no | `GRANTED` or `REFUSED type=<r\|w> start=<n> len=<n>` |
+| `getlk` | path, start, len, mode | no | `FREE` or `HELD type=<r\|w> start=<n> len=<n>` |
+
+**`hold` never blocks in `F_SETLKW`.** A blocking acquire cannot notice its
+run-file being removed, so a holder that is refused, or whose peer never
+releases, sits in the kernel with an empty state file: `Release` cannot stop it,
+and on a hard mount the process may be unkillable in `D` state, which leaves the
+pod `Terminating` and turns teardown into the F-001-adjacent path it is supposed
+to avoid. So `hold` polls `F_SETLK` at the probe rate instead, checking the
+run-file between attempts, and reports `waiting` in its state file until it is
+granted. That also gives the caller a fourth state to poll, rather than
+inferring a blocked acquire from an empty file. `hold-flock.sh` has the same
+weakness today with busybox `flock`, which has no timeout flag; that is not this
+phase's to fix, but locktool is ours and starts without it.
+
+**No `pid` field.** An earlier draft printed the holder's pid. The protocol
+does not carry one: the denied response to `LOCK` and `LOCKT` gives the
+conflicting offset, length and type plus an opaque lock owner (a client id and
+an owner blob), and nothing that identifies a process on another node. Whatever
+`l_pid` holds after a cross-client `F_GETLK` cannot name a remote process, so
+printing it would be inviting a reader to trust a number that means nothing. The
+range and the type are real and are what the assertions use; which pod on which
+node is expected to hold a range is something the harness knows because it put
+it there, so the case carries that and the failure message names it.
 
 Fields:
 
@@ -183,7 +211,7 @@ Exit codes: 0 for granted or free, 1 for refused or held, 2 for a usage or I/O
 error. Refused and error are separated because a refusal is the expected result
 in half these cases and an error never is.
 
-`hold` writes `held`, `released` or `failed` into the state file, so
+`hold` writes `waiting`, `held`, `released` or `failed` into the state file, so
 `framework.LockHolder` covers `flock` and `fcntl` holders with one shape and one
 polling loop.
 
@@ -225,7 +253,13 @@ from its offset without a copy of the original.
 | `correct` | full length, every byte as written | pass | pass |
 | `absent` | no file, or zero length | **fail** | pass, recorded |
 | `short` | a correct prefix, less than full length | **fail** | pass, recorded |
-| `wrong` | any byte differs at an offset that was written | **fail** | **fail** |
+| `wrong` | any byte differs at an offset that was written, **or the file is longer than `RecordBytes`** | **fail** | **fail** |
+
+The four verdicts are exhaustive over observed length, which an earlier draft's
+were not: below `RecordBytes` is `absent` or `short`, exactly `RecordBytes` is
+`correct` or `wrong`, and above `RecordBytes` is `wrong` whatever the prefix
+says. A record that grew is a byte nobody wrote, and rule 6 admits no reading
+under which that is acceptable.
 
 DATA-12 fails on anything but `correct`, because the write was fsynced and the
 server acknowledged it. DATA-13 fails only on `wrong`. That asymmetry is the
@@ -376,8 +410,10 @@ checked:
 | Connectathon `tlock`, `fstests`, NFStest | purpose-built NFS locking tests | source to compile or a Python suite to install; both are a heavier dependency than the 200 lines they would replace, and neither is packaged on a stock image |
 | `fio --file_lock` | job coordination | whole file, and it locks to serialize fio's own jobs, not to assert anything |
 
-So: about 200 lines of Go over `syscall.FcntlFlock` with `F_SETLK`, `F_SETLKW`
-and `F_GETLK`. No cgo, therefore static by default. POSIX record locks are
+So: about 200 lines of Go over `syscall.FcntlFlock` with `F_SETLK` and
+`F_GETLK`. `F_SETLKW` is deliberately unused; section 4.1 says why a blocking
+acquire is the wrong primitive for a process the harness has to be able to
+stop. No cgo, therefore static by default. POSIX record locks are
 per-process rather than per-thread, so the Go runtime's threads are not a
 hazard; the hazard is the close rule in section 5.1, which is why `hold` opens
 the file once and keeps that descriptor rather than reopening.
@@ -540,18 +576,45 @@ unmount progress and its errors have nowhere to land as Events either.
 
 So the wait reads the `CSIDriver` object once and takes one of two paths:
 
-- `attachRequired: true`: watch `node.status.volumesInUse` until the volume's
-  handle is gone. Pure API, no node agent, and it works on a cluster where the
-  privileged DaemonSet cannot run.
+- `attachRequired: true`: watch `node.status.volumesInUse`. The entries are
+  kubelet `UniqueVolumeName`s, **not** raw CSI volume handles: for a CSI volume
+  the plugin builds `<driver>^<handle>` (`volNameSep = "^"` in
+  `pkg/volume/csi/csi_plugin.go`) and kubelet prefixes the plugin name, giving
+  `kubernetes.io/csi/<driver>^<handle>`. Comparing `pv.Spec.CSI.VolumeHandle`
+  against that list matches nothing and would report the volume gone on the
+  first poll, which is F-001 with extra steps. The wait constructs the unique
+  name from the driver and handle and compares that, and a name it cannot
+  construct is treated as "not proven gone", never as gone.
 - `attachRequired: false`, or no CSIDriver object (an in-tree `spec.nfs` PV):
   read `/proc/mounts` on the node through the node agent until the mount is
-  gone. Without the node agent the case **skips**: force-deleting a mounted pod
-  with no way to observe the unmount is the hazard, not the case.
+  gone.
 
-Either way the wait is bounded, and expiry fails the case loudly, naming the
-node and the volume. A node that has not unmounted is the state F-001 says to
-treat as dangerous rather than wait out. `DeletePodNow` stays as the primitive;
-cases call the helper that force-deletes and then waits.
+**Both paths are always available.** An earlier draft said the case skips
+without the node agent. It cannot: preflight creates the privileged DaemonSet
+and returns an error if it cannot schedule ("Its absence is a hard failure, not
+a silent skip, because it is the only way to see the node",
+`pkg/preflight/preflight.go`), and nothing runs until preflight passes. So
+`Caps.NodeAgent` is true whenever a case executes at all, the skip was dead
+text, and worse it advertised a way to weaken the F-001 rule that can never be
+reached. The API branch is therefore an optimisation, not a fallback: where the
+driver attaches, the wait is a Node `GET` instead of an exec into a privileged
+pod.
+
+**Registering the wait is not enough; teardown needs its own guard.** `Defer`
+callbacks return nothing, and `DeleteCaseObjects` decides what to keep from
+`claimsHeldBy`, which reads the pods still in the API. A force-deleted pod is
+not in the API, so a wait that timed out leaves nothing behind to stop the claim
+being deleted under a live mount. The fixture therefore carries an explicit
+record: a case that force-deletes a pod marks that claim unproven, the wait
+clears the mark only on an observed unmount, and `DeleteCaseObjects` keeps every
+still-marked claim and fails naming it, exactly as it already does for a pod
+that outlived `PodTerminateTimeout`. Leaking a claim is recoverable; wedging a
+node is not, and that trade is already the rule in teardown.
+
+The wait is bounded, and expiry fails the case loudly, naming the node and the
+volume. A node that has not unmounted is the state F-001 says to treat as
+dangerous rather than wait out. `DeletePodNow` stays as the primitive; cases
+call the helper that force-deletes, waits, and clears the mark.
 
 This is the "uglier path" F-001's follow-up section asks for, approached from
 the safe side: the same sequence, with an observation between the two steps.
@@ -660,9 +723,13 @@ returns is one the populate step created, the server pod's restart count is
 unchanged, and the client nodes' `dmesg` carries no oops or `nfs: server ...`
 error over the window. The counts go in the bundle.
 
-Two practical points. The listing streams: `find <dir> -maxdepth 1`, not `ls`,
+Two practical points. The listing streams: `find <dir> -mindepth 1 -maxdepth 1`
+and compares basenames, not `ls`,
 because busybox `ls` sorts, and sorting 100k entries in a pod with no memory
-limit set is a way to discover the node's OOM killer. And population is
+limit set is a way to discover the node's OOM killer. `-mindepth 1` is not
+decoration: `find <dir> -maxdepth 1` emits `<dir>` itself first, and a
+classifier fed that path would flag the directory as a name nobody created and
+fail DATA-10 on every run. And population is
 inode-hungry: the case checks free inodes and space before it starts and reports
 **blocked** if the export cannot hold the set, rather than failing on `ENOSPC`
 halfway through and pointing at the server.
@@ -688,11 +755,30 @@ back zeros in the hole, the byte written past the hole is at the right offset,
 than asserted, since whether the backing filesystem stores the hole sparsely is
 not an NFS property.
 
-What it does with the punch: attempts it, and records the refusal with the
-reason. It fails only if the punch *reports success* and the region is not zero
+What it does with the punch: probes the tool first, then attempts it, and the
+two refusals are not the same answer. If the image's `fallocate` does not parse
+`-p` the case reports **blocked**, naming `-tools-image`, because rule 8 owns a
+missing tool and nothing about the protocol has been learned. Only a `-p` that
+parses and then returns `EOPNOTSUPP` is recorded as the protocol saying no,
+under rule 9. On a busybox image the first branch is the one that fires, so
+without this split every run would file "NFSv4.1 does not support hole
+punching" on evidence that is really "this image's applet has no `-p`".
+
+It fails only if the punch *reports success* and the region is not zero
 afterwards, or the reported size changes. That is the assertion that survives
 the day preflight accepts 4.2, and on that day the case starts asserting the
-punch without being rewritten.
+punch without being rewritten. The 4.2 branch is unreachable until then, and it
+is written anyway rather than left out, because the alternative is a case that
+has to be rediscovered and rewritten.
+
+**This narrows a requirement, so the requirement moves.** Section 3.2 lists
+DATA-11 as "sparse file write, hole punch, read back", and a design document is
+not the place to quietly drop the middle third of that. The test plan's DATA-11
+row is amended in this PR to say that the punch is recorded rather than asserted
+on a 4.1 mount, and what the case still fails on. Requirements live in the test
+plan; if the maintainer would rather keep the row as it is and have DATA-11
+report blocked until preflight accepts 4.2, that is the other legitimate answer
+and it is a one-line revert of that row.
 
 ### 5.12 DATA-12 and DATA-13: one workload, two verdict tables
 
@@ -790,26 +876,34 @@ and `make test-obs` are already in that position, so this is where the
 repository is rather than something this phase introduces, but a reader of the
 Makefile should not have to infer it.
 
-**DATA-14 does not fit its target, and that needs a decision.** Section 4.2
-budgets `make test-data` at under 45 minutes on two nodes, and the Makefile
-gives it `-timeout=45m`. DATA-14 is a one-hour soak across 20 pods. Both cannot
-be true. Three ways out, and this design does not get to pick alone, because
-[PR #11](https://github.com/mikebz/nfs-verification/pull/11) deliberately removed the cost axis that would have answered it:
+**DATA-14 gets its own target, because it cannot fit the one it belongs to.**
+`make test-data` is a single `go test` over every `^TestData` case with
+`-timeout=45m`, and Section 4.2 budgets it at under 45 minutes on two nodes.
+After this phase that one invocation would hold fourteen cases: DATA-01 to
+DATA-05 already in the tree, the eight added here, and DATA-14, which is an hour
+by itself across 20 pods. The target cannot execute its own documented contents.
+That has to be settled before implementation rather than left as a note.
 
-1. Raise `test-data` to something like `-timeout=120m` and restate the budget.
-   Costs the category its "under 45 minutes" property, which is the thing that
-   makes a category target worth running.
-2. Give the soak its own target, `make test-data-soak` selecting
-   `^TestDataMixedSoak`, and have `test-data` skip it. Keeps one prefix, one
-   file and one budget; costs one target, and reintroduces a cost distinction
-   inside a category rather than across categories.
-3. Shorten DATA-14 in the test plan. Requirements live there, so this is a
-   legitimate answer, but it changes what is verified to fit a Makefile, which
-   is the wrong direction to reason in.
+Three ways out:
 
-This design recommends 2 and marks it open in section 11. It does not block the
-phase: DATA-14 is in the last PR, and the eight cases before it fit the target
-as it stands.
+1. Raise `test-data` to `-timeout=120m` and restate the budget. Costs the
+   category the "under 45 minutes" property that makes a category target worth
+   running at all, and charges every DATA run for a case almost nobody wants.
+2. Give the soak its own target: `make test-data-soak` running
+   `-run '^TestDataMixedSoak' -timeout=120m`, and `test-data` gains
+   `-skip 'MixedSoak'`. One prefix, one file, one category, and the 45 minute
+   budget stays true.
+3. Shorten DATA-14 in the test plan. A legitimate answer, since requirements
+   live there, but it changes what is verified to fit a Makefile, which is the
+   wrong direction to reason in.
+
+**Decided: 2.** It keeps every property [PR #11](https://github.com/mikebz/nfs-verification/pull/11) introduced, the prefix, the
+file and the one-category-one-target shape, and it does not make a soak the
+price of running the data path. The cost distinction it reintroduces is inside a
+category rather than across them, which is what
+[PR #11](https://github.com/mikebz/nfs-verification/pull/11) removed. This is a
+change to the Makefile and to Section 4.2, and it lands in the PR that lands
+DATA-14, not before: until then `test-data` holds thirteen cases that fit.
 
 ### 5.15 What DATA-05 and CHAOS-06 gain
 
@@ -1001,13 +1095,15 @@ Export path: unchanged, `artifacts/<run-id>/<CASE-ID>/`.
    `FEATURE_DD_IBS_OBS` in busybox. **Decided by** the probe in section 5.7 on
    the first real run. If it is absent, section 5.4 is revisited and locktool
    grows a `dio` subcommand rather than DATA-07 being permanently blocked.
-3. **`make test-data` is budgeted at 45 minutes and this phase puts nine cases
-   into it.** DATA-10 alone populates 100k entries, and DATA-14 is an hour by
-   itself, over the target's own `-timeout=45m`. **Decided by** section 5.14's
-   three options for DATA-14, which is the maintainer's call because [PR #11](https://github.com/mikebz/nfs-verification/pull/11)
-   removed the cost axis deliberately, and then by timing the target once the
-   other eight cases are in. The recommendation is a separate
-   `make test-data-soak`. Not a blocker for the phase: DATA-14 is the last PR.
+3. **Whether `make test-data` still fits 45 minutes with thirteen cases in it.**
+   Section 5.14 takes DATA-14's hour out to its own target, which is the part
+   that made the budget impossible. What remains is a real question: DATA-05
+   plus the eight added here, with DATA-10 populating 100k entries, against a
+   budget written when the category held five quick cases. **Decided by** timing
+   the target once the protocol edge cases land, which is the second PR of four.
+   If it is over, the honest answers are to move DATA-10 alongside DATA-14 or to
+   restate the budget on measured evidence, not to leave a target that overruns
+   its own contract.
 4. **Whether 100k entries fit.** The default claim is 1Gi and the export may be
    directory-backed with no per-volume quota, so the real limits are the backing
    filesystem's free inodes. **Decided by** the precheck in section 5.10 on a
@@ -1046,15 +1142,15 @@ One check per rule in section 2, observable from a run.
 | Rule | Check |
 |---|---|
 | 1. Pod death and node death differ | DATA-06 injects a pod death and logs the release interval with its classification. A prompt release is the expected record on a healthy node; the case passes either way within the bound, and the node-loss shape is not asserted here |
-| 2. Locks need a non-local mount | DATA-05 and DATA-06 report blocked, naming the option, on a mount carrying `nolock` or `local_lock=`. Unit test: the option check rejects each of the four `local_lock` values and `nolock` |
-| 3. No silent weakening | `locktool try` on an overlapping range is refused while a disjoint range on the same file is granted, in DATA-05's new half. A whole-file fallback would grant neither or both |
+| 2. Locks need a non-local mount | DATA-05 and DATA-06 report blocked, naming the option, on a mount carrying `nolock`, `local_lock=all`, or the value that makes their own lock type local. Unit test: `nolock` and `local_lock=all` block both halves, `local_lock=flock` blocks only the `flock` half, `local_lock=posix` only the byte-range half, and **`local_lock=none` blocks neither**, since it is the default and means locks do reach the server |
+| 3. No silent weakening | `locktool try` on an overlapping range is refused while a disjoint range on the same file is granted, in DATA-05's new half. A whole-file fallback would grant neither or both. The refusal is read from its range and type; no assertion reads a pid, because the protocol carries none |
 | 4. Options are read back | DATA-08 fails, naming the node and the option, when `/proc/mounts` on the reader's node does not carry `noac` |
-| 5. Force delete waits for the unmount | DATA-06 on an attaching driver watches `volumesInUse` and needs no node agent; on a non-attaching driver it skips without one. Either way the mount is gone before the case returns. Unit test: the wait treats a mount still present at the deadline as an error, not as done |
+| 5. Force delete waits for the unmount, and teardown will not delete an unproven claim | DATA-06's mount is gone before the case returns, by `volumesInUse` on an attaching driver and by `/proc/mounts` otherwise. Unit tests: the unique-name builder produces `kubernetes.io/csi/<driver>^<handle>` and a raw handle never matches an entry; the wait treats a mount still present at the deadline as an error, not as done; and `DeleteCaseObjects` keeps a claim still marked unproven and names it, as it already does for a pod that outlived `PodTerminateTimeout` |
 | 6. Uncommitted absence is not failure | DATA-13 passes with `absent` and `short` counts greater than zero, and the counts appear in the bundle |
-| 7. A wrong byte always fails | Unit test on the sweep parser: `correct`, `absent`, `short` and `wrong` verdicts from recorded tool output, with only `wrong` failing DATA-13 and three of four failing DATA-12 |
+| 7. A wrong byte always fails | Unit test on the sweep parser: `correct`, `absent`, `short` and `wrong` verdicts from recorded tool output, including a record **longer** than `RecordBytes` classified `wrong`, with only `wrong` failing DATA-13 and three of four failing DATA-12 |
 | 8. Missing tools report blocked | DATA-07 against an image without `oflag=direct` reports blocked naming `-tools-image`, not a pass and not a failure. Same for DATA-14 without `-fio-image`, which skips |
-| 9. Undefined operations are recorded | DATA-11 on a `vers=4.1` mount records the punch refusal and passes on the sparse assertions |
-| 10. Listings may miss, never invent | DATA-10 passes with `listed` below `created`, and fails on any name outside `e-<index>`. Unit test: the census classifier flags a `.nfs*` leftover and a truncated name as unknown |
+| 9. Undefined operations are recorded, missing tools are not | DATA-11 on a `vers=4.1` mount passes on the sparse assertions and records the punch refusal **only when the applet parsed `-p`**; an image whose `fallocate` has no `-p` reports blocked naming `-tools-image`, so a tool gap is never filed as a protocol gap |
+| 10. Listings may miss, never invent | DATA-10 passes with `listed` below `created`, and fails on any name outside `e-<index>`. Unit tests: the census classifier flags a `.nfs*` leftover and a truncated name as unknown, and the listing under `-mindepth 1` never presents the directory itself for classification |
 | 11. Verified by content | The existence check is gone from the durability path; CHAOS-01 and CHAOS-02 assert content after this phase, which is visible as a verdict table in their bundles |
 | 12. Phases 2 and 3 still hold | `make test-chaos` passes unchanged before the DATA-05 and CHAOS-06 extensions land, and again after |
 
