@@ -94,3 +94,73 @@ func TestRunScriptRejectsABadID(t *testing.T) {
 		t.Error("an id that escapes /tmp was accepted as a script filename")
 	}
 }
+
+// busyboxFlockOptions is every option busybox's flock applet parses
+// (util-linux/flock.c). util-linux accepts a superset, which is why a
+// portability defect here cannot be caught by running the script: the
+// workstation and the default tools image both accept more than the rule
+// allows. See F-005 in docs/findings.md.
+var busyboxFlockOptions = map[string]bool{"-s": true, "-x": true, "-u": true, "-n": true}
+
+// TestScriptsUseOnlyPortableFlockOptions holds the scripts to what the
+// repository says it assumes: nothing beyond busybox. An option busybox does
+// not parse makes every attempt exit on a usage error, which reads as a
+// refusal, and a case asserting on grants then passes having asked nothing.
+//
+// Steps:
+//  1. Read every embedded script.
+//  2. Find each flock invocation and the dash-prefixed words after it.
+//  3. Assert every one of them is in busybox's set.
+func TestScriptsUseOnlyPortableFlockOptions(t *testing.T) {
+	entries, err := scriptFS.ReadDir("scripts")
+	if err != nil {
+		t.Fatalf("reading the embedded scripts: %v", err)
+	}
+	for _, e := range entries {
+		for i, line := range strings.Split(scriptBody(e.Name()), "\n") {
+			if strings.HasPrefix(strings.TrimSpace(line), "#") {
+				continue
+			}
+			for _, opt := range flockOptionsIn(line) {
+				if !busyboxFlockOptions[opt] {
+					t.Errorf("%s:%d passes %q to flock, which busybox does not parse: %s",
+						e.Name(), i+1, opt, strings.TrimSpace(line))
+				}
+			}
+		}
+	}
+}
+
+// flockOptionsIn returns the options passed to every flock call on one line.
+// Options are collected up to the end of the command rather than up to the
+// first non-option word, because flock takes a file argument between its flags
+// in some invocations and stopping there would skip everything after it.
+func flockOptionsIn(line string) []string {
+	var opts []string
+	fields := strings.Fields(line)
+	for i, f := range fields {
+		if strings.Trim(f, "'\";") != "flock" {
+			continue
+		}
+		for _, arg := range fields[i+1:] {
+			if endsCommand(arg) {
+				break
+			}
+			if strings.HasPrefix(arg, "-") {
+				opts = append(opts, strings.TrimRight(arg, "'\";"))
+			}
+		}
+	}
+	return opts
+}
+
+// endsCommand reports whether a word terminates the command it appears in, so
+// that the scan above stops before the next one's flags.
+func endsCommand(word string) bool {
+	for _, sep := range []string{";", "|", "&", ")", "&&", "||"} {
+		if strings.Contains(word, sep) {
+			return true
+		}
+	}
+	return false
+}
