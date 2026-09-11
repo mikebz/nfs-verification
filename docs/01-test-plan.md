@@ -158,7 +158,7 @@ Assertions here are calibrated to the protocol claim in 2.3. Do not tighten them
 | DATA-08 | `noac` mount variant, cross-pod visibility without close | Immediate visibility, confirming the difference from DATA-04 |
 | DATA-09 | Rename, unlink, and re-create while another pod holds the file open | Open fd remains valid; silly-rename behavior correct |
 | DATA-10 | Large directory (100k entries) readdir concurrent with deletes | Listing completes, no server crash, no use-after-free. Derived from a documented directory-chunk reuse crash in READDIR under cache pressure. |
-| DATA-11 | Sparse file write, hole punch, read back | Correct zero regions; reported size consistent |
+| DATA-11 | Sparse file write, hole punch, read back | Correct zero regions; reported size consistent. Hole punching is NFSv4.2 (`DEALLOCATE`, RFC 7862); on the 4.1 mount Section 0 pins, the punch is **recorded as unsupported, not asserted**, and the case fails only if a punch reports success without zeroing. |
 | DATA-12 | fsync and COMMIT durability: write, fsync, kill server | Post-recovery data present |
 | DATA-13 | Negative durability: write without fsync, kill server | Data may be absent. Asserted as acceptable, documented. |
 | DATA-14 | Mixed 70/30 read/write, 4KiB to 1GiB files, 20 pods, 1h | Zero checksum mismatches |
