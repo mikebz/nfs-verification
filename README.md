@@ -19,13 +19,14 @@ the fault injection engine, and grace observability. The remaining cases land in
 |---|---|
 | `pkg/slo` | Timing and correctness targets, and the two lease/grace profiles |
 | `pkg/env` | The environment record written to `artifacts/<run-id>/environment.json` |
-| `pkg/framework` | Clients, per-case fixture, pods and PVCs from embedded manifests, exec, locks and the lock probe, the grace observer, the privileged node agent, artifact collection |
+| `pkg/framework` | Clients, per-case fixture, pods and PVCs from embedded manifests, exec, locks and the lock probe, locktool delivery, the grace observer, the privileged node agent, artifact collection |
 | `pkg/framework/manifests` | The YAML the suite applies: the client pod and the node agent DaemonSet |
 | `pkg/framework/scripts` | The shell the suite runs inside pods, as scripts rather than as Go strings |
 | `pkg/chaos` | The fault operations the CHAOS cases inject |
 | `pkg/preflight` | Section 0 checks and all discovery |
 | `test/e2e` | The cases; each names its plan ID in the comment above it |
 | `cmd/preflight` | `make preflight` |
+| `cmd/locktool` | The byte-range lock tool the lock cases stream into a pod; `make locktool` |
 
 [`AGENTS.md`](AGENTS.md) is the guide for working in this repository: how to
 approach a change, how to write a case, what to claim when you are done.
@@ -33,9 +34,10 @@ approach a change, how to write a case, what to claim when you are done.
 ## Running
 
 ```sh
-make all                                                  # fmt, vet, unit, build
+make all                                                  # fmt, vet, unit, build, locktool
 make check-fmt                                            # verify formatting without modifying
 make unit                                                 # harness unit tests, no cluster
+make locktool                                             # build bin/locktool-linux-{amd64,arm64}
 make preflight      FLAGS="-storage-class=nfs -lease-seconds=60 -grace-seconds=90"
 make test-prov      FLAGS="-storage-class=nfs -lease-seconds=60 -grace-seconds=90"
 make test-data      FLAGS="-storage-class=nfs -lease-seconds=60 -grace-seconds=90"
@@ -43,7 +45,7 @@ make test-chaos     FLAGS="-storage-class=nfs -lease-seconds=60 -grace-seconds=9
 make test-obs       FLAGS="-storage-class=nfs -lease-seconds=60 -grace-seconds=90"
 make test-sec       FLAGS="-storage-class=nfs -lease-seconds=60 -grace-seconds=90"
 make test-e2e       FLAGS="-storage-class=nfs -lease-seconds=60 -grace-seconds=90"
-make clean                                                # remove artifacts/
+make clean                                                # remove artifacts/ and bin/
 ```
 
 Everything goes through `make`. The targets carry the flags, the timeouts and
@@ -65,6 +67,14 @@ teardown deletes exactly that selector, pods first and then claims. The full run
 ID stays in the name: truncating it collides across runs and turns triage into
 guesswork. The node agent is privileged by design, so a cluster enforcing a
 restricted Pod Security level on `default` cannot run the suite as it stands.
+
+`make locktool` cross-compiles `cmd/locktool` into `bin/locktool-linux-<arch>`
+with `CGO_ENABLED=0`, one per node architecture. `make all` runs it, so a
+contributor who never touches a cluster still compiles it. The lock cases read
+the target node's architecture, stream the matching binary into the ordinary
+client pod over `pods/exec`, and verify it by checksum on the far side; a node
+whose architecture has no built binary reports blocked and names this target.
+`bin/` is git-ignored, so the binaries are never committed.
 
 Preflight runs once per cluster. A passing result is cached at
 `<repo>/artifacts/preflight-<context>.json`, keyed by kubeconfig context, and
@@ -127,6 +137,7 @@ charged to every case eats the `go test -timeout` budget for the package.
 | DATA-03 | Close-to-open across two nodes | DATA |
 | DATA-04 | The negative of DATA-03: what a reader may see before the writer closes | DATA |
 | DATA-05 | flock mutual exclusion across two nodes, clean handover on release | DATA |
+| DATA-06 | A byte-range lock held by a force-deleted pod, released inside one lease | DATA |
 | SEC-01 | uid and gid preservation across pods on two nodes | SEC |
 | SEC-02 | What the export does to a root-owned write, and whether it does it coherently | SEC |
 | OBS-04 | A mount that cannot succeed reaches the operator as a Kubernetes Event | OBS |

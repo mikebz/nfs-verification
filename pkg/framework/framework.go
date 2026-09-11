@@ -3,7 +3,9 @@ package framework
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
+	"sync"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -32,6 +34,50 @@ type Framework struct {
 
 	cleanups []func(context.Context)
 	faults   []FaultEvent
+
+	// mu guards the two maps below. Cases drive several pods at once, so the
+	// locktool install and the unproven-claim record are both reachable from
+	// more than one goroutine.
+	mu sync.Mutex
+	// lockTool remembers which pods already carry the binary, and whether the
+	// copy succeeded, so the result is one install per pod and not one per call.
+	lockTool map[string]error
+	// unproven records claims whose mount was never observed to go away, keyed
+	// by claim name and holding the reason. Teardown refuses to delete these.
+	unproven map[string]string
+}
+
+// MarkClaimUnproven records that a claim may still be mounted by a node,
+// because the pod that mounted it left the API before kubelet unmounted.
+// Teardown keeps such a claim rather than destroying an export under a live
+// mount; see docs/findings.md F-001.
+func (f *Framework) MarkClaimUnproven(claim, why string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.unproven == nil {
+		f.unproven = map[string]string{}
+	}
+	f.unproven[claim] = why
+}
+
+// ClearClaimUnproven records an observed unmount. Only an observation clears
+// the mark: a wait that timed out leaves it set, which is what makes teardown
+// safe for a case that failed between the force delete and the wait.
+func (f *Framework) ClearClaimUnproven(claim string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.unproven, claim)
+}
+
+// unprovenClaims returns a copy of the record.
+func (f *Framework) unprovenClaims() map[string]string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make(map[string]string, len(f.unproven))
+	for k, v := range f.unproven {
+		out[k] = v
+	}
+	return out
 }
 
 // New creates the fixture for one case. caseID is the plan's ID, for example
@@ -142,7 +188,8 @@ func (f *Framework) DeleteCaseObjects(ctx context.Context) error {
 		stuck = list.Items
 		return len(stuck) == 0, fmt.Errorf("%d pods still terminating", len(stuck))
 	})
-	if waitErr == nil {
+	unproven := f.unprovenClaims()
+	if waitErr == nil && len(unproven) == 0 {
 		if err := f.C.Kube.CoreV1().PersistentVolumeClaims(Namespace).
 			DeleteCollection(ctx, metav1.DeleteOptions{}, ListOptions(f.Selector())); err != nil {
 			return fmt.Errorf("deleting claims: %w", err)
@@ -150,15 +197,32 @@ func (f *Framework) DeleteCaseObjects(ctx context.Context) error {
 		return nil
 	}
 
-	// A pod that outlives the wait means a node stopped answering. Claims it
-	// still mounts must stay: deleting one destroys an export under a live
-	// mount, which is how a sick node becomes an unusable node (docs/findings.md
-	// F-001). Everything it does not mount is safe to remove, so the run leaks
-	// as little as it can and says exactly what it left and why.
+	// Two ways a claim can still be mounted by a node. A pod that outlives the
+	// wait means a node stopped answering. A claim still marked unproven means
+	// a case force-deleted the pod holding it and the unmount was never
+	// observed, which teardown cannot see for itself because the pod is no
+	// longer in the API.
+	//
+	// Either way the claim must stay: deleting one destroys an export under a
+	// live mount, which is how a sick node becomes an unusable node
+	// (docs/findings.md F-001). Everything neither reason covers is safe to
+	// remove, so the run leaks as little as it can and says what it left and why.
 	held := f.claimsHeldBy(stuck)
+	for name := range unproven {
+		held[name] = true
+	}
 	kept, deleted, delErr := f.deleteUnheldClaims(ctx, held)
-	msg := fmt.Sprintf("%d pods did not terminate within %s (%s); deleted %d claims, kept %d still mounted (%s)",
-		len(stuck), PodTerminateTimeout, describePods(stuck), deleted, len(kept), strings.Join(kept, ", "))
+	var reasons []string
+	if len(stuck) > 0 {
+		reasons = append(reasons, fmt.Sprintf("%d pods did not terminate within %s (%s)",
+			len(stuck), PodTerminateTimeout, describePods(stuck)))
+	}
+	for name, why := range unproven {
+		reasons = append(reasons, fmt.Sprintf("claim %s has an unproven unmount: %s", name, why))
+	}
+	sort.Strings(reasons)
+	msg := fmt.Sprintf("%s; deleted %d claims, kept %d still mounted (%s)",
+		strings.Join(reasons, "; "), deleted, len(kept), strings.Join(kept, ", "))
 	if delErr != nil {
 		return fmt.Errorf("%s: %w", msg, delErr)
 	}

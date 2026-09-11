@@ -12,7 +12,7 @@ FLAGS ?=
 COMMON := -run-id=$(RUN_ID) $(FLAGS)
 
 .PHONY: all
-all: fmt vet unit build
+all: fmt vet unit build locktool
 
 .PHONY: build
 build:
@@ -29,6 +29,25 @@ check-fmt:
 .PHONY: vet
 vet:
 	go vet ./...
+
+# locktool is the byte-range lock tool the lock cases stream into an existing
+# pod over pods/exec. No image and no registry: a binary this repository owns,
+# gated on a registry an operator has to populate, would mean the byte-range
+# cases never run anywhere, and a case that is skipped everywhere does not
+# exist. See docs/04-data-path-and-locktool-design.md section 5.3.
+#
+# One binary per node architecture; the harness picks the matching one from what
+# the node itself reports. CGO_ENABLED=0 makes them static, so they run on a
+# busybox image as happily as on a glibc one. bin/ is git-ignored: a repository
+# that ships compiled artifacts cannot be reviewed.
+LOCKTOOL_ARCHES ?= amd64 arm64
+
+.PHONY: locktool
+locktool:
+	@for arch in $(LOCKTOOL_ARCHES); do \
+		echo "building bin/locktool-linux-$$arch"; \
+		CGO_ENABLED=0 GOOS=linux GOARCH=$$arch go build -trimpath -o bin/locktool-linux-$$arch ./cmd/locktool || exit 1; \
+	done
 
 # Unit tests for the harness itself. No cluster required.
 .PHONY: unit
@@ -70,4 +89,4 @@ test-e2e:
 
 .PHONY: clean
 clean:
-	rm -rf artifacts
+	rm -rf artifacts bin

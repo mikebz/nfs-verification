@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/mikebz/nfs-verification/pkg/framework"
+	"github.com/mikebz/nfs-verification/pkg/slo"
 )
 
 // Assertions here are calibrated to the protocol claim in Section 2.3 of the
@@ -392,3 +393,153 @@ func TestDataConcurrentAppendToOneFile(t *testing.T) {
 // appendRecord matches a whole record. Anything else in the file is two writes
 // that landed on top of each other.
 var appendRecord = regexp.MustCompile(`^record-from-[a-z0-9-]+-\d{4}$`)
+
+// DATA-06: a byte-range lock held by a pod that is force-deleted. The lock must
+// become available to another client inside one lease period, and the case says
+// which mechanism released it.
+//
+// The plan's expected result is "lock released within one lease period; new
+// acquirer succeeds". Read literally against Kubernetes, that sentence has the
+// wrong actor in it. The NFSv4 client is the *node*, not the pod: a Linux
+// client establishes a single lease on each server it accesses, and every mount
+// and every pod on that node shares it. So:
+//
+//   - A pod dies. Kubelet kills the container, its descriptors close, the
+//     client sends LOCKU, and the lock is gone in about a second. No lease
+//     expires, because the node never stopped renewing it, and only that pod's
+//     locks move.
+//   - A node dies. Nothing closes anything, and the locks of every pod on that
+//     node stay held until the lease expires, then drop together.
+//
+// This case injects the first and asserts the bound that holds under both,
+// because a case asserting expiry would fail on a healthy cluster and one
+// asserting promptness would fail wherever kubelet was slow to kill, for
+// reasons that have nothing to do with NFS. It classifies what it saw, so that
+// "one application, back in a second" and "every pod on node X, for a minute"
+// do not produce an identical pass. The node-loss side is CHAOS-03 and SEC-07.
+//
+// Force-deleting a mounted pod is the first half of F-001, so the case does not
+// return until the node has released the mount, and teardown refuses to delete
+// a claim whose unmount was never observed.
+//
+// Steps:
+//  1. Pin a holder to one node and an acquirer to another, on one claim.
+//  2. Read back both mounts and report blocked if either keeps byte-range
+//     locks on the client, since cross-node exclusion would not then exist.
+//  3. Take a write lock on a range in the holder.
+//  4. Confirm the acquirer is refused on that range, so a case that was broken
+//     from the start cannot pass, and record what the refusal named.
+//  5. Force-delete the holder and wait for its node to release the mount, while
+//     the acquirer retries the same range alongside.
+//  6. Assert the range became available inside one lease period, and classify
+//     the interval as a descriptor close or a lease expiry.
+func TestDataLockReleasedAfterForcedPodLoss(t *testing.T) {
+	f := framework.New(t, "DATA-06")
+	requireCap(t, f.Caps.MultiNode, "re-acquiring a lock from another client needs two schedulable workers")
+	ctx, cancel := caseCtx(t, 20*time.Minute)
+	defer cancel()
+
+	nodeA, nodeB := f.TwoNodes(ctx)
+	pvc := f.MustRWXPVC(ctx, "data06")
+	const (
+		holder   = "holder"
+		acquirer = "acquirer"
+	)
+	f.MustPod(ctx, toolsPod(holder, pvc.Name, nodeA))
+	f.MustPod(ctx, toolsPod(acquirer, pvc.Name, nodeB))
+
+	pv, err := f.PVForClaim(ctx, "data06")
+	if err != nil {
+		t.Fatalf("finding the volume behind the claim: %v", err)
+	}
+	requireServerSideLocking(ctx, t, f, pv.Name, framework.PosixLock, nodeA, nodeB)
+
+	path := fileIn("data06.lock")
+	// A range rather than the whole file, because a range is what this phase
+	// adds and what the protocol carries natively. A whole-file fallback would
+	// exercise the same wire operation but would not say the range travelled.
+	rng := framework.WriteRange(0, 4096)
+
+	held, err := f.HoldLock(ctx, holder, path, "data06", rng)
+	if err != nil {
+		t.Fatalf("taking %s on %s in %s: %v", rng, path, nodeA, err)
+	}
+	// Registered before the case can fail, so a failing case does not leave a
+	// lock held on the share by a pod that outlives it.
+	f.Defer(func(ctx context.Context) { _ = held.Release(ctx) })
+
+	refused, err := f.TryLock(ctx, acquirer, path, rng)
+	if err != nil {
+		t.Fatalf("probing %s from %s: %v", rng, nodeB, err)
+	}
+	if refused.Free {
+		t.Fatalf("mutual exclusion broken before any fault: %s on %s was granted %s while %s on %s held it",
+			acquirer, nodeB, rng, holder, nodeA)
+	}
+	t.Logf("%s on %s is refused %s, which is held by %s", acquirer, nodeB, rng, refused.Conflict)
+	if err := f.RecordNodeLocks(ctx, "before-force-delete", nodeA, nodeB); err != nil {
+		t.Logf("recording the client lock tables before the fault: %v", err)
+	}
+
+	bound := slo.LockReleaseBound(profile(t))
+	// The release and the unmount are two consequences of one kill, so the
+	// re-acquire runs alongside the unmount wait rather than after it. Waiting
+	// for the unmount first would charge the lock measurement for kubelet's
+	// unmount, and the case would fail for a reason that is not lock release.
+	type grant struct {
+		at  time.Time
+		err error
+	}
+	// Waited out past the bound on purpose: a case that gives up at the SLO
+	// reports "timed out" where it could report how long the release took, and
+	// the second is what a defect report needs.
+	waitFor := bound + 5*time.Minute
+	grants := make(chan grant, 1)
+	start := time.Now()
+	go func() {
+		err := framework.Poll(ctx, framework.PollInterval, waitFor, func(ctx context.Context) (bool, error) {
+			ans, err := f.TryLock(ctx, acquirer, path, rng)
+			if err != nil {
+				return false, err
+			}
+			return ans.Free, fmt.Errorf("%s is still held by %s", rng, ans.Conflict)
+		})
+		grants <- grant{at: time.Now(), err: err}
+	}()
+
+	if err := f.ForceDeletePodAndAwaitUnmount(ctx, holder, "data06"); err != nil {
+		t.Fatalf("force-deleting %s and waiting for %s to release the mount: %v", holder, nodeA, err)
+	}
+	t.Logf("%s released the mount after the force delete, so teardown may touch the claim", nodeA)
+
+	g := <-grants
+	if g.err != nil {
+		t.Fatalf("%s never became available to %s on %s in the %s after the holder was force-deleted: %v. "+
+			"A lock nothing can release is worse than a slow one: the application that needs the range "+
+			"never gets it, and no client is left to let go",
+			rng, acquirer, nodeB, waitFor, g.err)
+	}
+	interval := g.at.Sub(start)
+	if err := f.RecordNodeLocks(ctx, "after-release", nodeB); err != nil {
+		t.Logf("recording the client lock tables after the release: %v", err)
+	}
+
+	p := profile(t)
+	if interval > bound {
+		t.Errorf("%s took %s to become available after its holder was force-deleted, above the %s lease "+
+			"on the %s profile. One lease is the bound because the lease is the only thing that releases "+
+			"state nothing closed; past it, nothing else is coming",
+			rng, interval.Round(time.Second), bound, p.Name)
+	}
+	if interval <= slo.PromptLockRelease {
+		t.Logf("%s became available %s after the force delete, which is the descriptor-close path: kubelet "+
+			"killed the container, its descriptors closed and the client sent LOCKU. No lease expired, and "+
+			"only this pod's locks moved. An application losing a lock this way is back in a second",
+			rng, interval.Round(time.Millisecond))
+	} else {
+		t.Logf("%s became available %s after the force delete, near the %s lease rather than promptly: the "+
+			"node did not notice the pod had gone and the lease expired instead. On a cluster behaving this "+
+			"way, losing a node takes every pod's locks on it out together, for a lease, not one "+
+			"application's for a second", rng, interval.Round(time.Second), p.Lease)
+	}
+}
