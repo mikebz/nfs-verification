@@ -29,7 +29,7 @@ import (
 //  4. Delete the claim and wait for it to go.
 //  5. On a Delete reclaim policy, the PV must go too. On Retain, skip: that is
 //     PROV-06's case, not a leak.
-func TestProvisionMountWriteDelete(t *testing.T) {
+func TestProvProvisionMountWriteDelete(t *testing.T) {
 	f := framework.New(t, "PROV-01")
 	ctx, cancel := caseCtx(t, 15*time.Minute)
 	defer cancel()
@@ -97,7 +97,7 @@ func TestProvisionMountWriteDelete(t *testing.T) {
 //     the protection is only worth having if the mount still works.
 //  5. Delete the pod gracefully and wait for it to leave the API.
 //  6. The claim must then finish deleting.
-func TestDeleteClaimUnderLiveMount(t *testing.T) {
+func TestProvDeleteClaimUnderLiveMount(t *testing.T) {
 	f := framework.New(t, "PROV-03")
 	ctx, cancel := caseCtx(t, 15*time.Minute)
 	defer cancel()
@@ -187,7 +187,7 @@ func hasFinalizer(finalizers []string, want string) bool {
 //     never restarted.
 //  6. Compare df before and after: a rise is logged, no change is recorded
 //     with its explanation, and a fall is a failure.
-func TestVolumeExpansion(t *testing.T) {
+func TestProvVolumeExpansion(t *testing.T) {
 	f := framework.New(t, "PROV-04")
 	ctx, cancel := caseCtx(t, 20*time.Minute)
 	defer cancel()
@@ -302,7 +302,7 @@ func TestVolumeExpansion(t *testing.T) {
 //     b. No duplicate export IDs (from Export_Id annotation) across PVs.
 //     c. No duplicate export paths / volume handles across PVs.
 //  6. Assert server restart count did not increase.
-func TestConcurrentProvisioning(t *testing.T) {
+func TestProvConcurrentProvisioning(t *testing.T) {
 	f := framework.New(t, "PROV-02")
 	ctx, cancel := caseCtx(t, 25*time.Minute)
 	defer cancel()
@@ -419,7 +419,7 @@ func TestConcurrentProvisioning(t *testing.T) {
 //  6. Provision a new claim with DataSource set to the VolumeSnapshot.
 //  7. Mount the restored claim in a new pod and verify the data matches.
 //  8. Delete pods and claims.
-func TestSnapshotAndRestore(t *testing.T) {
+func TestProvSnapshotAndRestore(t *testing.T) {
 	f := framework.New(t, "PROV-05")
 	ctx, cancel := caseCtx(t, 20*time.Minute)
 	defer cancel()
@@ -530,7 +530,7 @@ func TestSnapshotAndRestore(t *testing.T) {
 //
 // 10. Mount the rebound claim in a new pod, read the file, and verify checksum matches.
 // 11. Restore PV reclaim policy to Delete so framework teardown reclaims the backing storage.
-func TestReclaimPolicyRetain(t *testing.T) {
+func TestProvReclaimPolicyRetain(t *testing.T) {
 	f := framework.New(t, "PROV-06")
 	ctx, cancel := caseCtx(t, 20*time.Minute)
 	defer cancel()
@@ -625,7 +625,7 @@ func TestReclaimPolicyRetain(t *testing.T) {
 //  7. Wait for the claim to reach Bound.
 //  8. Mount the claim, write a test file, and verify checksum on read-back.
 //  9. Delete pod and claim.
-func TestChaosProvisionServerDown(t *testing.T) {
+func TestProvProvisionServerDown(t *testing.T) {
 	f := framework.New(t, "PROV-07")
 	ctx, cancel := caseCtx(t, 25*time.Minute)
 	defer cancel()
@@ -740,7 +740,7 @@ func TestChaosProvisionServerDown(t *testing.T) {
 //  7. Wait for a replacement server pod to recover and become Ready.
 //  8. Wait for the claim to be completely removed from the API.
 //  9. If reclaim policy was Delete, wait for the PV to be removed as well.
-func TestChaosDeleteClaimServerDown(t *testing.T) {
+func TestProvDeleteClaimServerDown(t *testing.T) {
 	f := framework.New(t, "PROV-08")
 	ctx, cancel := caseCtx(t, 25*time.Minute)
 	defer cancel()
@@ -807,7 +807,7 @@ func TestChaosDeleteClaimServerDown(t *testing.T) {
 
 // PROV-09: rapid create/delete churn (100 cycles). Asserts no export ID
 // exhaustion, no file descriptor leaks, and server RSS remains bounded under
-// the ceiling. Gated in weekly soak (Gate: W).
+// the ceiling.
 //
 // Steps:
 //  1. Check for short test mode; skip if -short is set.
@@ -815,9 +815,9 @@ func TestChaosDeleteClaimServerDown(t *testing.T) {
 //  3. Execute 100 cycles of create PVC -> wait Bound -> delete PVC -> wait gone.
 //  4. Assert all cycles completed successfully.
 //  5. Assert server container restart count did not increase.
-func TestSoakRapidProvisionChurn(t *testing.T) {
+func TestProvRapidProvisionChurn(t *testing.T) {
 	if testing.Short() {
-		t.Skip("skipping 100-cycle rapid provision churn in -short mode; Gate: W (weekly soak)")
+		t.Skip("skipping 100-cycle rapid provision churn in -short mode")
 	}
 
 	f := framework.New(t, "PROV-09")
@@ -857,7 +857,7 @@ func TestSoakRapidProvisionChurn(t *testing.T) {
 //  4. Verify it binds cleanly (or fails with a clean API rejection if backend driver limits name length)
 //     without malforming export configuration.
 //  5. Confirm server remains healthy.
-func TestVolumeNameEdgeCases(t *testing.T) {
+func TestProvVolumeNameEdgeCases(t *testing.T) {
 	f := framework.New(t, "PROV-10")
 	ctx, cancel := caseCtx(t, 15*time.Minute)
 	defer cancel()
@@ -949,7 +949,7 @@ func TestVolumeNameEdgeCases(t *testing.T) {
 //     h. Assert pod restart count did not increase.
 //     i. Assert server restart count did not increase.
 //     j. Compare df before and after: growth is logged, no change is explained.
-func TestTwoStageExpansionUnderIO(t *testing.T) {
+func TestProvTwoStageExpansionUnderIO(t *testing.T) {
 	f := framework.New(t, "PROV-11")
 	ctx, cancel := caseCtx(t, 25*time.Minute)
 	defer cancel()

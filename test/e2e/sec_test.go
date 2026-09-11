@@ -38,7 +38,7 @@ const (
 //     mapping broke on the way in, and no reader will fix it.
 //  5. Read it again on the second client, and separate the two failures: wrong
 //     on both is the server, wrong only on the reader is that node's idmapper.
-func TestOwnershipPreservedAcrossPods(t *testing.T) {
+func TestSecOwnershipPreservedAcrossPods(t *testing.T) {
 	f := framework.New(t, "SEC-01")
 	requireCap(t, f.Caps.MultiNode, "reading ownership from a second client needs two schedulable workers")
 	ctx, cancel := caseCtx(t, 15*time.Minute)
@@ -137,7 +137,7 @@ func nobodyNote(o framework.Owner) string {
 //     too.
 //  5. Compare against -root-squash when it was passed; otherwise record what
 //     the export does rather than asserting a value nobody stated.
-func TestRootSquashBehaviour(t *testing.T) {
+func TestSecRootSquashBehaviour(t *testing.T) {
 	f := framework.New(t, "SEC-02")
 	requireCap(t, f.Caps.MultiNode, "checking squash on two clients needs two schedulable workers")
 	ctx, cancel := caseCtx(t, 15*time.Minute)
