@@ -147,7 +147,7 @@ Each step is one pull request. Later steps depend only on earlier ones.
 | 4 | Grace and lock reclaim: CHAOS-05, CHAOS-06, CHAOS-07, OBS-02, OBS-03, designed in [`03-grace-and-lock-reclaim-design.md`](03-grace-and-lock-reclaim-design.md) | done, [PR #8](https://github.com/mikebz/nfs-verification/pull/8) |
 | 5 | Close out Provisioning (PROV): PROV-02, PROV-05 to PROV-11 | done, [PR #10](https://github.com/mikebz/nfs-verification/pull/10) |
 | 6 | Close out Concurrency and Data Integrity (DATA): DATA-06 to DATA-13, locktool helper, designed in [`04-data-path-and-locktool-design.md`](04-data-path-and-locktool-design.md) | run on GKE 2026-09-11: DATA-05 to DATA-09 and DATA-11 to DATA-13 pass, with CHAOS-06; DATA-11's punch half reports blocked on a busybox image; DATA-10 not yet run; DATA-14 deferred, see test plan Section 3.2 |
-| 7 | Close out Observability (OBS): OBS-01, OBS-05, OBS-06, OBS-07, designed in [`05-observability-and-alerting-design.md`](05-observability-and-alerting-design.md) | next, design written |
+| 7 | Observability (OBS): OBS-05, OBS-06, OBS-07 and the half of OBS-01 that needs no fault, designed in [`05-observability-design.md`](05-observability-design.md). Does not close out Section 3.5: OBS-01's behavioral half needs a fault that lands in step 10 | next, design written |
 | 8 | Close out Security and Identity (SEC): SEC-03 to SEC-09 | |
 | 9 | Close out Scale and Performance (SCALE): SCALE-01 to SCALE-07 | |
 | 10 | Close out Resiliency and Chaos (CHAOS): CHAOS-03, CHAOS-04, CHAOS-08 to CHAOS-18 | |
@@ -167,12 +167,13 @@ interleaving fault injection across different domains:
 2. **DATA next**: complete all data path semantics and protocol edge cases
    (lease-expiry lock release, direct I/O, noac visibility, silly renames, large
    directory readdir, sparse files, and fsync durability guarantees).
-3. **OBS & SEC next**: close out production observability (the data an operator
-   would monitor on: outage visibility, a readable memory ceiling, volume usage
-   that agrees with the workload, and readings that survive a restart) and
-   security/identity
-   (fsGroup, service-proxy export rules, rejected clients, identity normalization,
-   and network confidentiality).
+3. **OBS & SEC next**: production observability (what the deployment publishes
+   for an operator to monitor: an availability signal that represents NFS, a
+   declared memory ceiling, volume usage that agrees with the workload, and
+   server metrics that survive a restart) and security/identity (fsGroup,
+   service-proxy export rules, rejected clients, identity normalization, and
+   network confidentiality). OBS is not closed out by step 7: one half of OBS-01
+   needs a fault from step 10.
 4. **SCALE next**: verify the cluster and server under volume fan-out, high mount
    counts, metadata churn, noisy neighbors, and throughput soak.
 5. **CHAOS last**: close out the most invasive, platform-dependent infrastructure
@@ -471,54 +472,58 @@ check to a content check; and the fix for `scripts/lock-probe.sh` passing
 
 ---
 
-## 3f. What step 7 contains (Close out OBS)
+## 3f. What step 7 contains (Observability)
 
 Designed first in
-[`05-observability-and-alerting-design.md`](05-observability-and-alerting-design.md),
-which carries the decision that shapes every case here: **the suite verifies the
-data an alert is built on, never the alert rules**. Thresholds, severities and
-routing are organization-specific, and asserting on them would mean failing a
-healthy storage system for someone else's threshold, and finding or installing a
-monitoring stack this project does not own. GKE runs no in-cluster Prometheus:
-managed collection ships to Cloud Monitoring and its query API is a frontend
-proxy the operator deploys, so querying it is a cloud dependency this suite
-refuses. Everything here is read from the Kubernetes API and the kubelet
-instead. Section 3.5 of the test plan is reworded to match, in the same pull
-request as the design.
+[`05-observability-design.md`](05-observability-design.md), which carries the
+decision that shapes every case: **the suite verifies what the deployment
+publishes, never the alert rules**. Thresholds, severities and routing are
+organization-specific, and asserting on them would mean failing a healthy
+storage system for someone else's threshold and installing a monitoring stack
+this project does not own. GKE runs no in-cluster Prometheus either: managed
+collection ships to Cloud Monitoring and its query API is a frontend proxy the
+operator deploys, so querying it is a cloud dependency the suite refuses.
 
-Closes out Section 3.5 entirely. Four cases asserting that an operator on this
-deployment has readable, timely, correct inputs to monitor with:
+The second decision is what makes the cases worth running. An input that exists
+because Kubernetes produces it for every workload is not evidence about NFS, so
+no case here passes on a signal its own fault produced, and every case fails
+rather than skipping when the deployment publishes nothing. That is F-008's rule
+applied uniformly: the design states it once, in one table, because an earlier
+revision stated it four different ways.
 
-- OBS-01: server unavailable. The outage is visible in queryable Kubernetes
-  state within the bound, with timestamps, and the window it describes overlaps
-  the outage the client measured.
-- OBS-05: server memory approaching ceiling. The server declares a memory limit,
-  its working set is readable against that limit with a timestamp, and the
-  reading moves when the server is worked. No case drives the server to its
-  limit.
-- OBS-06: volume near capacity. The control plane reports the volume's usage, it
-  agrees with `df` inside the pod within a stated tolerance and freshness, and
-  both move together when the workload writes.
-- OBS-07: readings survive server restart. Every reading above keeps answering
-  across a restart, and each series either resets cleanly or persists.
+Four cases, asserting that an operator on this deployment has inputs to monitor
+with:
 
-**Harness added**: readers for everything the API server can reach without a
-scraper. The kubelet's `/stats/summary` and its Prometheus endpoints
-(`/metrics`, `/metrics/cadvisor`, `/metrics/resource`, `/metrics/probes`)
-through `nodes/proxy`, with a minimal text-format scanner; the NFS server's own
-metrics endpoint through `pods/proxy` where it declares one; the availability
-data the Kubernetes API already serves (pod conditions with transition times,
-container statuses, endpoint readiness); `metrics.k8s.io` as a cross-check; a
-poller that samples those readers across a fault and classifies each series; and
-two bounded writes that move a reading far enough to prove it tracks reality.
+- OBS-01: the deployment provides an availability signal that can represent NFS
+  reachability, rather than only the container's lifecycle. Asserted from the
+  readiness configuration, with no fault: deleting a pod moves every
+  container-derived signal by construction and would pass anywhere. The
+  behavioral half, that the signal moves when a running server stops answering,
+  needs a stop-without-exit fault and lands in **step 10**.
+- OBS-05: the server declares a memory limit, its working set is readable
+  against it, and the reading moves when the server is worked. Fails when no
+  limit is declared. No case drives the server to its limit.
+- OBS-06: the control plane reports the volume's usage, it agrees with `df`
+  inside the pod within a stated tolerance, and both move together when the
+  workload writes. Fails when the CSI driver reports no usage.
+- OBS-07: the server's own metrics answer either side of a restart, and either
+  reset cleanly or persist. Fails when the server publishes no endpoint; no
+  container-level signal is substituted for one.
 
-Every case reads a value, causes something the suite already does (provision,
-mount, write, delete the server pod) and reads again, asserting the direction of
-the change. Presence alone is not asserted anywhere: a counter frozen at a value
-exists and is useless. No new flags, no new fault, and no new module dependency.
+**Harness added**: two readers. The kubelet's stats summary through the API
+server's node proxy, serving per-volume usage and per-container working set for
+OBS-05 and OBS-06; and the server's own metrics endpoint through the pod proxy,
+with a minimal scanner for the exposition format, for OBS-07. Everything else
+comes from objects the suite already reads. No new flags, no new fault, no new
+module dependency, and no new capability: a capability would gate these cases
+off on exactly the runs whose findings matter.
 
-Delivered as three pull requests, smallest runnable slice first: the kubelet
-reach with OBS-06, then OBS-01 and OBS-07 together, then OBS-05.
+Delivered as three pull requests: OBS-06 first, then OBS-05, then OBS-01 and
+OBS-07.
+
+Expect most of it to come back red on the provisioner this project runs against,
+which declares no probes, no resource limits and no metrics endpoint. That is
+the phase working, and it belongs in `findings.md` as one entry.
 
 ---
 
