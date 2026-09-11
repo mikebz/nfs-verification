@@ -205,14 +205,19 @@ type FaultEvent struct {
 // RecordFault appends to the case timeline. Chaos helpers call it so that the
 // bundle says exactly what was done and when.
 func (f *Framework) RecordFault(e FaultEvent) {
-	f.faults = append(f.faults, e)
+	f.state.mu.Lock()
+	f.state.faults = append(f.state.faults, e)
+	f.state.mu.Unlock()
 	if f.T != nil {
 		f.T.Logf("fault: %s %s %s", e.Action, e.Target, e.Detail)
 	}
 }
 
 func (f *Framework) dumpTimeline(dir string) error {
-	b, err := json.MarshalIndent(f.faults, "", "  ")
+	f.state.mu.Lock()
+	faults := append([]FaultEvent(nil), f.state.faults...)
+	f.state.mu.Unlock()
+	b, err := json.MarshalIndent(faults, "", "  ")
 	if err != nil {
 		return err
 	}

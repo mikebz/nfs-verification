@@ -23,6 +23,10 @@ const Namespace = "default"
 // Framework is the per-test fixture: the shared clients, the environment record
 // discovered at preflight, and a name prefix that keeps one case's objects
 // apart from another's. It creates no namespace; everything lands in Namespace.
+//
+// Build one with New, NewSystem or SubTest. The accumulated state behind it is
+// a pointer those three set, so a Framework assembled field by field is not
+// usable.
 type Framework struct {
 	// T is nil for the fixture preflight uses, which has no test attached.
 	T    *testing.T
@@ -32,6 +36,15 @@ type Framework struct {
 
 	CaseID string
 
+	// state is everything the case accumulates, held behind a pointer so that a
+	// fixture bound to a subtest shares it. A copy with its own cleanup list
+	// would silently drop the cleanups a subtest registered.
+	state *caseState
+}
+
+// caseState is one case's accumulated state, shared by every fixture that
+// belongs to it.
+type caseState struct {
 	cleanups []func(context.Context)
 	faults   []FaultEvent
 
@@ -47,34 +60,50 @@ type Framework struct {
 	unproven map[string]string
 }
 
+// SubTest returns a fixture bound to a subtest's *testing.T.
+//
+// A case with halves that are gated differently runs them under t.Run, and a
+// helper that fails fatally inside one must stop that subtest. Without this it
+// would call FailNow on the parent from the subtest's goroutine, which fails
+// the case by way of a runtime.Goexit the testing package reports as a panic,
+// several lines away from what actually went wrong.
+//
+// Everything but the *testing.T is shared, deliberately: objects a subtest
+// creates are the case's objects, and the case owns their lifetime.
+func (f *Framework) SubTest(t *testing.T) *Framework {
+	sub := *f
+	sub.T = t
+	return &sub
+}
+
 // MarkClaimUnproven records that a claim may still be mounted by a node,
 // because the pod that mounted it left the API before kubelet unmounted.
 // Teardown keeps such a claim rather than destroying an export under a live
 // mount; see docs/findings.md F-001.
 func (f *Framework) MarkClaimUnproven(claim, why string) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.unproven == nil {
-		f.unproven = map[string]string{}
+	f.state.mu.Lock()
+	defer f.state.mu.Unlock()
+	if f.state.unproven == nil {
+		f.state.unproven = map[string]string{}
 	}
-	f.unproven[claim] = why
+	f.state.unproven[claim] = why
 }
 
 // ClearClaimUnproven records an observed unmount. Only an observation clears
 // the mark: a wait that timed out leaves it set, which is what makes teardown
 // safe for a case that failed between the force delete and the wait.
 func (f *Framework) ClearClaimUnproven(claim string) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	delete(f.unproven, claim)
+	f.state.mu.Lock()
+	defer f.state.mu.Unlock()
+	delete(f.state.unproven, claim)
 }
 
 // unprovenClaims returns a copy of the record.
 func (f *Framework) unprovenClaims() map[string]string {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	out := make(map[string]string, len(f.unproven))
-	for k, v := range f.unproven {
+	f.state.mu.Lock()
+	defer f.state.mu.Unlock()
+	out := make(map[string]string, len(f.state.unproven))
+	for k, v := range f.state.unproven {
 		out[k] = v
 	}
 	return out
@@ -89,7 +118,7 @@ func New(t *testing.T, caseID string) *Framework {
 	if suiteErr != nil {
 		t.Fatalf("suite not initialized: %v", suiteErr)
 	}
-	f := &Framework{T: t, C: suiteClient, Env: suiteEnv, Caps: suiteCaps, CaseID: caseID}
+	f := &Framework{T: t, C: suiteClient, Env: suiteEnv, Caps: suiteCaps, CaseID: caseID, state: &caseState{}}
 
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), DeleteTimeout)
@@ -104,8 +133,8 @@ func New(t *testing.T, caseID string) *Framework {
 			}
 			artifactCancel()
 		}
-		for i := len(f.cleanups) - 1; i >= 0; i-- {
-			f.cleanups[i](ctx)
+		for i := len(f.state.cleanups) - 1; i >= 0; i-- {
+			f.state.cleanups[i](ctx)
 		}
 		if Cfg().KeepObjects {
 			t.Logf("keeping the objects of %s in namespace %s for triage (selector %s)",
@@ -120,7 +149,13 @@ func New(t *testing.T, caseID string) *Framework {
 }
 
 // Defer registers a cleanup that runs before the case's objects are deleted.
-func (f *Framework) Defer(fn func(context.Context)) { f.cleanups = append(f.cleanups, fn) }
+// Registered against the case, not against whichever subtest happened to call
+// it, because the objects belong to the case.
+func (f *Framework) Defer(fn func(context.Context)) {
+	f.state.mu.Lock()
+	defer f.state.mu.Unlock()
+	f.state.cleanups = append(f.state.cleanups, fn)
+}
 
 // Labels are stamped on everything the fixture creates.
 func (f *Framework) Labels() map[string]string {
@@ -276,10 +311,10 @@ func describePods(pods []corev1.Pod) string {
 // NewSystem builds a fixture with no test attached, for preflight and for
 // tooling. The caller owns teardown via the returned close function.
 func NewSystem(c *Client, e *env.Environment, caps Capabilities, caseID string) (*Framework, func(context.Context)) {
-	f := &Framework{C: c, Env: e, Caps: caps, CaseID: caseID}
+	f := &Framework{C: c, Env: e, Caps: caps, CaseID: caseID, state: &caseState{}}
 	closeFn := func(ctx context.Context) {
-		for i := len(f.cleanups) - 1; i >= 0; i-- {
-			f.cleanups[i](ctx)
+		for i := len(f.state.cleanups) - 1; i >= 0; i-- {
+			f.state.cleanups[i](ctx)
 		}
 		if Cfg().KeepObjects {
 			return

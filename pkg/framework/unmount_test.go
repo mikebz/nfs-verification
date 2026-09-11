@@ -9,8 +9,17 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
 )
+
+// testFixture builds a fixture over a fake clientset. Fields are not assembled
+// by hand: New, NewSystem and SubTest are what set the shared state behind a
+// Framework, and a literal would nil-panic several calls deep.
+func testFixture(kube kubernetes.Interface) *Framework {
+	f, _ := NewSystem(&Client{Kube: kube}, nil, Capabilities{}, "unit")
+	return f
+}
 
 // csiDriver builds a CSIDriver object declaring whether it attaches.
 func csiDriver(name string, attach bool) *storagev1.CSIDriver {
@@ -84,7 +93,7 @@ func TestAwaitVolumeNotInUseFailsWhileStillMounted(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: node},
 		Status:     corev1.NodeStatus{VolumesInUse: []corev1.UniqueVolumeName{unique}},
 	})
-	f := &Framework{C: &Client{Kube: kube}}
+	f := testFixture(kube)
 
 	err := f.awaitVolumeNotInUse(context.Background(), node, unique, 2*time.Second)
 	if err == nil {
@@ -102,7 +111,7 @@ func TestAwaitVolumeNotInUseFailsWhileStillMounted(t *testing.T) {
 func TestAwaitVolumeNotInUseSucceedsOnceReleased(t *testing.T) {
 	const node = "worker-1"
 	kube := fake.NewSimpleClientset(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: node}})
-	f := &Framework{C: &Client{Kube: kube}}
+	f := testFixture(kube)
 
 	if err := f.awaitVolumeNotInUse(context.Background(), node,
 		"kubernetes.io/csi/nfs.csi.k8s.io^pvc-123", 5*time.Second); err != nil {
@@ -134,10 +143,10 @@ func TestAwaitUnmountIgnoresVolumesInUseWithoutAnAttachingDriver(t *testing.T) {
 		Spec: corev1.PersistentVolumeSpec{PersistentVolumeSource: corev1.PersistentVolumeSource{
 			NFS: &corev1.NFSVolumeSource{Server: "10.0.0.5", Path: "/export/pvc-123"}}},
 	}
-	f := &Framework{C: &Client{Kube: fake.NewSimpleClientset(
+	f := testFixture(fake.NewSimpleClientset(
 		csiDriver("nfs.csi.k8s.io", false),
 		csiDriver("blocks.csi.example.com", true),
-	)}}
+	))
 	ctx := context.Background()
 
 	if _, ok := f.uniqueVolumeName(ctx, csiPV("nfs.csi.k8s.io", "h1")); ok {
@@ -181,7 +190,8 @@ func TestDeleteCaseObjectsKeepsAnUnprovenClaim(t *testing.T) {
 		}}
 	}
 	kube := fake.NewSimpleClientset(claim("kept"), claim("removable"))
-	f := &Framework{C: &Client{Kube: kube}, CaseID: "DATA-06"}
+	f := testFixture(kube)
+	f.CaseID = "DATA-06"
 	// The selector is built from the run id, so it has to match the labels
 	// above. Restored, because the configuration is process-wide.
 	previous := Cfg().RunID

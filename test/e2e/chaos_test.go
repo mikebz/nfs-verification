@@ -577,7 +577,15 @@ func TestChaosLockReclaimAcrossFailover(t *testing.T) {
 		holderPod: s.writer, holderNode: nodeA, otherPod: s.verifier, otherNode: nodeB,
 		claim: "chaos06", path: s.dir + "/chaos06-ranges.dat", id: "chaos06r",
 	}
-	assertDisjointRangesAreIndependent(ctx, t, f, ranges)
+	// A subtest, so that a mount keeping byte-range locks on the client blocks
+	// this half and leaves the whole-file half, which that option does not
+	// affect, still asserted. A skip at the top level would discard a real
+	// reclaim result for a reason that applies to only part of the case.
+	var rangesTaken bool
+	t.Run("byte-ranges-before-failover", func(t *testing.T) {
+		assertDisjointRangesAreIndependent(ctx, t, f.SubTest(t), ranges)
+		rangesTaken = true
+	})
 	if err := f.RecordNodeLocks(ctx, "before-failover", nodeA, nodeB); err != nil {
 		t.Logf("recording the client lock tables before the failover: %v", err)
 	}
@@ -634,7 +642,14 @@ func TestChaosLockReclaimAcrossFailover(t *testing.T) {
 		t.Logf("all %d whole-file locks survived the failover, still held and still exclusive", len(locks))
 	}
 
-	assertRangesSurvivedFailover(ctx, t, f, ranges)
+	if !rangesTaken {
+		t.Logf("the byte-range half was not run, so nothing about disjoint ranges across this failover " +
+			"is asserted here; the whole-file result above stands on its own")
+		return
+	}
+	t.Run("byte-ranges-after-failover", func(t *testing.T) {
+		assertRangesSurvivedFailover(ctx, t, f.SubTest(t), ranges)
+	})
 }
 
 // assertRangesSurvivedFailover asks both ends about each byte range after a

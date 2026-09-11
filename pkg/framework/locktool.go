@@ -209,16 +209,16 @@ func (f *Framework) NodeArch(ctx context.Context, node string) (string, error) {
 // stream, and every lock operation would otherwise pay for it.
 func (f *Framework) EnsureLockTool(ctx context.Context, pod string) error {
 	name := f.Name(pod)
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if err, done := f.lockTool[name]; done {
+	f.state.mu.Lock()
+	defer f.state.mu.Unlock()
+	if err, done := f.state.lockTool[name]; done {
 		return err
 	}
 	err := f.installLockTool(ctx, name)
-	if f.lockTool == nil {
-		f.lockTool = map[string]error{}
+	if f.state.lockTool == nil {
+		f.state.lockTool = map[string]error{}
 	}
-	f.lockTool[name] = err
+	f.state.lockTool[name] = err
 	return err
 }
 

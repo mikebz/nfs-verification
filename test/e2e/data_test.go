@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	storagev1 "k8s.io/api/storage/v1"
+
 	"github.com/mikebz/nfs-verification/pkg/chaos"
 	"github.com/mikebz/nfs-verification/pkg/framework"
 	"github.com/mikebz/nfs-verification/pkg/slo"
@@ -107,10 +109,16 @@ func TestDataLocksAcrossNodes(t *testing.T) {
 	t.Logf("lock changed hands across nodes %s and %s under the one server (profile %s)",
 		nodeA, nodeB, profile(t).Name)
 
-	assertDisjointRangesAreIndependent(ctx, t, f, disjointRanges{
-		holderPod: "holder", holderNode: nodeA,
-		otherPod: "contender", otherNode: nodeB,
-		claim: "data05", path: fileIn("data05.ranges"), id: "data05",
+	// A subtest, so that a mount keeping byte-range locks on the client blocks
+	// this half and leaves the flock half's result standing. The two halves are
+	// gated by different mount options and one can be meaningful where the
+	// other is not; a skip at the top level would throw away a real result.
+	t.Run("byte-ranges", func(t *testing.T) {
+		assertDisjointRangesAreIndependent(ctx, t, f.SubTest(t), disjointRanges{
+			holderPod: "holder", holderNode: nodeA,
+			otherPod: "contender", otherNode: nodeB,
+			claim: "data05", path: fileIn("data05.ranges"), id: "data05",
+		})
 	})
 }
 
@@ -133,10 +141,14 @@ const (
 // DATA-05 and the extension to CHAOS-06: two clients hold different parts of
 // one file at the same time, and neither can have the other's.
 //
-// It returns the two holders, still held, so a caller can injure the server
-// underneath them and ask the same questions afterwards.
+// The holders are registered for release on the fixture and left held, so a
+// caller can injure the server underneath them and ask the same questions
+// afterwards.
+//
+// It reports blocked, rather than asserting, on a mount that keeps byte-range
+// locks on the client. Both callers run it as a subtest for that reason.
 func assertDisjointRangesAreIndependent(ctx context.Context, t *testing.T, f *framework.Framework,
-	d disjointRanges) (*framework.LockHolder, *framework.LockHolder) {
+	d disjointRanges) {
 	t.Helper()
 	pv, err := f.PVForClaim(ctx, d.claim)
 	if err != nil {
@@ -166,7 +178,6 @@ func assertDisjointRangesAreIndependent(ctx context.Context, t *testing.T, f *fr
 		d.holderPod, d.holderNode, rangeA, d.otherPod, d.otherNode, rangeB)
 
 	assertRangesExcludeEachOther(ctx, t, f, d, rangeA, rangeB)
-	return holderA, holderB
 }
 
 // assertRangesExcludeEachOther probes each client on the other's range and on a
@@ -805,8 +816,9 @@ func TestDataNoacVisibilityWithoutClose(t *testing.T) {
 			nodeB, m.Options)
 	}
 
+	// One path, because both pods mount at the same place. The two mounts
+	// differ in their options, not in where they land.
 	path := fileIn("data08.txt")
-	readerPath := "/mnt/share/data08.txt"
 	// Well under a page, so a partial flush cannot produce a file whose size is
 	// final while an earlier region still reads as zeros.
 	const payload = "data08-visible-without-a-close"
@@ -822,7 +834,7 @@ func TestDataNoacVisibilityWithoutClose(t *testing.T) {
 	// bytes arrive eventually.
 	var got string
 	err = framework.Poll(ctx, framework.FastPoll, 30*time.Second, func(ctx context.Context) (bool, error) {
-		got = f.MustShf(ctx, reader, "cat %s 2>/dev/null || true", framework.Quote(readerPath))
+		got = f.MustShf(ctx, reader, "cat %s 2>/dev/null || true", framework.Quote(path))
 		return got == payload, fmt.Errorf("the noac reader on %s sees %q", nodeB, got)
 	})
 	if err != nil {
@@ -877,6 +889,9 @@ func TestDataSillyRenameAndOpenDescriptors(t *testing.T) {
 	f.MustShf(ctx, holder, "mkdir -p %s", framework.Quote(dir))
 
 	t.Run("same-node-unlink-silly-renames", func(t *testing.T) {
+		// Bound to this subtest, so a helper that fails fatally here stops this
+		// half rather than calling FailNow on the parent from the wrong goroutine.
+		f := f.SubTest(t)
 		path := dir + "/same-node.dat"
 		first, second := writeTwoChunks(ctx, t, f, holder, path)
 
@@ -932,6 +947,9 @@ func TestDataSillyRenameAndOpenDescriptors(t *testing.T) {
 	})
 
 	t.Run("cross-node-unlink-and-recreate", func(t *testing.T) {
+		// Bound to this subtest, so a helper that fails fatally here stops this
+		// half rather than calling FailNow on the parent from the wrong goroutine.
+		f := f.SubTest(t)
 		path := dir + "/cross-node.dat"
 		first, second := writeTwoChunks(ctx, t, f, holder, path)
 
@@ -971,6 +989,9 @@ func TestDataSillyRenameAndOpenDescriptors(t *testing.T) {
 	})
 
 	t.Run("rename-does-not-move-a-descriptor", func(t *testing.T) {
+		// Bound to this subtest, so a helper that fails fatally here stops this
+		// half rather than calling FailNow on the parent from the wrong goroutine.
+		f := f.SubTest(t)
 		// A rename is not an unlink. The descriptor stays valid through it on
 		// any client, and one that followed the name rather than the file would
 		// be a failure in either shape.
@@ -1617,8 +1638,21 @@ func TestDataMixedSoak(t *testing.T) {
 	if err != nil {
 		t.Fatalf("creating the soak claim at %s: %v", size, err)
 	}
-	// The first pod both binds a WaitForFirstConsumer class and is where the
-	// capacity is read from, since df inside a pod is what the workload sees.
+	// Waited for here where the class binds immediately, so a provisioner that
+	// cannot satisfy a claim this large fails naming the claim rather than as
+	// twenty pods timing out on readiness. Under WaitForFirstConsumer the claim
+	// binds once the first pod is scheduled, so there is nothing to wait for.
+	mode, err := f.BindingMode(ctx, f.Env.StorageClass)
+	if err != nil {
+		t.Fatalf("reading the binding mode of StorageClass %s: %v", f.Env.StorageClass, err)
+	}
+	if mode != storagev1.VolumeBindingWaitForFirstConsumer {
+		if _, err := f.WaitPVCBound(ctx, "data14", framework.BindTimeout); err != nil {
+			blocked(t, "the soak claim of %s did not bind: %v. Twenty pods at these file sizes need "+
+				"tens of gigabytes, and an export that cannot provide it is a sizing fact rather than "+
+				"a storage defect", size, err)
+		}
+	}
 	pods := make([]string, soakPods)
 	for i := range pods {
 		pods[i] = fmt.Sprintf("soak%d", i)

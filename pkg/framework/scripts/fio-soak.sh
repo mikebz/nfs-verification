@@ -65,7 +65,6 @@ fio --name=soak \
 	--do_verify=1 \
 	--time_based=1 \
 	--runtime="$runtime" \
-	--group_reporting=0 \
 	--output-format=json \
 	--output="$out" >/dev/null 2>&1
 echo "done $?" > "$state"
