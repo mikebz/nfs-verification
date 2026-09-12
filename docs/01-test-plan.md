@@ -139,7 +139,7 @@ Case ID scheme: `CATEGORY-NN`, matching the test category (`PROV`, `DATA`, `CHAO
 | PROV-07 | Provision while the server pod is down | PVC stays Pending; binds after recovery; no orphaned export |
 | PROV-08 | Delete PVC while the server pod is down | No orphaned export or leaked backing storage after recovery |
 | PROV-09 | Rapid create/delete churn, 100 cycles | No export ID exhaustion, no fd leak, no server RSS growth beyond ceiling |
-| PROV-10 | Provision with a 1000-character volume name or unusual characters | Clean rejection or correct handling; no malformed export config |
+| PROV-10 | Volume name edge cases: admission rejection of invalid names, 253-character boundary names | Admission-layer rejection for invalid names (1000 chars, uppercase); maximum valid RFC 1123 name binds, mounts, produces a valid export server/path and CSI volumeHandle, and verifies cross-node I/O with no malformed export config. A volume whose export the harness cannot read reports blocked |
 | PROV-11 | Two-stage expansion under active I/O: grow the backing block volume, then grow the share | Client `df` reflects new capacity with no unmount, no server restart, and no I/O error. **Shape depends on fan-out**: with one server per volume this is a block resize plus filesystem grow; with a shared server it is a quota or export change and the block device may not move at all. Preflight decides which assertion applies. |
 
 ### 3.2 Concurrency and data integrity (DATA)
