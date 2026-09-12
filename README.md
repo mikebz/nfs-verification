@@ -162,7 +162,7 @@ charged to every case eats the `go test -timeout` budget for the package.
 | PROV-02 | Provision 20 RWX PVCs concurrently; no duplicate export IDs or paths | PROV |
 | PROV-03 | Delete a claim a pod still mounts; it stays Terminating until the mount is gone | PROV |
 | PROV-04 | Volume expansion, or a clean rejection when the class does not advertise it | PROV |
-| PROV-05 | Snapshot and restore, or clean rejection if unsupported | PROV |
+| PROV-05 | Snapshot and restore verified from two nodes, or clean rejection where no snapshot class names the driver | PROV |
 | PROV-06 | Reclaim policy Retain: PV persists and rebinds with data intact | PROV |
 | PROV-07 | Provision while server pod is down; recovers cleanly once server returns | PROV |
 | PROV-08 | Delete claim while server pod is down; completes deletion once server returns | PROV |

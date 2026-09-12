@@ -229,7 +229,8 @@ That rule was later superseded by strict sorting by category
 ### Step 5: close out PROV
 
 PROV-02 (20 concurrent claims, no duplicate export IDs), PROV-05 (snapshot and
-restore, or clean rejection), PROV-06 (`Retain` and rebind with data intact),
+restore verified from two nodes, or clean rejection where no snapshot class
+names the driver), PROV-06 (`Retain` and rebind with data intact),
 PROV-07 and PROV-08 (provision and delete while the server is down), PROV-09
 (100 create/delete cycles), PROV-10 (invalid names rejected at admission, and a
 253-character name binding, mounting and exporting correctly), PROV-11
