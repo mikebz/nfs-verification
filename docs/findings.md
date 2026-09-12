@@ -19,6 +19,7 @@ New entries go at the top, and take the next number.
 
 | # | Found | What it says | Cited by |
 |---|---|---|---|
+| [F-012](#f-012-the-resize-diagnosis-was-unreachable-because-an-unrelated-condition-was-always-there) | 2026-09-11 | Listing every claim condition made the "nothing acted on the request" diagnosis unreachable on any mounted claim | `pvc.go`'s resize description, `pvc_test.go` |
 | [F-009](#f-009-the-export-has-no-per-volume-quota-so-capacity-monitoring-describes-the-backing-filesystem-and-not-the-claim) | 2026-09-11 | The export has no per-volume quota, so both capacity sources describe the backing filesystem rather than the claim | OBS-06's failure message |
 | [F-008](#f-008-nfs-server-provisioner-never-announces-grace-so-the-grace-cases-cannot-run-against-it) | 2026-09-11 | This provisioner never announces grace, so OBS-03 fails and CHAOS-07 reports blocked | CHAOS-07's blocked message, doc 04, doc 06 |
 | [F-007](#f-007-two-cases-in-the-data-path-phase-reported-results-they-had-not-measured) | 2026-09-11 | Two cases reported results they had not measured | doc 05 |
@@ -28,6 +29,71 @@ New entries go at the top, and take the next number.
 | [F-003](#f-003-a-broken-umountnfs-wrapper-on-gke-wedges-every-terminating-pod) | 2026-09-10 | A broken `umount.nfs` wrapper wedges every terminating pod | teardown's terminate bound |
 | [F-002](#f-002-2gb-worker-nodes-cannot-host-the-suite) | 2026-09-10 | 2GB worker nodes cannot host the suite | the node shape a run reports |
 | [F-001](#f-001-force-deleting-a-mounted-pod-can-take-a-node-out-of-service) | 2026-09-10 | Force-deleting a mounted pod, then its claim, takes a node out of service | teardown, the force-delete helper, PROV-03, doc 05 |
+
+---
+
+## F-012: The resize diagnosis was unreachable because an unrelated condition was always there
+
+**Found:** 2026-09-11, GKE cluster `gke-w1`, Kubernetes v1.37.0-gke.2941000,
+three workers on Container-Optimized OS, StorageClass `nfs` backed by
+`cluster.local/nfs-provisioner-nfs-server-provisioner`, default profile from
+flags. PROV-04 and PROV-11, in run `e2e-full-20260911`.
+
+**Severity:** medium. Nothing is asserted wrongly. What is lost is the
+explanation, on the two cases whose failure most needs one, and what replaced it
+points at the wrong thing.
+
+### What happened
+
+Both expansion cases timed out and said:
+
+> claim `nfsv-prov-04-e2e-full-20260911-prov04` reports 1Gi, want at least 2Gi
+> [Unused=False(A pod is currently referencing this PVC)]
+
+PROV-11 said the same. The bracket is meant to hold the resize condition the
+driver left behind, or, where there is none, the F-004 diagnosis: that the class
+advertises `allowVolumeExpansion`, nothing picked the request up, and the place
+to look is whether an external-resizer sidecar exists at all.
+
+That diagnosis never appeared, and the condition that appeared instead has
+nothing to do with expansion. A reader chasing `Unused=False` is chasing the
+fact that the claim is mounted, which is exactly what the case arranged on
+purpose.
+
+### Why
+
+`describeResizeConditions` listed every condition in `status.conditions` and
+fell back to the diagnosis only when the list came out empty. This cluster posts
+an `Unused` condition on a claim a pod references, so the list is never empty on
+a mounted claim, and every claim these two cases expand is mounted by design.
+The fallback was unreachable on the only path that reaches it.
+
+Whether `Unused` is upstream Kubernetes or a GKE addition has not been
+established, and it does not matter to the fix: the helper must not assume that
+every condition on a claim is about the thing it is describing.
+
+### What changed
+
+- `describeResizeConditions` selects the four expansion conditions
+  (`Resizing`, `FileSystemResizePending`, `ControllerResizeError`,
+  `NodeResizeError`) instead of listing everything.
+- Conditions it does not recognise are named, so a reader knows the claim was
+  not condition-free, but kept out of the verdict, so they do not read as the
+  reason for the timeout.
+- `TestDescribeResizeConditions` covers the claim carrying only the unrelated
+  condition, using the exact condition the cluster posted. Reverting the filter
+  makes it fail and reproduces the original message verbatim.
+
+### What it means for the system under test
+
+Nothing new. F-004 stands unchanged: this provisioner advertises
+`allowVolumeExpansion` and does not perform one, and the two timeouts in that
+run are that behaviour, not a harness fault. The only thing that was wrong is
+that the run did not say so.
+
+The general rule: **a fallback branch guarded by "the list is empty" is a
+fallback that something else gets to disable.** Where the interesting answer is
+the absence of a signal, select the signal rather than counting everything.
 
 ---
 

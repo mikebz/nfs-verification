@@ -234,17 +234,50 @@ func (f *Framework) WaitPVCCapacity(ctx context.Context, name, size string, time
 // or not the provisioner behind it can perform one, which is F-004 in
 // docs/findings.md, so this says where to look rather than leaving a bare
 // timeout.
+//
+// It selects rather than listing everything, because Kubernetes posts
+// conditions on a claim that have nothing to do with expansion. Listing them
+// all made that third answer unreachable and printed an unrelated condition
+// where the diagnosis should have been, which is F-012.
 func describeResizeConditions(pvc *corev1.PersistentVolumeClaim) string {
-	var parts []string
+	var resize, other []string
 	for _, c := range pvc.Status.Conditions {
-		parts = append(parts, fmt.Sprintf("%s=%s(%s)", c.Type, c.Status, c.Message))
+		if isResizeCondition(c.Type) {
+			resize = append(resize, fmt.Sprintf("%s=%s(%s)", c.Type, c.Status, c.Message))
+			continue
+		}
+		other = append(other, string(c.Type))
 	}
-	if len(parts) == 0 {
-		return " [no resize condition was ever posted on the claim: nothing acted on the request. " +
-			"The StorageClass advertises allowVolumeExpansion, so check whether its provisioner supports " +
-			"expansion at all and whether an external-resizer sidecar is running alongside the CSI driver]"
+	if len(resize) > 0 {
+		return " [" + strings.Join(resize, " ") + "]"
 	}
-	return " [" + strings.Join(parts, " ") + "]"
+	out := "no resize condition was ever posted on the claim: nothing acted on the request. " +
+		"The StorageClass advertises allowVolumeExpansion, so check whether its provisioner supports " +
+		"expansion at all and whether an external-resizer sidecar is running alongside the CSI driver"
+	if len(other) > 0 {
+		// Named, but kept apart from the verdict: a reader who sees a condition
+		// listed next to a timeout assumes it is the reason for it.
+		out += ". The claim does carry " + strings.Join(other, ", ") +
+			", which say nothing about expansion"
+	}
+	return " [" + out + "]"
+}
+
+// isResizeCondition reports whether a claim condition is about expansion.
+//
+// The set is closed on purpose. A condition type this does not know is treated
+// as unrelated and named as such, which is the safe direction: calling an
+// unrelated condition a resize condition is what hid the diagnosis in F-012,
+// and the reverse only costs a slightly longer message.
+func isResizeCondition(t corev1.PersistentVolumeClaimConditionType) bool {
+	switch t {
+	case corev1.PersistentVolumeClaimResizing,
+		corev1.PersistentVolumeClaimFileSystemResizePending,
+		corev1.PersistentVolumeClaimControllerResizeError,
+		corev1.PersistentVolumeClaimNodeResizeError:
+		return true
+	}
+	return false
 }
 
 // GetPVC returns a claim by its logical name.
