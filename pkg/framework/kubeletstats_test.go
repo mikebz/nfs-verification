@@ -1,0 +1,244 @@
+package framework
+
+import (
+	"errors"
+	"strings"
+	"testing"
+	"time"
+)
+
+// The kubelet is not on this workstation and its summary cannot be produced
+// here, so these tests are written against recorded documents rather than
+// against the real tool. What they are protecting is the reading of a document
+// whose fields are optional: the kubelet omits what it does not have, and every
+// wrong answer below reads as a healthy volume rather than as an error.
+
+// summaryWithUsage is one node's summary as the kubelet serves it: a pod with a
+// claim it reports usage for, and a second pod on the same node whose entry
+// must not be mistaken for the first's.
+const summaryWithUsage = `{
+  "node": {"nodeName": "worker-1"},
+  "pods": [
+    {
+      "podRef": {"name": "other-pod", "namespace": "default", "uid": "u1"},
+      "volume": [
+        {"time": "2026-09-11T10:00:00Z", "availableBytes": 1, "capacityBytes": 2, "usedBytes": 3,
+         "name": "vol0", "pvcRef": {"name": "nfsv-obs-06-run-claim", "namespace": "default"}}
+      ]
+    },
+    {
+      "podRef": {"name": "nfsv-obs-06-run-writer", "namespace": "default", "uid": "u2"},
+      "volume": [
+        {"time": "2026-09-11T10:01:00Z", "availableBytes": 900, "capacityBytes": 1000, "usedBytes": 80,
+         "name": "kube-api-access-abcde"},
+        {"time": "2026-09-11T10:02:03Z", "availableBytes": 1038336, "capacityBytes": 1048576,
+         "usedBytes": 10240, "name": "vol0",
+         "pvcRef": {"name": "nfsv-obs-06-run-claim", "namespace": "default"}}
+      ]
+    }
+  ]
+}`
+
+// TestKubeletSummaryVolumeLookup reads one claim's usage out of a node summary.
+//
+// Identity is the assertion, not the arithmetic. An RWX claim is mounted by
+// several pods at once and each mount has its own entry, so a lookup that
+// matched on the claim alone would answer with another pod's reading and the
+// case would compare two different mounts.
+//
+// Steps:
+//  1. Decode a recorded summary and look up the claim under the pod that holds it.
+//  2. Check every field, including the kubelet's own sample time.
+//  3. Look the same claim up under a pod that does not exist, and under the
+//     right pod with the wrong claim.
+func TestKubeletSummaryVolumeLookup(t *testing.T) {
+	s := decodeSummary(t, summaryWithUsage)
+
+	got, ok := s.VolumeUsageFor("default", "nfsv-obs-06-run-writer", "nfsv-obs-06-run-claim")
+	if !ok {
+		t.Fatalf("no reading for a claim the summary reports usage for: %s",
+			s.DescribeVolumes("default", "nfsv-obs-06-run-writer"))
+	}
+	want := VolumeUsage{
+		Source:         SourceKubeletSummary,
+		Claim:          "nfsv-obs-06-run-claim",
+		CapacityBytes:  1048576,
+		UsedBytes:      10240,
+		AvailableBytes: 1038336,
+		At:             time.Date(2026, 9, 11, 10, 2, 3, 0, time.UTC),
+	}
+	if got.Source != want.Source || got.Claim != want.Claim || got.CapacityBytes != want.CapacityBytes ||
+		got.UsedBytes != want.UsedBytes || got.AvailableBytes != want.AvailableBytes || !got.At.Equal(want.At) {
+		t.Errorf("read %+v, want %+v", got, want)
+	}
+
+	if _, ok := s.VolumeUsageFor("default", "nfsv-obs-06-run-reader", "nfsv-obs-06-run-claim"); ok {
+		t.Error("a claim was found under a pod with no entry in this summary, so a reading of one mount " +
+			"would stand in for another pod's")
+	}
+	if _, ok := s.VolumeUsageFor("default", "nfsv-obs-06-run-writer", "some-other-claim"); ok {
+		t.Error("a claim the pod does not mount was found, so the case would measure the wrong volume")
+	}
+}
+
+// TestKubeletSummaryReportsAbsentUsage covers the shapes that must not read as
+// a volume with nothing in it.
+//
+// This is the failure with no symptom. The byte counts are optional fields, and
+// a driver that does not implement volume statistics produces an entry without
+// them. Decoded into plain integers they come back as zero, the case then
+// compares the workload's view against a published zero, and a deployment
+// nobody can monitor for capacity reports a passing OBS-06.
+//
+// Available is required along with the other two even though no assertion
+// compares it: substituting a zero for it would put a full volume in the table
+// of a run that passed on the numbers beside it, and the table is what the next
+// run is compared against.
+//
+// Steps:
+//  1. Look up a claim whose entry carries no usedBytes.
+//  2. Look up a claim whose entry carries no capacityBytes.
+//  3. Look up a volume that belongs to no claim.
+func TestKubeletSummaryReportsAbsentUsage(t *testing.T) {
+	for name, doc := range map[string]string{
+		"no usedBytes": `{"pods": [{"podRef": {"name": "p", "namespace": "default"},
+			"volume": [{"time": "2026-09-11T10:00:00Z", "capacityBytes": 1048576, "name": "vol0",
+			"pvcRef": {"name": "c", "namespace": "default"}}]}]}`,
+		"no capacityBytes": `{"pods": [{"podRef": {"name": "p", "namespace": "default"},
+			"volume": [{"time": "2026-09-11T10:00:00Z", "usedBytes": 10240, "name": "vol0",
+			"pvcRef": {"name": "c", "namespace": "default"}}]}]}`,
+		"no availableBytes": `{"pods": [{"podRef": {"name": "p", "namespace": "default"},
+			"volume": [{"time": "2026-09-11T10:00:00Z", "capacityBytes": 1048576, "usedBytes": 10240,
+			"name": "vol0", "pvcRef": {"name": "c", "namespace": "default"}}]}]}`,
+		"no pvcRef": `{"pods": [{"podRef": {"name": "p", "namespace": "default"},
+			"volume": [{"time": "2026-09-11T10:00:00Z", "capacityBytes": 1048576, "usedBytes": 10240,
+			"name": "c"}]}]}`,
+		"no volumes at all": `{"pods": [{"podRef": {"name": "p", "namespace": "default"}, "volume": []}]}`,
+	} {
+		s := decodeSummary(t, doc)
+		if got, ok := s.VolumeUsageFor("default", "p", "c"); ok {
+			t.Errorf("%s: read %+v instead of reporting that the control plane publishes no usage, "+
+				"so a volume nobody can measure would pass as one nobody is filling", name, got)
+		}
+	}
+}
+
+// TestKubeletSummaryDescribeVolumes checks what a failure gets to say.
+//
+// "No usage for this claim" is actionable only next to what was published
+// instead, since that is what tells an operator whether the driver reports
+// nothing at all or reports everything except the claim.
+//
+// Steps:
+//  1. Describe a pod whose entry carries volumes, claim-backed and not.
+//  2. Describe a pod the summary says nothing about.
+func TestKubeletSummaryDescribeVolumes(t *testing.T) {
+	s := decodeSummary(t, summaryWithUsage)
+
+	got := s.DescribeVolumes("default", "nfsv-obs-06-run-writer")
+	for _, want := range []string{"2 volumes", "vol0", "kube-api-access-abcde", "nfsv-obs-06-run-claim", "no claim"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the description of what the kubelet published omits %q: %s", want, got)
+		}
+	}
+	if missing := s.DescribeVolumes("default", "absent-pod"); !strings.Contains(missing, "absent-pod") {
+		t.Errorf("the description of a pod with no entry does not name it: %s", missing)
+	}
+}
+
+func decodeSummary(t *testing.T, doc string) *KubeletSummary {
+	t.Helper()
+	s, err := parseKubeletSummary([]byte(doc))
+	if err != nil {
+		t.Fatalf("decoding the summary: %v", err)
+	}
+	return s
+}
+
+// TestUsageWaitResultRouting covers who each way of failing to get a control
+// plane reading is reported to.
+//
+// The rows are not interchangeable. Blocked says the suite could not reach the
+// source and nothing was learned; the two sentinels say the deployment answered
+// and what it answered with. A kubelet that never responded landing in either
+// sentinel would file an unreachable API server, a network fault or an expired
+// credential as a missing CSI capability, and the case's message names the
+// driver by name: someone would go and read that driver's code.
+//
+// Steps:
+//  1. Route a refusal, which is blocked.
+//  2. Route a wait where no summary was ever read, which is neither sentinel.
+//  3. Route a wait that read summaries and never found the claim.
+//  4. Route a wait that found the claim and never saw it catch up.
+//  5. Route a wait that succeeded.
+func TestUsageWaitResultRouting(t *testing.T) {
+	reading := VolumeUsage{Source: SourceKubeletSummary, Claim: "c", UsedBytes: 10240}
+	unreachable := errors.New("dial tcp: i/o timeout")
+	timedOut := errors.New("timed out after 3m0s")
+
+	for name, tc := range map[string]struct {
+		wait      usageWait
+		wantErr   error
+		wantNoErr bool
+		// wantCause is text the message has to carry, so that whoever reads the
+		// failure is told what actually went wrong.
+		wantCause string
+	}{
+		"refused": {
+			wait:      usageWait{refused: Blockedf("get on nodes/proxy was refused"), waitErr: nil},
+			wantCause: "nodes/proxy",
+		},
+		"never answered": {
+			wait:      usageWait{readErr: unreachable, waitErr: timedOut},
+			wantCause: unreachable.Error(),
+		},
+		"never answered, and no read error to name": {
+			wait:      usageWait{waitErr: timedOut},
+			wantCause: timedOut.Error(),
+		},
+		"answered, no entry for the claim": {
+			wait:    usageWait{inspected: true, waitErr: timedOut},
+			wantErr: ErrNoVolumeStats,
+		},
+		"answered, entry never caught up": {
+			wait:    usageWait{inspected: true, found: true, latest: reading, waitErr: timedOut},
+			wantErr: ErrStaleVolumeStats,
+		},
+		"answered with a fresh reading": {
+			wait:      usageWait{inspected: true, found: true, latest: reading},
+			wantNoErr: true,
+		},
+	} {
+		got, err := tc.wait.result("worker-1", "c", 3*time.Minute)
+		switch {
+		case tc.wantNoErr:
+			if err != nil {
+				t.Errorf("%s: %v", name, err)
+			}
+			if got.UsedBytes != reading.UsedBytes {
+				t.Errorf("%s: returned %+v, want the reading the wait found", name, got)
+			}
+			continue
+		case err == nil:
+			t.Errorf("%s: no error, so the case would compare against an empty reading", name)
+			continue
+		}
+		if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
+			t.Errorf("%s: %v, want %v", name, err, tc.wantErr)
+		}
+		// The two ways of not reaching the kubelet must never be reported as
+		// the deployment publishing nothing, which is the finding that sends
+		// someone to read the CSI driver's source.
+		if tc.wantErr == nil {
+			if errors.Is(err, ErrNoVolumeStats) || errors.Is(err, ErrStaleVolumeStats) {
+				t.Errorf("%s: %v reads as a deployment finding, and the suite did not reach the source", name, err)
+			}
+			if name == "refused" && !IsBlocked(err) {
+				t.Errorf("%s: %v is not blocked, so a permission gap would be filed as a storage defect", name, err)
+			}
+		}
+		if tc.wantCause != "" && !strings.Contains(err.Error(), tc.wantCause) {
+			t.Errorf("%s: %v does not say what went wrong, expected it to carry %q", name, err, tc.wantCause)
+		}
+	}
+}
