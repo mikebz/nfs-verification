@@ -444,16 +444,25 @@ func (c *Client) VolumeSnapshotClasses(ctx context.Context) ([]string, error) {
 }
 
 // MatchingVolumeSnapshotClass returns the name of a VolumeSnapshotClass configured for the given driver, if any.
+// A class with no driver field is not a match. A class whose driver field is not a string is an error: a
+// malformed object read as absent would send PROV-05 down the unsupported branch and report a cluster that
+// does advertise snapshots as one that does not.
 func (c *Client) MatchingVolumeSnapshotClass(ctx context.Context, driver string) (string, error) {
 	if c.Dynamic == nil {
 		return "", fmt.Errorf("dynamic client not configured")
 	}
 	list, err := c.Dynamic.Resource(VolumeSnapshotClassGVR).List(ctx, metav1.ListOptions{})
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("listing VolumeSnapshotClasses for driver %s: %w", driver, err)
 	}
 	for _, item := range list.Items {
-		d, _, _ := unstructured.NestedString(item.Object, "driver")
+		d, found, err := unstructured.NestedString(item.Object, "driver")
+		if err != nil {
+			return "", fmt.Errorf("reading driver of VolumeSnapshotClass %s: %w", item.GetName(), err)
+		}
+		if !found {
+			continue
+		}
 		if d == driver {
 			return item.GetName(), nil
 		}

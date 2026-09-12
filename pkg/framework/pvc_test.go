@@ -151,6 +151,10 @@ func TestRunPVCLifecycleChurnContextCancel(t *testing.T) {
 // TestMatchingVolumeSnapshotClass asserts that MatchingVolumeSnapshotClass filters
 // classes by the driver attribute and ignores classes belonging to other drivers.
 //
+// Getting this wrong is silent: an unrelated class read as a match sends PROV-05 into a
+// snapshot the driver will never take, and a malformed class read as absent reports a
+// cluster that does advertise snapshots as one that does not.
+//
 // Steps:
 //  1. Create fake dynamic client with VolumeSnapshotClasses for driver A and driver B.
 //  2. Query for driver A; assert driver A class is returned.
@@ -201,5 +205,56 @@ func TestMatchingVolumeSnapshotClass(t *testing.T) {
 	}
 	if matchNone != "" {
 		t.Errorf("got %q, want empty string", matchNone)
+	}
+}
+
+// TestMatchingVolumeSnapshotClassMalformed asserts how MatchingVolumeSnapshotClass reads
+// a class whose driver field is not the string the API promises: a class with no driver
+// at all is simply not a match, while one whose driver is of the wrong type is an error
+// naming the object, not a silent non-match that would report snapshotting as unadvertised.
+//
+// Steps:
+//  1. List a single class with no driver field; assert a clean non-match.
+//  2. List a single class whose driver is a map; assert an error that names the class.
+func TestMatchingVolumeSnapshotClassMalformed(t *testing.T) {
+	class := func(name string, driver any) *unstructured.Unstructured {
+		obj := map[string]any{
+			"apiVersion": "snapshot.storage.k8s.io/v1",
+			"kind":       "VolumeSnapshotClass",
+			"metadata": map[string]any{
+				"name": name,
+			},
+		}
+		if driver != nil {
+			obj["driver"] = driver
+		}
+		return &unstructured.Unstructured{Object: obj}
+	}
+	// One object per client: the fake tracker gives no ordering guarantee, and a
+	// match found before the malformed object would not exercise it.
+	client := func(obj *unstructured.Unstructured) *Client {
+		return &Client{Dynamic: dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
+			runtime.NewScheme(),
+			map[schema.GroupVersionResource]string{
+				VolumeSnapshotClassGVR: "VolumeSnapshotClassList",
+			},
+			obj,
+		)}
+	}
+
+	noDriver := client(class("snapclass-no-driver", nil))
+	match, err := noDriver.MatchingVolumeSnapshotClass(context.Background(), "driver-a.csi.k8s.io")
+	if err != nil {
+		t.Fatalf("class with no driver field reported an error, want a clean non-match: %v", err)
+	}
+	if match != "" {
+		t.Errorf("got %q, want empty string", match)
+	}
+
+	badDriver := client(class("snapclass-bad-driver", map[string]any{"name": "driver-a.csi.k8s.io"}))
+	if _, err := badDriver.MatchingVolumeSnapshotClass(context.Background(), "driver-a.csi.k8s.io"); err == nil {
+		t.Fatalf("malformed driver field reported as a clean non-match, want an error")
+	} else if !strings.Contains(err.Error(), "snapclass-bad-driver") {
+		t.Errorf("error does not name the malformed class: %v", err)
 	}
 }
