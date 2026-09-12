@@ -256,9 +256,10 @@ func describeResizeConditions(pvc *corev1.PersistentVolumeClaim) string {
 		"expansion at all and whether an external-resizer sidecar is running alongside the CSI driver"
 	if len(other) > 0 {
 		// Named, but kept apart from the verdict: a reader who sees a condition
-		// listed next to a timeout assumes it is the reason for it.
-		out += ". The claim does carry " + strings.Join(other, ", ") +
-			", which say nothing about expansion"
+		// listed next to a timeout assumes it is the reason for it. Phrased to
+		// read correctly for one condition as well as several.
+		out += ". The claim does carry conditions that say nothing about expansion: " +
+			strings.Join(other, ", ")
 	}
 	return " [" + out + "]"
 }
