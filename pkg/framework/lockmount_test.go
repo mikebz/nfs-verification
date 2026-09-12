@@ -282,3 +282,60 @@ func TestMountPointHolds(t *testing.T) {
 		t.Error("an empty volume name matched a mount")
 	}
 }
+
+// TestProcLockCoversAcrossNodes covers the trap that made a lock case accuse the
+// server of losing a lock that was plainly still held. See F-010 in
+// docs/findings.md.
+//
+// The two tables below are the real ones CHAOS-06 collected after a failover.
+// Both clients had reclaimed, both lines are there, and the case reported the
+// second client as holding nothing, because it matched both nodes against one
+// identity read on the first. The inode is the server's and is the same on both
+// nodes; the device is the anonymous st_dev the Linux client allocates per
+// mount, so it is not. There is no error and no log line when a caller gets this
+// wrong: the lock simply never matches, and the case files a protocol failure.
+//
+// Steps:
+//  1. Parse the after-failover lock table from each of the two nodes.
+//  2. Assert each node's lock matches the identity read on that node.
+//  3. Assert node A's identity does not match node B's lock, even though the
+//     inode and the range are the ones B holds.
+//  4. Assert the inode alone is still enough, so an unreadable stat stays a
+//     weaker match rather than becoming a reported protocol failure.
+func TestProcLockCoversAcrossNodes(t *testing.T) {
+	// Same file, same failover, two nodes. Differing devices, one inode.
+	const (
+		tableA = "1: POSIX  ADVISORY  WRITE 98140 00:a1:524306 0 4095\n"
+		tableB = "1: POSIX  ADVISORY  WRITE 61722 00:166:524306 8192 12287\n"
+	)
+	locksA, locksB := ParseProcLocks(tableA), ParseProcLocks(tableB)
+	if len(locksA) != 1 || len(locksB) != 1 {
+		t.Fatalf("parsed %d and %d locks, want one from each node", len(locksA), len(locksB))
+	}
+	lockA, lockB := locksA[0], locksB[0]
+
+	// What stat reports in a pod on each node. Same inode, and the device the
+	// case would have to read on that node to match its table.
+	idA := FileID{Device: "00:a1", Inode: 524306}
+	idB := FileID{Device: "00:166", Inode: 524306}
+	rangeA, rangeB := WriteRange(0, 4096), WriteRange(8192, 4096)
+
+	if !lockA.Covers(idA, rangeA) {
+		t.Errorf("%s did not match the identity read on its own node", lockA)
+	}
+	if !lockB.Covers(idB, rangeB) {
+		t.Errorf("%s did not match the identity read on its own node", lockB)
+	}
+	// The bug, stated as an assertion: one identity for two nodes.
+	if lockB.Covers(idA, rangeB) {
+		t.Errorf("%s matched an identity read on another node. If this ever passes, a caller may "+
+			"read one identity and match it against every node, which is exactly how a held lock "+
+			"gets reported as lost", lockB)
+	}
+	// And why dropping the device is not the fix: without it the two nodes are
+	// indistinguishable, so a lock held only on A would pass as proof for B.
+	if !lockB.Covers(FileID{Inode: 524306}, rangeB) {
+		t.Errorf("%s did not match on the inode alone, so the weaker match that covers an unreadable "+
+			"stat no longer works", lockB)
+	}
+}

@@ -740,18 +740,32 @@ func assertRangesSurvivedFailover(ctx context.Context, t *testing.T, f *framewor
 	if err := f.RecordNodeLocks(ctx, "after-failover", d.holderNode, d.otherNode); err != nil {
 		t.Logf("recording the client lock tables after the failover: %v", err)
 	}
-	// One identity, read once from either client: both mount the same file, and
-	// the device and inode are what the node's lock table prints.
-	id, err := f.FileIdentity(ctx, d.holderPod, d.path)
-	if err != nil {
-		t.Fatalf("reading the identity of %s, which is how a lock line is matched to a file: %v", d.path, err)
+	// One identity per node, not one for both. The inode is the server's and is
+	// the same everywhere, but the device a client prints is the anonymous
+	// st_dev the kernel allocates per mount, so the same file is 00:a1 on one
+	// node and 00:166 on another. Reading the identity once and matching it
+	// against the other node's lock table rejects every line on the device and
+	// reports a lock that is plainly there as lost: a false accusation against
+	// the server, from the case whose whole job is to tell reclaim from loss.
+	// See F-010 in docs/findings.md.
+	for _, q := range []struct {
+		pod, node string
+		r         framework.LockRange
+	}{
+		{d.holderPod, d.holderNode, rangeA},
+		{d.otherPod, d.otherNode, rangeB},
+	} {
+		id, err := f.FileIdentity(ctx, q.pod, d.path)
+		if err != nil {
+			t.Fatalf("reading the identity of %s as %s on %s sees it, which is how a lock line is "+
+				"matched to a file: %v", d.path, q.pod, q.node, err)
+		}
+		if id.Device == "" {
+			t.Logf("stat in %s did not report a device for %s, so the lock lines for %s are matched on "+
+				"inode and range alone, which is weaker", q.pod, d.path, q.node)
+		}
+		assertClientHoldsRange(ctx, t, f, q.node, id, q.r, q.pod)
 	}
-	if id.Device == "" {
-		t.Logf("stat did not report a device for %s, so the lock lines below are matched on inode and "+
-			"range alone, which is weaker", d.path)
-	}
-	assertClientHoldsRange(ctx, t, f, d.holderNode, id, rangeA, d.holderPod)
-	assertClientHoldsRange(ctx, t, f, d.otherNode, id, rangeB, d.otherPod)
 
 	// A third client, on neither holder's range. On a cluster with a spare node
 	// it sits on one, so both refusals cross the server; on a two-node cluster
@@ -806,6 +820,11 @@ func assertRangesSurvivedFailover(ctx context.Context, t *testing.T, f *framewor
 // lock on the node and not only the case's. Matching is on the inode as well as
 // the range: an unrelated lock over the same offsets in some other file would
 // otherwise stand in as proof that this one survived.
+//
+// id must have been read from a pod on node. The inode is the server's and
+// travels, but the device is the anonymous st_dev of that node's mount, so an
+// identity borrowed from another node matches nothing here and turns a held
+// lock into a reported loss. See F-010 in docs/findings.md.
 //
 // An unavailable agent fails the assertion rather than skipping it. Preflight
 // creates the agent and refuses to pass without it, so it is not missing here
