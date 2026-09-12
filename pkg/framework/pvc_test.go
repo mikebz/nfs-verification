@@ -258,3 +258,96 @@ func TestMatchingVolumeSnapshotClassMalformed(t *testing.T) {
 		t.Errorf("error does not name the malformed class: %v", err)
 	}
 }
+
+// TestDescribeResizeConditions covers the diagnosis attached to an expansion
+// that never completed.
+//
+// It exists because the interesting branch had become unreachable and nothing
+// said so. The helper listed every condition on the claim, and Kubernetes posts
+// Unused=False on every claim a pod references, so "nothing acted on the
+// request" could never be reached on a mounted claim -- which is every claim
+// PROV-04 and PROV-11 expand. The run that found it printed
+// "[Unused=False(A pod is currently referencing this PVC)]" where the F-004
+// diagnosis belonged. See F-012.
+//
+// Steps:
+//  1. Describe a claim carrying only the unrelated condition the cluster posts.
+//  2. Describe a claim with a real resize condition, and one with both.
+//  3. Describe a claim with no conditions at all.
+//  4. Assert the diagnosis appears whenever no resize condition does, that an
+//     unrelated condition is named but kept out of the verdict, and that a real
+//     resize condition is reported on its own.
+func TestDescribeResizeConditions(t *testing.T) {
+	// Verbatim from run e2e-full-20260911, PROV-04 and PROV-11 on
+	// Kubernetes v1.37.0-gke.2941000.
+	unused := corev1.PersistentVolumeClaimCondition{
+		Type:    corev1.PersistentVolumeClaimConditionType("Unused"),
+		Status:  corev1.ConditionFalse,
+		Message: "A pod is currently referencing this PVC",
+	}
+	resizing := corev1.PersistentVolumeClaimCondition{
+		Type:    corev1.PersistentVolumeClaimResizing,
+		Status:  corev1.ConditionTrue,
+		Message: "waiting for the controller to expand the volume",
+	}
+	pending := corev1.PersistentVolumeClaimCondition{
+		Type:    corev1.PersistentVolumeClaimFileSystemResizePending,
+		Status:  corev1.ConditionTrue,
+		Message: "waiting for a pod to start to finish file system resize",
+	}
+	const diagnosis = "nothing acted on the request"
+
+	claim := func(cs ...corev1.PersistentVolumeClaimCondition) *corev1.PersistentVolumeClaim {
+		return &corev1.PersistentVolumeClaim{
+			Status: corev1.PersistentVolumeClaimStatus{Conditions: cs},
+		}
+	}
+
+	for _, tc := range []struct {
+		name       string
+		pvc        *corev1.PersistentVolumeClaim
+		wantDiag   bool
+		wantHas    []string
+		wantHasNot []string
+	}{{
+		name:     "only an unrelated condition",
+		pvc:      claim(unused),
+		wantDiag: true,
+		// Named, so a reader knows the claim was not condition-free, but the
+		// message must not read as though Unused explained the timeout.
+		wantHas:    []string{"Unused"},
+		wantHasNot: []string{"A pod is currently referencing this PVC"},
+	}, {
+		name:       "no conditions at all",
+		pvc:        claim(),
+		wantDiag:   true,
+		wantHasNot: []string{"does carry"},
+	}, {
+		name:       "a real resize condition",
+		pvc:        claim(resizing),
+		wantHas:    []string{"Resizing=True", "waiting for the controller"},
+		wantHasNot: []string{diagnosis},
+	}, {
+		name:       "a resize condition alongside the unrelated one",
+		pvc:        claim(unused, pending),
+		wantHas:    []string{"FileSystemResizePending=True"},
+		wantHasNot: []string{diagnosis, "Unused"},
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := describeResizeConditions(tc.pvc)
+			if tc.wantDiag && !strings.Contains(got, diagnosis) {
+				t.Errorf("no resize condition was posted, so the F-004 diagnosis should appear: %s", got)
+			}
+			for _, want := range tc.wantHas {
+				if !strings.Contains(got, want) {
+					t.Errorf("the description does not mention %q: %s", want, got)
+				}
+			}
+			for _, unwanted := range tc.wantHasNot {
+				if strings.Contains(got, unwanted) {
+					t.Errorf("the description should not mention %q: %s", unwanted, got)
+				}
+			}
+		})
+	}
+}
