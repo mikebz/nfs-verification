@@ -414,26 +414,38 @@ func TestProvConcurrentProvisioning(t *testing.T) {
 }
 
 // PROV-05: snapshot and restore, if advertised. A restored volume must mount
-// RWX and its content must match the original snapshot source. If snapshotting
-// is unsupported on the cluster or driver, the API must reject cleanly.
+// RWX and its content must match the original snapshot source. Snapshots count as
+// advertised only when a VolumeSnapshotClass names this claim's CSI driver: snapshotting
+// is an optional CSI capability (CSI spec, CREATE_DELETE_SNAPSHOT), so a driver without
+// one is not defective. Where it is not advertised, the API must either reject the
+// request outright or leave the snapshot unready; what it must never do is report
+// readyToUse for a snapshot no driver took.
 //
 // Steps:
 //  1. Provision an RWX claim and mount it in a pod.
-//  2. Write known data and compute checksum.
-//  3. If snapshots are not advertised (no CRD or no VolumeSnapshotClass),
-//     assert creation is cleanly rejected, and return.
-//  4. If advertised, create a VolumeSnapshot targeting the claim.
-//  5. Wait for the VolumeSnapshot to become readyToUse.
-//  6. Provision a new claim with DataSource set to the VolumeSnapshot.
-//  7. Mount the restored claim in a new pod and verify the data matches.
-//  8. Delete pods and claims.
+//  2. Write known data and compute checksum, then delete the pod so the volume is unmounted.
+//  3. If the VolumeSnapshot CRD is not served, assert a claim with a snapshot
+//     DataSource is cleanly rejected, and return.
+//  4. If it is served but no VolumeSnapshotClass names f.Env.CSIDriver, snapshotting
+//     is not advertised for this driver: a VolumeSnapshot must either be rejected
+//     outright or stay unready, never report readyToUse. Assert that, and return.
+//  5. If advertised, create a VolumeSnapshot targeting the claim.
+//  6. Wait for the VolumeSnapshot to become readyToUse.
+//  7. Provision a new claim with DataSource set to the VolumeSnapshot.
+//  8. Mount the restored claim on one node, assert the bound claim is RWX, then mount it
+//     on a second node too and verify the data matches on both.
+//  9. Delete pods and claims.
 func TestProvSnapshotAndRestore(t *testing.T) {
 	f := framework.New(t, "PROV-05")
+	requireCap(t, f.Caps.MultiNode, "PROV-05 requires two worker nodes to assert RWX mount")
+
 	ctx, cancel := caseCtx(t, 20*time.Minute)
 	defer cancel()
 
+	nodeA, nodeB := f.TwoNodes(ctx)
+
 	pvc := f.MustRWXPVC(ctx, "prov05")
-	pod := f.MustPod(ctx, toolsPod("writer", pvc.Name, ""))
+	pod := f.MustPod(ctx, toolsPod("writer", pvc.Name, nodeA))
 	if _, err := f.WaitPVCBound(ctx, pvc.Name, framework.BindTimeout); err != nil {
 		t.Fatalf("claim did not bind once a pod consumed it: %v", err)
 	}
@@ -441,6 +453,14 @@ func TestProvSnapshotAndRestore(t *testing.T) {
 	want, err := f.WriteFile(ctx, pod.Name, fileIn("prov05.dat"), 1<<20, "prov05")
 	if err != nil {
 		t.Fatalf("writing to share: %v", err)
+	}
+
+	// Delete writer pod so volume unmounts before snapshot, avoiding live snapshot races.
+	if err := f.DeletePod(ctx, pod.Name); err != nil {
+		t.Fatalf("deleting writer pod: %v", err)
+	}
+	if err := f.WaitPodGone(ctx, pod.Name, framework.DeleteTimeout); err != nil {
+		t.Fatalf("waiting for writer pod to delete: %v", err)
 	}
 
 	if !f.Caps.CanSnapshot {
@@ -463,13 +483,13 @@ func TestProvSnapshotAndRestore(t *testing.T) {
 		return
 	}
 
-	classes, err := f.C.VolumeSnapshotClasses(ctx)
+	snapClass, err := f.C.MatchingVolumeSnapshotClass(ctx, f.Env.CSIDriver)
 	if err != nil {
-		t.Fatalf("listing VolumeSnapshotClasses: %v", err)
+		t.Fatalf("resolving the VolumeSnapshotClass for driver %s: %v", f.Env.CSIDriver, err)
 	}
-	if len(classes) == 0 {
-		t.Logf("VolumeSnapshot CRD is served but no VolumeSnapshotClass is configured for StorageClass %s", f.Env.StorageClass)
-		// Assert clean rejection or unready status when no class is configured.
+	if snapClass == "" {
+		t.Logf("VolumeSnapshot CRD is served but no VolumeSnapshotClass matches driver %q", f.Env.CSIDriver)
+		// Assert clean rejection or unready status when no matching class is configured.
 		_, snapErr := f.CreateVolumeSnapshot(ctx, "prov05-snap", pvc.Name, "")
 		if snapErr != nil {
 			t.Logf("VolumeSnapshot creation without class rejected cleanly: %v", snapErr)
@@ -483,7 +503,6 @@ func TestProvSnapshotAndRestore(t *testing.T) {
 		return
 	}
 
-	snapClass := classes[0]
 	t.Logf("using VolumeSnapshotClass %s for snapshot test", snapClass)
 	_, err = f.CreateVolumeSnapshot(ctx, "prov05-snap", pvc.Name, snapClass)
 	if err != nil {
@@ -507,17 +526,50 @@ func TestProvSnapshotAndRestore(t *testing.T) {
 		t.Fatalf("creating restored PVC from snapshot: %v", err)
 	}
 
-	restoredPod := f.MustPod(ctx, toolsPod("reader", restoredPVC.Name, ""))
-	if _, err := f.WaitPVCBound(ctx, restoredPVC.Name, framework.BindTimeout); err != nil {
-		t.Fatalf("restored claim did not bind: %v", err)
+	// Reader A first: the claim binds on its first consumer, and the access modes on the
+	// bound claim are what say whether the restore is RWX. Scheduling reader B before that
+	// check turns a claim restored RWO into a wait out to PodReadyTimeout for a pod that
+	// will never be ready, and the assertion below never runs to name the reason.
+	restoredPodA := f.MustPod(ctx, toolsPod("reader-a", restoredPVC.Name, nodeA))
+	boundPVC, err := f.WaitPVCBound(ctx, restoredPVC.Name, framework.BindTimeout)
+	if err != nil {
+		t.Fatalf("restored claim %s did not bind with reader pod %s consuming it on %s (profile %s): %v",
+			restoredPVC.Name, restoredPodA.Name, nodeA, profile(t).Name, err)
+	}
+	hasRWX := false
+	for _, mode := range boundPVC.Status.AccessModes {
+		if mode == corev1.ReadWriteMany {
+			hasRWX = true
+			break
+		}
+	}
+	if !hasRWX {
+		t.Fatalf("restored claim %s status.accessModes does not include ReadWriteMany, so it cannot be mounted on %s and %s at once (profile %s): %v",
+			boundPVC.Name, nodeA, nodeB, profile(t).Name, boundPVC.Status.AccessModes)
 	}
 
-	got, err := f.Sha256(ctx, restoredPod.Name, fileIn("prov05.dat"))
+	// Only now mount it on the second node: the claim says RWX, so a pod that never
+	// becomes ready here is a finding about the driver, not about the access modes.
+	restoredPodB := f.MustPod(ctx, toolsPod("reader-b", restoredPVC.Name, nodeB))
+
+	gotA, err := f.Sha256(ctx, restoredPodA.Name, fileIn("prov05.dat"))
 	if err != nil {
-		t.Fatalf("reading from restored volume: %v", err)
+		t.Fatalf("reader pod %s on %s failed reading the restored volume (profile %s, want %s): %v",
+			restoredPodA.Name, nodeA, profile(t).Name, want, err)
 	}
-	if got != want {
-		t.Fatalf("data mismatch on restored volume: got %s want %s", got, want)
+	if gotA != want {
+		t.Fatalf("reader pod %s on %s did not see the snapshot source content on the restored volume (profile %s): got %s want %s",
+			restoredPodA.Name, nodeA, profile(t).Name, gotA, want)
+	}
+
+	gotB, err := f.Sha256(ctx, restoredPodB.Name, fileIn("prov05.dat"))
+	if err != nil {
+		t.Fatalf("reader pod %s on %s failed reading the restored volume (profile %s, want %s): %v",
+			restoredPodB.Name, nodeB, profile(t).Name, want, err)
+	}
+	if gotB != want {
+		t.Fatalf("reader pod %s on %s did not see the snapshot source content on the restored volume (profile %s): got %s want %s",
+			restoredPodB.Name, nodeB, profile(t).Name, gotB, want)
 	}
 }
 
