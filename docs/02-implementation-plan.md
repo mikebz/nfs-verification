@@ -162,7 +162,7 @@ design doc, where it has one, is named in its row.
 | 10 | Close out CHAOS: CHAOS-03, CHAOS-04, CHAOS-08 to CHAOS-18 | not started |
 | 11 | SKEW-01 to SKEW-03, conditional on preflight finding independent versioning | not started |
 
-Thirty-four cases are in the tree today. [`../README.md`](../README.md) lists
+Thirty-five cases are in the tree today. [`../README.md`](../README.md) lists
 them and says what each asserts.
 
 ### Why this order

@@ -118,11 +118,15 @@ and dmesg from every involved node, and the injected-fault timeline.
 
 ## Timeouts and budgets
 
-Every wait in the harness is bounded, and the bounds are named constants,
-mostly in `pkg/framework/wait.go`, rather than literals at call sites. The two
-lowercase ones sit next to the code they bound. A timeout bug here
-does not look like a timeout bug: it looks like a test runner killed by its own
-`-timeout` and a pile of leaked claims.
+Every wait in the harness is bounded. The bounds below are named constants, the
+exported ones in `pkg/framework/wait.go` and the two lowercase ones next to the
+code they bound, and a new wait should take one of them rather than a literal. A
+handful of helpers predate the rule and still pass their own: the workload, lock
+and lock-probe helpers wait two minutes for a holder to report, `io.go` waits a
+minute for a writer to start, and `pkg/preflight` derives `classProbeTimeout`
+from `BindTimeout`. A timeout bug here does not look like a timeout bug: it
+looks like a test runner killed by its own `-timeout` and a pile of leaked
+claims.
 
 | Constant | Value | What it bounds |
 |---|---|---|

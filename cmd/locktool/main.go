@@ -4,7 +4,7 @@
 // It exists because nothing on a stock image can do this. flock(1) calls
 // flock(2), whose system call has no range argument; util-linux ships no
 // byte-range lock command at all; and the alternatives that would work all need
-// a runtime the repository does not assume. Section 5.2 of
+// a runtime the repository does not assume. Section 6 of
 // docs/05-data-path-and-locktool-design.md lists what was checked.
 //
 // Byte ranges are not an exotic thing to reach for here: NFSv4.1 carries LOCK,

@@ -34,7 +34,7 @@ vet:
 # pod over pods/exec. No image and no registry: a binary this repository owns,
 # gated on a registry an operator has to populate, would mean the byte-range
 # cases never run anywhere, and a case that is skipped everywhere does not
-# exist. See docs/05-data-path-and-locktool-design.md section 5.3.
+# exist. See docs/05-data-path-and-locktool-design.md section 6.
 #
 # One binary per node architecture; the harness picks the matching one from what
 # the node itself reports. CGO_ENABLED=0 makes them static, so they run on a
