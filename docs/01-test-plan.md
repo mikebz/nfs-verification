@@ -1,7 +1,15 @@
 # E2E Test Plan: NFS RWX Persistent Volumes on Kubernetes
 
+Author: mikebz@
+Created: 2026-09-10
+Updated: 2026-09-12
 Version: 1.0 (v1 scope)
-Mode: GENERATE
+
+This is the requirements document: what gets verified, and why. In what order it gets
+built is [`../plan.md`](../plan.md); how the harness does it, and what is
+implemented today, is the repository [`README.md`](../README.md), which also
+lists every other document here.
+
 Scope note: this plan is written against a userspace NFS server architecture. NFS-Ganesha is the reference implementation used to derive failure modes, but no case depends on Ganesha-specific APIs, config syntax, or binaries. Every assertion is made through the NFS protocol, the Kubernetes API, or the pod filesystem.
 
 ---
@@ -106,7 +114,7 @@ Explicitly **not** archetypes C or D. There is no distributed lock manager, no c
 | Client mount type | Kernel `nfs4`, hard mount. Blocks indefinitely rather than returning EIO. Verified in preflight, not assumed. |
 | Network path | Pod or node network, no dedicated storage network, no isolation from tenant traffic. NetworkPolicy or CNI restart interrupts the data path. |
 | Version ownership | Determined at preflight. If independently versioned, defect routing per Section 4.3. |
-| Semantic claim | Protocol semantics, not POSIX. The server is an NFS server; the guarantee is whatever NFSv4.1 specifies (RFC 8881), not what a local filesystem provides. |
+| Semantic claim | Protocol semantics, not POSIX. The server is an NFS server; the guarantee is whatever NFSv4.1 specifies ([RFC 8881](https://www.rfc-editor.org/rfc/rfc8881.html)), not what a local filesystem provides. |
 
 ### 2.4 Consequences for test emphasis
 
@@ -149,7 +157,7 @@ Assertions here are calibrated to the protocol claim in 2.3. Do not tighten them
 | ID | Case | Expected |
 |---|---|---|
 | DATA-01 | N pods, N files, partitioned by file, checksummed | All checksums match; no cross-contamination |
-| DATA-02 | N pods append to one file with `O_APPEND` | No lost or interleaved records; byte count exact |
+| DATA-02 | N pods append to one file with `O_APPEND` | No lost or interleaved records; byte count exact. **Carries a caveat**: NFSv4.1 has no append operation, so a client implements `O_APPEND` by writing at the offset it believes to be end of file. An exact count under concurrent appends from several clients is an implementation property, not a protocol guarantee, and the case says so in its failure message so a failure reaches the boundary discussion rather than the server owner. A torn record is corruption under any reading and is failed without a caveat. Still open: whether the count belongs in the fast gate at all. |
 | DATA-03 | Close-to-open: pod A writes and closes, pod B opens and reads | B sees A's data |
 | DATA-04 | Negative: pod A writes without closing, pod B reads | B may see stale data. Test asserts this is **not a failure**. Documents the boundary. |
 | DATA-05 | `flock` and `fcntl` byte-range locks across pods on different nodes | Mutual exclusion holds; second acquirer blocks |
@@ -158,7 +166,7 @@ Assertions here are calibrated to the protocol claim in 2.3. Do not tighten them
 | DATA-08 | `noac` mount variant, cross-pod visibility without close | Immediate visibility, confirming the difference from DATA-04 |
 | DATA-09 | Rename, unlink, and re-create while another pod holds the file open | Open fd remains valid; silly-rename behavior correct |
 | DATA-10 | Large directory (100k entries) readdir concurrent with deletes | Listing completes, no server crash, no use-after-free. Derived from a documented directory-chunk reuse crash in READDIR under cache pressure. |
-| DATA-11 | Sparse file write, hole punch, read back | Correct zero regions; reported size consistent. Hole punching is NFSv4.2 (`DEALLOCATE`, RFC 7862); on the 4.1 mount Section 0 pins, the punch is **recorded as unsupported, not asserted**, and the case fails only if a punch reports success without zeroing. |
+| DATA-11 | Sparse file write, hole punch, read back | Correct zero regions; reported size consistent. Hole punching is NFSv4.2 (`DEALLOCATE`, [RFC 7862](https://www.rfc-editor.org/rfc/rfc7862.html)); on the 4.1 mount Section 0 pins, the punch is **recorded as unsupported, not asserted**, and the case fails only if a punch reports success without zeroing. |
 | DATA-12 | fsync and COMMIT durability: write, fsync, kill server | Post-recovery data present |
 | DATA-13 | Negative durability: write without fsync, kill server | Data may be absent. Asserted as acceptable, documented. |
 | DATA-14 | Mixed 70/30 read/write, 4KiB to 1GiB files, 20 pods, 1h | Zero checksum mismatches. **Deferred, not implemented.** See below. |
@@ -212,7 +220,7 @@ Every case in this section runs with active I/O and asserts against the SLO tabl
 | CHAOS-14 | **Colocation deadlock**: server pod scheduled on the same node as its clients, under memory pressure | No reclaim deadlock. Specific to hyperconverged CNode/DNode topology: the local client blocks in page reclaim waiting on a local server that needs memory to progress. |
 | CHAOS-15 | Client node OOM with dirty pages on the NFS mount | Bounded failure; no node-level hang |
 | CHAOS-16 | 24h chaos soak: randomized kills, partitions, evictions | Zero data corruption; zero unrecovered mounts; zero core dumps |
-| CHAOS-17 | Recovery state store lost or corrupted, then server restarts | Bounded, honest failure: clients fail to reclaim and locks are lost, but no file data corruption, no permanent client hang, and the loss is observable in metrics or logs. Silently granting conflicting locks after state loss is the failure being hunted. |
+| CHAOS-17 | Recovery state store lost or corrupted, then server restarts | Bounded, honest failure: clients fail to reclaim and locks are lost, but no file data corruption, no permanent client hang, and the loss is observable in metrics or logs. Silently granting conflicting locks after state loss is the failure being hunted. Needs `-recovery-state-path`: there is no portable way to find the recovery state directory, and the case skips without it rather than guessing at an implementation's layout. |
 | CHAOS-18 | Delegation held by client A, client B opens the same file conflicting | Delegation recalled and returned within the recall timeout; B proceeds; A sees no corruption. **Skipped, not failed, when delegations are disabled**, which is a common default. Ties to a reported crash on the delegation return path. |
 
 Blanket rule: any core dump on any server pod fails the run. Cores are collected into run artifacts.
@@ -251,7 +259,7 @@ that data cannot be alerted on by anyone, whatever rules they write, so each
 case fails rather than skipping when the data is absent.
 
 How the data is read, and what a green run does and does not establish, is in
-[`05-observability-design.md`](05-observability-design.md).
+[`06-observability-design.md`](06-observability-design.md).
 
 ### 3.6 Security and identity (SEC)
 
@@ -309,13 +317,13 @@ Note on determinism: a server may lift grace early once it concludes no further 
 
 **Floor note: 90s for ungraceful node loss is not reachable on Kubernetes defaults.** Two platform defaults sit in front of the storage system and neither has anything to do with NFS:
 
-1. Kubernetes automatically adds tolerations for `node.kubernetes.io/not-ready` and `node.kubernetes.io/unreachable` with `tolerationSeconds=300` unless the pod sets them explicitly, so a pod on a dead node stays bound for five minutes before eviction.
+1. Kubernetes automatically adds tolerations for `node.kubernetes.io/not-ready` and `node.kubernetes.io/unreachable` with `tolerationSeconds=300` unless the pod sets them explicitly ([taints and tolerations](https://kubernetes.io/docs/concepts/scheduling-eviction/taint-and-toleration/)), so a pod on a dead node stays bound for five minutes before eviction.
 2. Once evicted, an RWO backing volume must detach from the dead node before it can attach elsewhere. The attach-detach controller waits `maxWaitForUnmountDuration` (6 minutes) before force-detaching, and that value is not currently configurable.
 
 Worst case on stock settings is therefore around 11 minutes, not 90 seconds. Two required configuration changes on the test cluster, both recorded in `environment.json` and asserted at preflight:
 
 - The server workload sets `tolerationSeconds: 30` explicitly on both taints.
-- Ungraceful node loss applies the `node.kubernetes.io/out-of-service=nodeshutdown:NoExecute` taint to trigger immediate volume detach, which is the GA path for exactly this case.
+- Ungraceful node loss applies the `node.kubernetes.io/out-of-service=nodeshutdown:NoExecute` taint to trigger immediate volume detach, which is the GA path for exactly this case ([non-graceful node shutdown](https://kubernetes.io/docs/concepts/architecture/nodes/)).
 
 If either is absent, CHAOS-03 is reported as **blocked on cluster configuration**, not failed. Distinguishing the two matters: a 6-minute recovery caused by a controller default is a deployment defect, and filing it against the NFS server wastes a week.
 
@@ -327,11 +335,25 @@ If either is absent, CHAOS-03 is reported as **blocked on cluster configuration*
 
 - Language: Go. `client-go` for orchestration, standard `testing` for structure, table-driven cases. No Ginkgo.
 - The harness runs **on the operator's workstation**, outside the cluster. It authenticates with a kubeconfig, creates PVCs, pods and DaemonSets, injects faults, collects logs, and asserts. It creates no namespaces: everything lands in `default`. No component of the suite is deployed into the cluster ahead of time.
-- The harness is a Kubernetes client, not an NFS client. It never mounts the share itself. All I/O comes from in-cluster pods running portable binaries: `fio` for load, `dd` for simple patterns, `flock` and a small static Go binary for lock semantics, `sha256sum` for verification.
-- Optional and off by default: `-external-mount=<server>:<path>` lets the workstation mount the export directly with a plain Linux NFS client. Used only for triage step 6 (reproducing outside Kubernetes to route a defect upstream). It is skipped, never failed, when the server is unreachable from the workstation, which is the normal case on a private GKE cluster.
-- Node-level assertions (`/proc/mounts`, dmesg, process signals) go through a privileged DaemonSet with host namespace access. This is the only privileged component, and its absence is a preflight failure rather than a silent skip.
-- No distro-specific APIs. Chaos is expressed as Kubernetes operations (pod delete, node cordon and drain, NetworkPolicy apply, node shutdown via whatever the platform provides) behind an interface with a GKE implementation and a bare-metal implementation.
+- The harness is a Kubernetes client, not an NFS client. It never mounts the share itself. All I/O comes from in-cluster pods running portable binaries: `dd` for simple patterns, `flock` and `locktool`, a small static Go binary in this repository, for lock semantics, `sha256sum` for verification, `stat` and `df` for what the client sees. `fio` arrives with the scale cases, from an operator-supplied image.
+- Triage step 6, reproducing outside Kubernetes against the server with a plain Linux NFS client, is done by hand. An earlier draft of this plan gave the harness an `-external-mount` flag for it; no such flag exists, because the server is normally unreachable from the workstation on a private cluster and a flag nothing uses is a flag that rots.
+- Node-level assertions (`/proc/mounts`, `/proc/locks`, dmesg, process signals) go through a privileged DaemonSet with host namespace access. This is the only privileged component, and its absence is a preflight failure rather than a silent skip.
+- No distro-specific APIs. Chaos is expressed as Kubernetes operations or a signal through the node agent, so the same case runs on GKE and on bare metal. `pkg/chaos` holds two operations today, both portable; the per-platform interface arrives with node power in step 10, which is the one thing that genuinely differs.
 - Every case is skippable by capability, never by platform name. `if !caps.CanKillNode { t.Skip() }`, never `if platform == "gke"`.
+
+**Conventions that hold for every case, whatever section it comes from.** These
+were settled while building the phases below and are stated here rather than in
+any one design doc, because a convention that lives inside a phase is one the
+next phase has to rediscover:
+
+- **Fault operations live in `pkg/chaos`, not on the per-case fixture.** Faults are the one thing a reader should be able to enumerate in one file, and a fault that records itself cannot be forgotten by the case that injected it.
+- **Targets are resolved live, at case time, never from the cached environment record.** Preflight names the pod that was there when it ran; the chaos cases move pods around. A stale target either fails to act or acts on the wrong thing.
+- **A fault that was not injected is never measured.** An operation that cannot identify its target, or that matched nothing, is an error, and the case reports blocked. A recovery measured from a fault that never landed passes for the wrong reason.
+- **Both ends of any measurement come from one clock.** Times that will be compared are read from the same pod, never one from a pod and one from the workstation: a few seconds of skew is invisible and moves every number. Where two clocks are unavoidable, because the two ends are on different nodes by construction, the window is narrowed by a guard band in `pkg/slo` and only an unambiguous violation is reported.
+- **A case waits past its target rather than up to it.** Stopping at the SLO reports "timed out" where the case could report how long recovery actually took, and the second is what a defect report needs.
+- **A tool the image may not carry is probed before it is used**, and its absence reports blocked, naming the flag that fixes it. A missing tool is never a protocol finding.
+- **Timing and correctness bounds live in `pkg/slo`**, against the profile preflight pinned. No case carries a literal.
+- **What a case reports** (passed, failed, blocked, skipped) is defined in the repository `README.md`, and the same four words mean the same four things in every section.
 
 ### 4.2 Execution by Category
 
@@ -364,6 +386,12 @@ Triage order:
 5. **Version skew?** Compare the two versions in `environment.json`. If they are independently versioned and differ from the last green run, suspect skew first.
 6. **Reproduce minimally**, then file with the artifact bundle attached. A failure filed without `environment.json` will be closed as unreproducible.
 
+Before filing, read [`findings.md`](findings.md). It is the citation of record
+for this suite: a case that reports blocked, a constant that is the value it is,
+or a teardown step that looks like more work than it should be usually has an
+`F-NNN` behind it, and several of the failure modes this runbook hunts have
+already been met once.
+
 Defect routing when the sharing layer is independently versioned: reproduce outside Kubernetes against the server directly with a plain Linux NFS client. Reproducing outside Kubernetes routes the bug upstream to the server. Not reproducing routes it to the CSI driver or the packaging.
 
 ---
@@ -392,7 +420,7 @@ Each maps to a real reported defect class, not speculation.
 - Upgrade of any component. Deferred to v2.
 - Multi-cluster and cross-region.
 - Kerberos and `sec=krb5*`. AUTH_SYS only.
-- RPC-over-TLS (RFC 9289), certificate rotation under load, and TLS handshake storm cases. Deferred to v2 and **contingent on SEC-08**: server-side support is not a given, and the Linux client side needs both an `xprtsec=` capable kernel and a handshake helper daemon on the node, neither of which is controllable on a managed node image. Probe first, then plan. CNI-level encryption (WireGuard, IPsec) is a platform property and belongs in the platform suite, not here.
+- RPC-over-TLS ([RFC 9289](https://www.rfc-editor.org/rfc/rfc9289.html)), certificate rotation under load, and TLS handshake storm cases. Deferred to v2 and **contingent on SEC-08**: server-side support is not a given, and the Linux client side needs both an `xprtsec=` capable kernel and a handshake helper daemon on the node, neither of which is controllable on a managed node image. Probe first, then plan. CNI-level encryption (WireGuard, IPsec) is a platform property and belongs in the platform suite, not here.
 - pNFS and RDMA transports.
 - GKE Autopilot (no privileged pods, so no node-level assertions).
 - Any case asserting POSIX coherence across clients. Out of scope by architecture, not by budget.

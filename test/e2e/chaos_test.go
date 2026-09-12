@@ -908,7 +908,8 @@ func TestChaosNewLockDuringGrace(t *testing.T) {
 	window, _, ok := waitGraceWindow(ctx, t, f, since, slo.GraceExitBound(profile(t))+s.budget)
 	if !ok {
 		t.Skipf("blocked: this server does not make grace observable, so there is no window to place a " +
-			"lock grant inside or outside of. OBS-03 is the case that fails for that")
+			"lock grant inside or outside of. OBS-03 is the case that fails for that, and F-008 in " +
+			"docs/findings.md is this deployment met in the field")
 	}
 	t.Logf("grace ran %s", window)
 
