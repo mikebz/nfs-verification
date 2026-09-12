@@ -51,6 +51,12 @@ type RecordSweep struct {
 	// Unparsed lines, kept rather than dropped: a sweep the harness cannot read
 	// is a harness defect, and silently reporting no corruption would hide it.
 	Unparsed []string
+	// Raw is the text the sweep was parsed from, kept so a sweep that answered
+	// for fewer records than it was asked about can be filed with what the pod
+	// actually printed. A verdict table holding nothing is not evidence of
+	// anything, and that is the one shape where the raw output is all there is.
+	// See F-011 in docs/findings.md.
+	Raw string
 }
 
 // Count returns how many records came back with a verdict.
@@ -123,7 +129,7 @@ func (s RecordSweep) Table() string {
 // per record. A pure function, because it is read from a mount that is still
 // recovering and a parser that fails there fails where nothing can be debugged.
 func ParseRecordSweep(out string) RecordSweep {
-	var s RecordSweep
+	s := RecordSweep{Raw: out}
 	for _, line := range strings.Split(out, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
@@ -177,14 +183,53 @@ func (f *Framework) VerifyRecords(ctx context.Context, pod, dir string, indices 
 	if err != nil {
 		return RecordSweep{}, err
 	}
-	out, err := f.C.MustSh(ctx, Namespace, f.Name(pod), "main", script)
-	if err != nil {
-		return RecordSweep{}, err
+	// Sh rather than MustSh: MustSh keeps stderr only when the exec failed, and
+	// the failure this has to explain is an exec that succeeded and said
+	// nothing. See F-011 in docs/findings.md.
+	res := f.C.Sh(ctx, Namespace, f.Name(pod), "main", script)
+	if res.Err != nil {
+		return RecordSweep{}, fmt.Errorf("sweeping records in %s/%s: %w: %s",
+			Namespace, f.Name(pod), res.Err, res.Combined())
 	}
-	sweep := ParseRecordSweep(out)
+	// Untrimmed on purpose: the parser skips blank lines by itself, and the raw
+	// text it keeps is only evidence if it is what the pod actually sent.
+	sweep := ParseRecordSweep(res.Stdout)
 	if len(sweep.Results)+len(sweep.Unparsed) != len(indices) {
-		return sweep, fmt.Errorf("the sweep answered for %d of %d records, so what it did say cannot "+
-			"stand for the set", len(sweep.Results)+len(sweep.Unparsed), len(indices))
+		return sweep, shortSweepError(f.Name(pod), dir, indices, sweep, res)
 	}
 	return sweep, nil
+}
+
+// shortSweepError reports a sweep that did not answer for every record it was
+// asked about, and says what the pod actually printed.
+//
+// verify-records.sh prints exactly one line per index on every path it can
+// take, a directory that is not there included, and
+// TestVerifyRecordsScriptAnswersForEveryIndex holds it to that. So a short
+// answer is not a verdict about the records: either the script did not run or
+// its output did not reach the harness. That distinction is the whole reason
+// this message exists, because the caller's next assertion is data loss, and a
+// sweep that answered for nothing must never be read as one that found nothing.
+//
+// The counts and both streams go in the message because the one occurrence so
+// far was an exec that reported success with an empty stdout, where the old
+// message named a number and nothing else. See F-011 in docs/findings.md.
+func shortSweepError(pod, dir string, indices []int, s RecordSweep, r ExecResult) error {
+	return fmt.Errorf("the sweep of %d records under %s in pod %s answered for %d of them, so what it "+
+		"did say cannot stand for the set. The script prints one line per index on every path, so this "+
+		"is the sweep failing to run or its output being lost rather than a verdict about the data: the "+
+		"exec reported no error, stdout was %d bytes (%q) and stderr %d bytes (%q). See F-011 in "+
+		"docs/findings.md",
+		len(indices), dir, pod, len(s.Results)+len(s.Unparsed),
+		len(r.Stdout), clipStream(r.Stdout), len(r.Stderr), clipStream(r.Stderr))
+}
+
+// clipStream shortens a captured stream for an error message, keeping the head,
+// where the first thing that went wrong will be.
+func clipStream(s string) string {
+	const max = 400
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "..."
 }

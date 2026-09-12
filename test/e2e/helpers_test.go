@@ -117,6 +117,7 @@ func assertCommittedRecordsIntact(ctx context.Context, t *testing.T, f *framewor
 	t.Helper()
 	sweep, err := f.VerifyRecords(ctx, pod, dir, committed)
 	if err != nil {
+		writeRawSweep(t, f, sweep)
 		t.Fatalf("sweeping committed records from %s: %v", pod, err)
 	}
 	recordSweep(t, f, sweep)
@@ -152,5 +153,19 @@ func recordSweep(t *testing.T, f *framework.Framework, sweep framework.RecordSwe
 	t.Logf("record sweep: %s", sweep)
 	if err := f.WriteArtifact("record-verdicts.txt", []byte(sweep.Table())); err != nil {
 		t.Logf("writing the verdict table: %v", err)
+	}
+}
+
+// writeRawSweep puts what the sweep printed in the bundle, for the case where
+// the sweep itself failed rather than the records.
+//
+// A sweep that answered for fewer records than it was asked about has no
+// verdict table worth writing, so recordSweep would file an empty one and the
+// run would be unreproducible. What the pod sent, including nothing at all, is
+// the evidence. See F-011 in docs/findings.md.
+func writeRawSweep(t *testing.T, f *framework.Framework, sweep framework.RecordSweep) {
+	t.Helper()
+	if err := f.WriteArtifact("record-sweep-raw.txt", []byte(sweep.Raw)); err != nil {
+		t.Logf("writing the raw sweep output: %v", err)
 	}
 }
