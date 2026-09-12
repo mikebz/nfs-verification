@@ -10,8 +10,8 @@ End-to-end verification of NFS RWX persistent volumes on Kubernetes.
 order to read it in. The three you need first:
 
 - [`docs/01-test-plan.md`](docs/01-test-plan.md): what gets verified and why.
-- [`docs/02-implementation-plan.md`](docs/02-implementation-plan.md): the test
-  approach, the delivery order, and what is done.
+- [`docs/implementation-plan.md`](docs/implementation-plan.md): the delivery
+  order and what is done. A working document, not a record.
 - [`docs/findings.md`](docs/findings.md): what running the suite against a real
   cluster taught us.
 
@@ -20,7 +20,7 @@ observability, `locktool`, the kubelet stats reader, and the thirty-five cases
 listed below: all of PROV, all of DATA except the deferred soak, both SEC cases
 that predate step 8, five CHAOS cases and four OBS cases. The rest land in the
 steps listed in
-[`docs/02-implementation-plan.md`](docs/02-implementation-plan.md).
+[`docs/implementation-plan.md`](docs/implementation-plan.md).
 
 ## Layout
 
@@ -29,7 +29,7 @@ steps listed in
 | `pkg/slo` | Timing and correctness targets, and the two lease/grace profiles |
 | `pkg/env` | The environment record written to `artifacts/<run-id>/environment.json` |
 | `pkg/framework` | Clients, per-case fixture, pods and PVCs from embedded manifests, exec, locks and the lock probe, locktool delivery, the grace observer, the kubelet stats reader, the privileged node agent, artifact collection |
-| `pkg/framework/manifests` | The YAML the suite applies: the client pod and the node agent DaemonSet |
+| `pkg/framework/manifests` | The YAML the suite applies, rendered and decoded into typed objects so it can be diffed against what was applied: the client pod and the node agent DaemonSet |
 | `pkg/framework/scripts` | The shell the suite runs inside pods, as scripts rather than as Go strings |
 | `pkg/chaos` | The fault operations the CHAOS cases inject |
 | `pkg/preflight` | Section 0 checks and all discovery |
@@ -82,7 +82,10 @@ cases (`-run '^TestObs'`), and `test-sec` runs security cases (`-run '^TestSec'`
 
 The suite creates no namespaces. Everything lands in `default`. Objects are
 named `nfsv-<case>-<run>-<what>` and labelled with the run and the case, so
-teardown deletes exactly that selector, pods first and then claims. The full run
+teardown deletes exactly that selector, pods first and then claims. A namespace
+per case would be tidier and is deliberately not done: it hides ownership behind
+a generated name, and it puts a namespace deletion, which is slow and can wedge
+on a stuck finalizer, on the path of every case. The full run
 ID stays in the name: truncating it collides across runs and turns triage into
 guesswork. The node agent is privileged by design, so a cluster enforcing a
 restricted Pod Security level on `default` cannot run the suite as it stands.

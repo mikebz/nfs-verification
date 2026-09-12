@@ -15,7 +15,7 @@ real runs taught.
 |---|---|---|---|
 | 0 | [`../README.md`](../README.md) | What the suite is, how to build and run it, every flag | First, always |
 | 1 | [`01-test-plan.md`](01-test-plan.md) | What gets verified and why: the architecture under test, every case ID, the SLO table | Before writing or reading any case |
-| 2 | [`02-implementation-plan.md`](02-implementation-plan.md) | How it gets built: harness approach, delivery order, what is done and what is next | Before starting work |
+| 2 | [`implementation-plan.md`](implementation-plan.md) | In what order it gets built, and what is done. Unnumbered and temporary: a working document that holds no decisions and goes away when the last step lands | Before starting work |
 | 3 | [`findings.md`](findings.md) | What running against a real cluster taught, `F-001` upward | Before touching teardown, deletion, or anything that unmounts |
 | 4 | Design docs 03 to 06, below | Why one phase is shaped the way it is | Only when you touch that area |
 | 5 | [`../AGENTS.md`](../AGENTS.md) | How to work here: change size, case conventions, review, what to claim | Before opening a pull request |
@@ -25,7 +25,7 @@ repository. The design docs are reference material, not prerequisites.
 
 ## Design docs
 
-Each one covers a delivery step from [`02-implementation-plan.md`](02-implementation-plan.md)
+Each one covers a delivery step from [`implementation-plan.md`](implementation-plan.md)
 and states, at the top, which cases it serves and whether it shipped.
 
 | Doc | Step | Cases | Status |
@@ -48,7 +48,7 @@ drifted the first time.
 |---|---|
 | What a case must verify | [`01-test-plan.md`](01-test-plan.md), Section 3 |
 | Timing and correctness targets | [`01-test-plan.md`](01-test-plan.md) Section 3.8, values in `pkg/slo` |
-| Delivery order and step status | [`02-implementation-plan.md`](02-implementation-plan.md), Section 2 |
+| Delivery order and step status | [`implementation-plan.md`](implementation-plan.md) |
 | Cases that exist today, flags, `make` targets | [`../README.md`](../README.md) |
 | Why a phase is built the way it is | That phase's design doc |
 | What a real run taught | [`findings.md`](findings.md) |
@@ -171,7 +171,7 @@ Links from older pull requests point at the left column.
 
 | Was | Is |
 |---|---|
-| `docs/plan.md` | [`docs/02-implementation-plan.md`](02-implementation-plan.md) |
+| `docs/plan.md`, then `docs/02-implementation-plan.md` | [`docs/implementation-plan.md`](implementation-plan.md), unnumbered because it is a working document rather than part of the record |
 | `docs/02-chaos-operations-design.md` | [`docs/03-chaos-operations-design.md`](03-chaos-operations-design.md) |
 | `docs/03-grace-and-lock-reclaim-design.md` | [`docs/04-grace-and-lock-reclaim-design.md`](04-grace-and-lock-reclaim-design.md) |
 | `docs/04-data-path-and-locktool-design.md` | [`docs/05-data-path-and-locktool-design.md`](05-data-path-and-locktool-design.md) |

@@ -5,9 +5,10 @@ Created: 2026-09-10
 Updated: 2026-09-12
 Version: 1.0 (v1 scope)
 
-This is the requirements document: what gets verified, and why. How it gets
-built is [`02-implementation-plan.md`](02-implementation-plan.md); what is
-implemented today is the repository [`README.md`](../README.md);
+This is the requirements document: what gets verified, and why. In what order it gets
+built is [`implementation-plan.md`](implementation-plan.md); how the harness
+does it, and what is implemented today, is the repository
+[`README.md`](../README.md);
 [`00-index.md`](00-index.md) maps the rest.
 
 Scope note: this plan is written against a userspace NFS server architecture. NFS-Ganesha is the reference implementation used to derive failure modes, but no case depends on Ganesha-specific APIs, config syntax, or binaries. Every assertion is made through the NFS protocol, the Kubernetes API, or the pod filesystem.
@@ -157,7 +158,7 @@ Assertions here are calibrated to the protocol claim in 2.3. Do not tighten them
 | ID | Case | Expected |
 |---|---|---|
 | DATA-01 | N pods, N files, partitioned by file, checksummed | All checksums match; no cross-contamination |
-| DATA-02 | N pods append to one file with `O_APPEND` | No lost or interleaved records; byte count exact |
+| DATA-02 | N pods append to one file with `O_APPEND` | No lost or interleaved records; byte count exact. **Carries a caveat**: NFSv4.1 has no append operation, so a client implements `O_APPEND` by writing at the offset it believes to be end of file. An exact count under concurrent appends from several clients is an implementation property, not a protocol guarantee, and the case says so in its failure message so a failure reaches the boundary discussion rather than the server owner. A torn record is corruption under any reading and is failed without a caveat. Still open: whether the count belongs in the fast gate at all. |
 | DATA-03 | Close-to-open: pod A writes and closes, pod B opens and reads | B sees A's data |
 | DATA-04 | Negative: pod A writes without closing, pod B reads | B may see stale data. Test asserts this is **not a failure**. Documents the boundary. |
 | DATA-05 | `flock` and `fcntl` byte-range locks across pods on different nodes | Mutual exclusion holds; second acquirer blocks |
@@ -220,7 +221,7 @@ Every case in this section runs with active I/O and asserts against the SLO tabl
 | CHAOS-14 | **Colocation deadlock**: server pod scheduled on the same node as its clients, under memory pressure | No reclaim deadlock. Specific to hyperconverged CNode/DNode topology: the local client blocks in page reclaim waiting on a local server that needs memory to progress. |
 | CHAOS-15 | Client node OOM with dirty pages on the NFS mount | Bounded failure; no node-level hang |
 | CHAOS-16 | 24h chaos soak: randomized kills, partitions, evictions | Zero data corruption; zero unrecovered mounts; zero core dumps |
-| CHAOS-17 | Recovery state store lost or corrupted, then server restarts | Bounded, honest failure: clients fail to reclaim and locks are lost, but no file data corruption, no permanent client hang, and the loss is observable in metrics or logs. Silently granting conflicting locks after state loss is the failure being hunted. |
+| CHAOS-17 | Recovery state store lost or corrupted, then server restarts | Bounded, honest failure: clients fail to reclaim and locks are lost, but no file data corruption, no permanent client hang, and the loss is observable in metrics or logs. Silently granting conflicting locks after state loss is the failure being hunted. Needs `-recovery-state-path`: there is no portable way to find the recovery state directory, and the case skips without it rather than guessing at an implementation's layout. |
 | CHAOS-18 | Delegation held by client A, client B opens the same file conflicting | Delegation recalled and returned within the recall timeout; B proceeds; A sees no corruption. **Skipped, not failed, when delegations are disabled**, which is a common default. Ties to a reported crash on the delegation return path. |
 
 Blanket rule: any core dump on any server pod fails the run. Cores are collected into run artifacts.
