@@ -84,6 +84,15 @@ every condition on a claim is about the thing it is describing.
   condition, using the exact condition the cluster posted. Reverting the filter
   makes it fail and reproduces the original message verbatim.
 
+Verified on the cluster, 2026-09-12, run `pr38-prov-20260912` against `gke-w1`.
+Both cases still time out, and both now print the diagnosis:
+
+> no resize condition was ever posted on the claim: nothing acted on the
+> request. The StorageClass advertises allowVolumeExpansion, so check whether
+> its provisioner supports expansion at all and whether an external-resizer
+> sidecar is running alongside the CSI driver. The claim does carry conditions
+> that say nothing about expansion: Unused
+
 ### What it means for the system under test
 
 Nothing new. F-004 stands unchanged: this provisioner advertises
