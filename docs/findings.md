@@ -19,6 +19,7 @@ New entries go at the top, and take the next number.
 
 | # | Found | What it says | Cited by |
 |---|---|---|---|
+| [F-011](#f-011-a-record-sweep-came-back-empty-from-an-exec-that-reported-success) | 2026-09-12 | A sweep exec returned success with no output at all, and the old message could not tell that from finding nothing | `sweep.go`'s short-answer error, `sweep_test.go` |
 | [F-009](#f-009-the-export-has-no-per-volume-quota-so-capacity-monitoring-describes-the-backing-filesystem-and-not-the-claim) | 2026-09-11 | The export has no per-volume quota, so both capacity sources describe the backing filesystem rather than the claim | OBS-06's failure message |
 | [F-008](#f-008-nfs-server-provisioner-never-announces-grace-so-the-grace-cases-cannot-run-against-it) | 2026-09-11 | This provisioner never announces grace, so OBS-03 fails and CHAOS-07 reports blocked | CHAOS-07's blocked message, doc 04, doc 06 |
 | [F-007](#f-007-two-cases-in-the-data-path-phase-reported-results-they-had-not-measured) | 2026-09-11 | Two cases reported results they had not measured | doc 05 |
@@ -28,6 +29,98 @@ New entries go at the top, and take the next number.
 | [F-003](#f-003-a-broken-umountnfs-wrapper-on-gke-wedges-every-terminating-pod) | 2026-09-10 | A broken `umount.nfs` wrapper wedges every terminating pod | teardown's terminate bound |
 | [F-002](#f-002-2gb-worker-nodes-cannot-host-the-suite) | 2026-09-10 | 2GB worker nodes cannot host the suite | the node shape a run reports |
 | [F-001](#f-001-force-deleting-a-mounted-pod-can-take-a-node-out-of-service) | 2026-09-10 | Force-deleting a mounted pod, then its claim, takes a node out of service | teardown, the force-delete helper, PROV-03, doc 05 |
+
+---
+
+## F-011: A record sweep came back empty from an exec that reported success
+
+**Found:** 2026-09-12, GKE cluster `gke-w1`, Kubernetes v1.37.0-gke.2941000,
+three workers on Container-Optimized OS, StorageClass `nfs` backed by
+`cluster.local/nfs-provisioner-nfs-server-provisioner`, default profile (60s
+lease, 90s grace) from flags. CHAOS-06 and CHAOS-07, in run
+`pr36-chaos-20260912`.
+
+**Severity:** high, as a harness defect. It stops the durability assertion from
+reaching a verdict, and the message it stopped with pointed at the data rather
+than at the harness.
+
+**Mechanism: open.** This entry records the shape and what has been ruled out.
+It does not claim a cause.
+
+### What happened
+
+Both cases failed at the same place, which is the first assertion after the
+fault:
+
+> sweeping committed records from verifier: the sweep answered for 0 of 14
+> records, so what it did say cannot stand for the set
+
+CHAOS-07 said the same for 5 records. CHAOS-02, in the same run and through the
+same helper, swept 4 records and got 4 correct.
+
+Nothing else in either case had gone wrong yet. CHAOS-06's own
+`byte-ranges-before-failover` subtest had passed, the workload reported a
+longest gap of 1s and no I/O errors, and the verifier pod was `Running`, ready,
+with no restarts and no deletion timestamp.
+
+### Why
+
+Unknown. What is established:
+
+- Zero results **and** zero unparsed lines means stdout held nothing but
+  whitespace, because the parser keeps every line it cannot read.
+- The exec reported success. `MustSh`, which this used at the time, returns
+  stdout only when the stream returned no error, so the shell was not reported
+  as having failed and was not reported as having been cut off.
+- `verify-records.sh` prints exactly one line per index on every path through
+  its loop, including a directory that does not exist. That is now held down by
+  `TestVerifyRecordsScriptAnswersForEveryIndex`, which runs the real script
+  under a real shell. So "the records were missing" does not produce this; it
+  produces fourteen `absent` lines.
+- The only way the script itself prints nothing is being handed no indices at
+  all, and the caller returns early on an empty set and counted fourteen.
+- The sweep code, the script and the parser are untouched by anything that
+  landed between the 2026-09-11 full-suite run, where the same two cases swept
+  15 and 5 records successfully with identical `0s` recovery and `1s` gap
+  readings, and this one.
+- It is not a slow or hung mount. A `hard` mount with no server blocks, and
+  both cases returned in well under two minutes.
+
+What is left is the exec returning success with an empty stdout for a command
+that did run, or for one that never started. Neither has been demonstrated.
+
+The reason this was not diagnosed on the spot is the message. It named a count
+and nothing else: no exit status, no stderr, no indication of whether anything
+arrived at all. The artifact bundle was no better, because the verdict table is
+only written on the success path, so the run that most needed evidence filed
+none.
+
+### What changed
+
+- `VerifyRecords` runs the sweep through `Sh` rather than `MustSh`, so the
+  short-answer error carries both streams with their lengths and states that the
+  exec itself reported no error. The message says that a short answer is the
+  sweep failing to run or its output being lost rather than a verdict about the
+  data.
+- The raw output goes into the bundle as `record-sweep-raw.txt` whenever the
+  sweep fails, which is exactly when the verdict table is empty and useless.
+- `TestVerifyRecordsScriptAnswersForEveryIndex` holds the script to one line per
+  index across a missing directory, an empty one and a mixed set. Without it the
+  new message is an assertion nobody checked, and a genuine lost record could be
+  filed as a harness problem.
+- `TestShortSweepErrorNamesWhatItSaw` holds the message to naming the pod, the
+  directory, both counts and both stream lengths.
+
+### What it means for the system under test
+
+Nothing, so far, and that is the point of writing it down. No verdict was
+reached about the records, so neither case says anything about durability on
+this deployment. A reader of that run's log should not take the failure as data
+loss, and should not take the pass of the other chaos case as covering it.
+
+The general rule: **a sweep that answered for nothing is not a sweep that found
+nothing.** Any check that reads a verdict out of a pod has to be able to tell
+those apart, and has to file what the pod actually said.
 
 ---
 

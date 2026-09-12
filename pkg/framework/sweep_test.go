@@ -1,6 +1,10 @@
 package framework
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -99,5 +103,128 @@ func TestRecordSweepTableListsEveryRecord(t *testing.T) {
 		if !strings.Contains(table, want) {
 			t.Errorf("the verdict table does not hold %q:\n%s", want, table)
 		}
+	}
+}
+
+// TestVerifyRecordsScriptAnswersForEveryIndex holds the real script to the rule
+// the short-answer error rests on: one line per index, on every path.
+//
+// This is the failure with no symptom. VerifyRecords reads a short answer as
+// the sweep never having run, and says so in a message that sends the reader
+// looking at the exec rather than at the data. If some path through the script
+// could print nothing for a record, that message would be a confident lie, and
+// a real lost record would be filed as a harness problem. See F-011.
+//
+// Steps:
+//  1. Sweep a directory that does not exist at all.
+//  2. Sweep a directory that exists and is empty.
+//  3. Sweep a directory holding a mixture of correct, short, wrong and missing
+//     records, plus a record that cannot be read.
+//  4. Assert each run printed exactly one line per index, and that every line
+//     landed somewhere in the sweep rather than being dropped.
+func TestVerifyRecordsScriptAnswersForEveryIndex(t *testing.T) {
+	sh := lookOrSkip(t, "sh", "cmp", "yes")
+	script := materializeScript(t, "verify-records.sh")
+	const size = 4096
+	pattern := func(index, n int) []byte {
+		unit := []byte("rec-" + strconv.Itoa(index) + "\n")
+		out := make([]byte, 0, n+len(unit))
+		for len(out) < n {
+			out = append(out, unit...)
+		}
+		return out[:n]
+	}
+
+	missing := filepath.Join(t.TempDir(), "never-created")
+	empty := t.TempDir()
+	mixed := t.TempDir()
+	for _, r := range []struct {
+		index int
+		body  []byte
+		mode  os.FileMode
+	}{
+		{1, pattern(1, size), 0o644},   // correct
+		{2, pattern(2, 1024), 0o644},   // short
+		{4, []byte("not this"), 0o644}, // wrong
+		{5, pattern(5, size), 0o000},   // present but unreadable
+	} {
+		if err := os.WriteFile(filepath.Join(mixed, "rec-"+strconv.Itoa(r.index)), r.body, r.mode); err != nil {
+			t.Fatalf("writing rec-%d: %v", r.index, err)
+		}
+	}
+	// rec-3 is never written, so the mixed set also covers absent.
+
+	indices := []string{"1", "2", "3", "4", "5"}
+	for _, tc := range []struct {
+		name string
+		dir  string
+	}{
+		{"missing directory", missing},
+		{"empty directory", empty},
+		{"mixed records", mixed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			scratch := filepath.Join(t.TempDir(), "expected")
+			args := append([]string{script, tc.dir, strconv.Itoa(size), scratch}, indices...)
+			out, err := exec.Command(sh, args...).Output()
+			if err != nil {
+				t.Fatalf("running the record sweep: %v", err)
+			}
+			got := len(strings.Split(strings.TrimRight(string(out), "\n"), "\n"))
+			if strings.TrimSpace(string(out)) == "" {
+				got = 0
+			}
+			if got != len(indices) {
+				t.Fatalf("the sweep printed %d lines for %d indices, and VerifyRecords reads anything "+
+					"short of one line each as the sweep not having run:\n%s", got, len(indices), out)
+			}
+			sweep := ParseRecordSweep(string(out))
+			if n := len(sweep.Results) + len(sweep.Unparsed); n != len(indices) {
+				t.Errorf("the sweep accounted for %d of %d indices: %s", n, len(indices), out)
+			}
+		})
+	}
+}
+
+// TestShortSweepErrorNamesWhatItSaw covers the message a short sweep fails
+// with.
+//
+// The message exists because the original one named a count and nothing else,
+// and a count cannot tell a reader whether the pod said nothing or the harness
+// lost what it said. Both streams and their lengths go in, since an empty
+// stdout next to an empty stderr is itself the evidence. See F-011.
+//
+// Steps:
+//  1. Build the error for a sweep that answered for none of fourteen records
+//     from an exec that reported success with nothing on either stream.
+//  2. Assert it names the pod, the directory, both counts and both stream
+//     lengths, and points at the finding.
+//  3. Assert a long stream is clipped rather than pasted whole into a test log.
+func TestShortSweepErrorNamesWhatItSaw(t *testing.T) {
+	indices := make([]int, 14)
+	for i := range indices {
+		indices[i] = i
+	}
+	err := shortSweepError("nfsv-chaos-06-run-verifier", "/mnt/share/chaos-06",
+		indices, ParseRecordSweep(""), ExecResult{})
+	for _, want := range []string{
+		"nfsv-chaos-06-run-verifier", "/mnt/share/chaos-06",
+		"14 records", "answered for 0 of them",
+		"stdout was 0 bytes", "stderr 0 bytes", "F-011",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the short-sweep error does not mention %q:\n%v", want, err)
+		}
+	}
+
+	long := strings.Repeat("x", 5000)
+	clipped := shortSweepError("pod", "/dir", indices, ParseRecordSweep(""),
+		ExecResult{Stderr: long}).Error()
+	if len(clipped) > 2000 {
+		t.Errorf("the short-sweep error is %d characters long, so a noisy stream buries the message "+
+			"it was written to deliver", len(clipped))
+	}
+	if !strings.Contains(clipped, "stderr 5000 bytes") {
+		t.Errorf("the clipped error no longer says how much stderr there was:\n%s", clipped)
 	}
 }
