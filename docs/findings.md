@@ -47,6 +47,12 @@ than at the harness.
 **Mechanism: open.** This entry records the shape and what has been ruled out.
 It does not claim a cause.
 
+**Intermittent.** It did not reproduce on the next run against the same cluster
+with the same flags, an hour later: `pr37-chaos-20260912` swept 15 of 15 and 5
+of 5, all correct, in the same two cases. Two runs is not a rate, and nothing
+here says what makes the difference. A run that sweeps cleanly is not evidence
+that this is fixed, and no change so far has tried to fix it.
+
 ### What happened
 
 Both cases failed at the same place, which is the first assertion after the
@@ -110,6 +116,11 @@ none.
   filed as a harness problem.
 - `TestShortSweepErrorNamesWhatItSaw` holds the message to naming the pod, the
   directory, both counts and both stream lengths.
+
+None of that has yet been exercised by a real short sweep, because the failure
+has not recurred. What the next occurrence produces is the evidence this entry
+is waiting on: `record-sweep-raw.txt` in the bundle, and a message saying how
+many bytes arrived on each stream.
 
 ### What it means for the system under test
 
