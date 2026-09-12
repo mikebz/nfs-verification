@@ -6,7 +6,7 @@ Updated: 2026-09-12
 
 How the test plan in [`01-test-plan.md`](01-test-plan.md) gets built. The test
 plan says what to verify; this file says in what order, in what shape, and what
-each step is allowed to assume. [`README.md`](README.md) is the map of all the
+each step is allowed to assume. [`00-index.md`](00-index.md) is the map of all the
 documents.
 
 Rule for the whole effort: **small, reviewable changes.** One vector per change,

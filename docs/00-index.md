@@ -1,4 +1,4 @@
-# Documentation map
+# 00: Documentation map
 
 Author: mikebz@
 Created: 2026-09-11
@@ -8,32 +8,6 @@ This suite verifies NFS RWX persistent volumes on Kubernetes by driving a real
 cluster and asserting what a client can observe. These documents say what is
 verified, in what order it was built, what was decided along the way, and what
 real runs taught.
-
-## Every document carries its dates
-
-Each file here, plus [`../README.md`](../README.md) and
-[`../AGENTS.md`](../AGENTS.md), opens with a header block:
-
-```
-Author: mikebz@
-Created: <the date the document first landed in the repository>
-Updated: <the date of the last change to what it says>
-```
-
-Both dates are UTC, and both matter for different reasons. **Created** says how
-old the thinking is: a design written before the first real run was written
-without evidence that has since arrived. **Updated** says whether anyone has
-reconciled it with the code since. A design doc adds `Status:` and `Serves:` so
-that a reader who gets no further than the header still knows whether it
-describes code that exists.
-
-A typo fix does not move `Updated`; a change to what the document claims does.
-Both dates are checkable against history:
-
-```sh
-TZ=UTC git log --diff-filter=A --format=%ad --date=format-local:%F -1 -- docs/<file>   # created
-TZ=UTC git log               --format=%ad --date=format-local:%F -1 -- docs/<file>   # last change
-```
 
 ## Read in this order
 
@@ -96,6 +70,32 @@ drifted the first time.
   itself the finding.
 - **Skipped**: the cluster lacks a capability the case needs, discovered at
   preflight. Never used to hide a deployment that publishes nothing.
+
+## Every document carries its dates
+
+Each file here, plus the repository [`README.md`](../README.md) and
+[`AGENTS.md`](../AGENTS.md), opens with a header block:
+
+```
+Author: mikebz@
+Created: <the date the document first landed in the repository>
+Updated: <the date of the last change to what it says>
+```
+
+Both dates are UTC, and both matter for different reasons. **Created** says how
+old the thinking is: a design written before the first real run was written
+without evidence that has since arrived. **Updated** says whether anyone has
+reconciled it with the code since. A design doc adds `Status:` and `Serves:` so
+that a reader who gets no further than the header still knows whether it
+describes code that exists.
+
+A typo fix does not move `Updated`; a change to what the document claims does.
+Both dates are checkable against history:
+
+```sh
+TZ=UTC git log --diff-filter=A --format=%ad --date=format-local:%F -1 -- docs/<file>   # created
+TZ=UTC git log               --format=%ad --date=format-local:%F -1 -- docs/<file>   # last change
+```
 
 ## Sources the assertions rest on
 
@@ -176,3 +176,4 @@ Links from older pull requests point at the left column.
 | `docs/03-grace-and-lock-reclaim-design.md` | [`docs/04-grace-and-lock-reclaim-design.md`](04-grace-and-lock-reclaim-design.md) |
 | `docs/04-data-path-and-locktool-design.md` | [`docs/05-data-path-and-locktool-design.md`](05-data-path-and-locktool-design.md) |
 | `docs/05-observability-design.md` | [`docs/06-observability-design.md`](06-observability-design.md) |
+| `docs/README.md` | [`docs/00-index.md`](00-index.md), so the only `README.md` in the repository is the one in the root |

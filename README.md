@@ -6,8 +6,8 @@ Updated: 2026-09-12
 
 End-to-end verification of NFS RWX persistent volumes on Kubernetes.
 
-[`docs/README.md`](docs/README.md) is the map of the documentation and the order
-to read it in. The three you need first:
+[`docs/00-index.md`](docs/00-index.md) is the map of the documentation and the
+order to read it in. The three you need first:
 
 - [`docs/01-test-plan.md`](docs/01-test-plan.md): what gets verified and why.
 - [`docs/02-implementation-plan.md`](docs/02-implementation-plan.md): the test

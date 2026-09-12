@@ -7,8 +7,8 @@ Version: 1.0 (v1 scope)
 
 This is the requirements document: what gets verified, and why. How it gets
 built is [`02-implementation-plan.md`](02-implementation-plan.md); what is
-implemented today is [`../README.md`](../README.md);
-[`README.md`](README.md) maps the rest.
+implemented today is the repository [`README.md`](../README.md);
+[`00-index.md`](00-index.md) maps the rest.
 
 Scope note: this plan is written against a userspace NFS server architecture. NFS-Ganesha is the reference implementation used to derive failure modes, but no case depends on Ganesha-specific APIs, config syntax, or binaries. Every assertion is made through the NFS protocol, the Kubernetes API, or the pod filesystem.
 
