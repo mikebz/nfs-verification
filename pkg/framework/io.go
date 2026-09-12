@@ -20,6 +20,35 @@ func (f *Framework) WriteFile(ctx context.Context, pod, path string, sizeBytes i
 	return f.C.MustSh(ctx, Namespace, f.Name(pod), "main", script)
 }
 
+// WriteBytes writes size bytes at path and reports how many actually landed.
+//
+// The count comes from the filesystem rather than from the request. `head -c`
+// on a volume with less room than that writes what fits and exits without
+// complaint, so a case that compared a usage reading against the size it asked
+// for would be comparing it against bytes nobody wrote.
+func (f *Framework) WriteBytes(ctx context.Context, pod, path string, sizeBytes int64, seed string) (int64, error) {
+	out, err := f.C.MustSh(ctx, Namespace, f.Name(pod), "main", writeBytesScript(path, sizeBytes, seed))
+	if err != nil {
+		return 0, err
+	}
+	n, err := strconv.ParseInt(strings.TrimSpace(out), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("asking %s how large %s ended up: the pod said %q", f.Name(pod), path, out)
+	}
+	return n, nil
+}
+
+// writeBytesScript is what WriteBytes runs in the pod. Separate from the call
+// so that a quoting slip fails under a shell on a workstation rather than
+// inside a case that was measuring something else.
+func writeBytesScript(path string, sizeBytes int64, seed string) string {
+	return fmt.Sprintf(
+		`set -e; mkdir -p "$(dirname %[1]s)"; `+
+			`yes %[3]s | head -c %[2]d > %[1]s; `+
+			`sync; stat -c %%s %[1]s`,
+		shellQuote(path), sizeBytes, shellQuote(seed))
+}
+
 // Sha256 returns the checksum of a file as the pod sees it.
 func (f *Framework) Sha256(ctx context.Context, pod, path string) (string, error) {
 	return f.C.MustSh(ctx, Namespace, f.Name(pod), "main",
@@ -196,7 +225,11 @@ func (f *Framework) MountCapacity(ctx context.Context, pod, path string) (Capaci
 	if err != nil {
 		return Capacity{}, fmt.Errorf("neither stat -f nor df could read the capacity of %s: %w", path, err)
 	}
-	return parseDF(out)
+	row, err := parseDF(out)
+	if err != nil {
+		return Capacity{}, err
+	}
+	return Capacity{TotalBytes: row.TotalBytes, AvailBytes: row.AvailBytes}, nil
 }
 
 // parseStatFS reads `stat -f -c '%b %a %S'`: total data blocks, blocks
@@ -224,26 +257,36 @@ func parseStatFS(out string) (Capacity, error) {
 	return Capacity{TotalBytes: blocks * size, AvailBytes: avail * size}, nil
 }
 
+// dfRow is one filesystem line of `df -P -k`, in bytes.
+//
+// Used is carried rather than derived from the other two. A filesystem with
+// reserved blocks reports a used count that does not equal capacity minus
+// available, and a case comparing two sources of one quantity must not invent
+// agreement by computing one of the numbers it is comparing.
+type dfRow struct{ TotalBytes, UsedBytes, AvailBytes int64 }
+
 // parseDF reads the POSIX df format: header, then one line per filesystem with
-// 1K blocks in field 2 and available blocks in field 4.
-func parseDF(out string) (Capacity, error) {
+// 1K blocks in field 2, used blocks in field 3 and available blocks in field 4.
+func parseDF(out string) (dfRow, error) {
 	lines := strings.Split(strings.TrimSpace(out), "\n")
 	if len(lines) < 2 {
-		return Capacity{}, fmt.Errorf("no filesystem line in df output %q", out)
+		return dfRow{}, fmt.Errorf("no filesystem line in df output %q", out)
 	}
-	fields := strings.Fields(lines[len(lines)-1])
+	line := lines[len(lines)-1]
+	fields := strings.Fields(line)
 	if len(fields) < 4 {
-		return Capacity{}, fmt.Errorf("unexpected df line %q", lines[len(lines)-1])
+		return dfRow{}, fmt.Errorf("unexpected df line %q", line)
 	}
-	total, err := strconv.ParseInt(fields[1], 10, 64)
-	if err != nil {
-		return Capacity{}, fmt.Errorf("unexpected block count in df line %q: %w", lines[len(lines)-1], err)
+	names := []string{"", "block count", "used count", "available count"}
+	nums := make([]int64, 4)
+	for i := 1; i < 4; i++ {
+		n, err := strconv.ParseInt(fields[i], 10, 64)
+		if err != nil {
+			return dfRow{}, fmt.Errorf("unexpected %s in df line %q: %w", names[i], line, err)
+		}
+		nums[i] = n
 	}
-	avail, err := strconv.ParseInt(fields[3], 10, 64)
-	if err != nil {
-		return Capacity{}, fmt.Errorf("unexpected available count in df line %q: %w", lines[len(lines)-1], err)
-	}
-	return Capacity{TotalBytes: total * 1024, AvailBytes: avail * 1024}, nil
+	return dfRow{TotalBytes: nums[1] * 1024, UsedBytes: nums[2] * 1024, AvailBytes: nums[3] * 1024}, nil
 }
 
 // Direct I/O bypasses the page cache on both ends, which is the only way a

@@ -159,8 +159,58 @@ const PromptLockRelease = 5 * time.Second
 // lawful lock grant reported as a protocol violation costs a week.
 const ClockSkewGuard = 5 * time.Second
 
-// AlertSLO is the deadline for an availability alert to fire (OBS-01).
-const AlertSLO = 5 * time.Minute
+// The bounds OBS-06 compares two readings of one volume against.
+//
+// Two samplers reading one quantity at two moments never produce equal numbers,
+// so the case needs a stated tolerance rather than equality, and a statement of
+// how fresh the slower sampler's answer has to be before it is worth comparing
+// at all. Both live here rather than in the case, for the same reason every
+// other bound does.
+const (
+	// VolumeStatsPeriod is how often the kubelet recomputes volume statistics
+	// by default. It is the slower of the two samplers: `df` inside a pod
+	// answers at the moment it is asked, and this one answers with whatever it
+	// last computed.
+	VolumeStatsPeriod = time.Minute
+
+	// VolumeStatsFreshness is how long a case waits for a kubelet reading whose
+	// own timestamp is later than the pod reading it will be compared with.
+	// Three aggregation periods: enough that a kubelet on its documented
+	// default is never the reason a case fails, short enough that a control
+	// plane which has stopped recomputing usage is reported rather than waited
+	// out.
+	VolumeStatsFreshness = 3 * VolumeStatsPeriod
+
+	// VolumeUsageTolerance is how far the two sources may disagree about used
+	// bytes, as a fraction of the capacity the workload sees.
+	//
+	// Derived from the slower sampler's period: the kubelet's answer is stale
+	// by up to VolumeStatsPeriod, so anything the workload changed inside that
+	// window is legitimately missing from it. It is deliberately not tight. A
+	// misread field, a source reporting a different filesystem, or a gauge that
+	// ignores its subject are all wrong by orders of magnitude, and those are
+	// the failures this case exists to catch.
+	VolumeUsageTolerance = 0.02
+
+	// VolumeWriteBytes is what OBS-06 writes to show the two sources move
+	// together.
+	//
+	// An absolute count, not a fraction of the claim: a fraction is tens of
+	// gigabytes on a multi-terabyte claim and below the tolerance on a small
+	// one, so it would be neither bounded nor meaningful across deployments.
+	// Nothing here approaches any capacity threshold; the threshold an alert
+	// would sit on is the operator's.
+	VolumeWriteBytes int64 = 128 << 20
+
+	// VolumeUsageMovement is the fraction of the bytes actually written that
+	// must show up as an increase in a source's used bytes.
+	//
+	// Not one: a filesystem accounts for metadata as well as data, and another
+	// workload on a shared export moves the number underneath the case in
+	// either direction. Half is far enough from zero that a frozen gauge cannot
+	// satisfy it, which is the only thing being asserted.
+	VolumeUsageMovement = 0.5
+)
 
 // SoakDegradationBound is the permitted throughput degradation trend over a
 // sustained soak (SCALE-07).

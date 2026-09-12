@@ -9,7 +9,7 @@ End-to-end verification of NFS RWX persistent volumes on Kubernetes.
 - [`docs/findings.md`](docs/findings.md) records what running the suite against a
   real cluster taught us.
 
-This repository currently holds the harness skeleton, preflight, twenty-six cases,
+This repository currently holds the harness skeleton, preflight, twenty-seven cases,
 the fault injection engine, and grace observability. The remaining cases land in the steps listed in
 [`docs/plan.md`](docs/plan.md).
 
@@ -19,7 +19,7 @@ the fault injection engine, and grace observability. The remaining cases land in
 |---|---|
 | `pkg/slo` | Timing and correctness targets, and the two lease/grace profiles |
 | `pkg/env` | The environment record written to `artifacts/<run-id>/environment.json` |
-| `pkg/framework` | Clients, per-case fixture, pods and PVCs from embedded manifests, exec, locks and the lock probe, locktool delivery, the grace observer, the privileged node agent, artifact collection |
+| `pkg/framework` | Clients, per-case fixture, pods and PVCs from embedded manifests, exec, locks and the lock probe, locktool delivery, the grace observer, the kubelet stats reader, the privileged node agent, artifact collection |
 | `pkg/framework/manifests` | The YAML the suite applies: the client pod and the node agent DaemonSet |
 | `pkg/framework/scripts` | The shell the suite runs inside pods, as scripts rather than as Go strings |
 | `pkg/chaos` | The fault operations the CHAOS cases inject |
@@ -77,6 +77,14 @@ teardown deletes exactly that selector, pods first and then claims. The full run
 ID stays in the name: truncating it collides across runs and turns triage into
 guesswork. The node agent is privileged by design, so a cluster enforcing a
 restricted Pod Security level on `default` cannot run the suite as it stands.
+
+OBS-06 reads the kubelet's stats summary through the API server's node proxy,
+which is the control plane's own view of how full a volume is. That needs `get`
+on `nodes/proxy` in the kubeconfig the suite runs with. Nothing is deployed for
+it and no monitoring stack is involved: it is an ordinary `GET` on the client
+the suite already holds. A kubeconfig without that verb reports the case blocked
+and names it, rather than reporting the deployment as one that publishes
+nothing.
 
 `make locktool` cross-compiles `cmd/locktool` into `bin/locktool-linux-<arch>`
 with `CGO_ENABLED=0`, one per node architecture. `make all` runs it, so a

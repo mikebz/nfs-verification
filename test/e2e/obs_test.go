@@ -2,6 +2,7 @@ package e2e
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -294,4 +295,185 @@ func TestObsGracePeriodIsObservable(t *testing.T) {
 			"It presents as a hung client in front of a healthy server, which is why CHAOS-05 needs this "+
 			"case to be diagnosable", n, obs.Describe())
 	}
+}
+
+// OBS-06: a volume near capacity has to be visible to whoever runs the cluster,
+// which means the control plane must report this volume's usage, that reading
+// must agree with what the workload itself sees, and both must move when the
+// workload writes.
+//
+// Nothing here fills anything. The threshold an alert would sit on is the
+// operator's, so approaching it would prove nothing and risk the cluster; what
+// is a property of the deployment is whether the input those rules need exists
+// at all. Two sources are read: df inside the pod, which is what the
+// application gets ENOSPC against, and the kubelet's entry for the same claim,
+// which is what monitoring reads. The failure that matters is a control plane
+// reporting a volume as nearly empty while the workload has run out of room.
+//
+// Steps:
+//  1. Create an RWX claim and a pod on it, and read what df says inside the pod.
+//  2. Wait for a kubelet reading of the same claim at least as new as that one.
+//     No reading at all fails the case and names the CSI driver: a volume the
+//     control plane cannot measure is one nobody can monitor for capacity.
+//  3. Assert the two agree on used bytes within the tolerance in pkg/slo.
+//  4. Write a bounded, absolute number of bytes and take both readings again.
+//  5. Assert both moved by the bytes that actually landed. A control plane
+//     reading that did not move fails: df confirms the bytes are there and the
+//     suite knows how many it wrote, so there is nothing else it could be.
+//  6. Last, compare what df reports as the total against the claim's capacity,
+//     so that everything above is measured and recorded before this can stop
+//     the case. An export with no per-volume quota reports the backing
+//     filesystem, and two sources agreeing about the wrong filesystem is
+//     exactly the shape a passing case would hide.
+func TestObsVolumeUsageAgreesWithControlPlane(t *testing.T) {
+	f := framework.New(t, "OBS-06")
+	ctx, cancel := caseCtx(t, 20*time.Minute)
+	defer cancel()
+
+	pvc := f.MustRWXPVC(ctx, "obs06")
+	pod := f.MustPod(ctx, toolsPod("writer", pvc.Name, ""))
+	node := pod.Spec.NodeName
+	t.Logf("claim %s is mounted by %s on node %s, and the kubelet on that node is the control plane's "+
+		"view of it", pvc.Name, pod.Name, node)
+
+	// Read the provisioned capacity now, because the agreement tolerance is a
+	// fraction of it. Nothing is asserted about it here: the quota check that
+	// compares it against what df reports runs last, after everything else has
+	// been measured and recorded.
+	bound, err := f.C.Kube.CoreV1().PersistentVolumeClaims(framework.Namespace).
+		Get(ctx, pvc.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("re-reading claim %s for the capacity it was provisioned at: %v", pvc.Name, err)
+	}
+	capacity := bound.Status.Capacity[corev1.ResourceStorage]
+	claimBytes := capacity.Value()
+
+	report := &framework.UsageReport{}
+	// Written whether the case passed or not, and before teardown: a run where
+	// the two sources differed by 2% is a different run from one where they
+	// agreed exactly, and by teardown neither source can be asked again.
+	t.Cleanup(func() {
+		if err := f.WriteArtifact("volume-usage.txt", []byte(report.Table())); err != nil {
+			t.Logf("writing the usage table: %v", err)
+		}
+	})
+
+	before := agreeOnUsage(ctx, t, f, node, pvc.Name, "before", claimBytes, report)
+
+	written, err := f.WriteBytes(ctx, "writer", fileIn("obs06.bin"), slo.VolumeWriteBytes, "obs06")
+	if err != nil {
+		t.Fatalf("writing %d bytes through the export: %v", slo.VolumeWriteBytes, err)
+	}
+	t.Logf("wrote %d bytes of the %d asked for", written, slo.VolumeWriteBytes)
+	if written <= 0 {
+		blocked(t, "the write reported %d bytes on the claim, so this case has not changed the quantity "+
+			"it is about and nothing it could read afterwards would mean anything", written)
+	}
+
+	after := agreeOnUsage(ctx, t, f, node, pvc.Name, "after", claimBytes, report)
+
+	// Two sources that agree on a static number prove less than two that move
+	// together, so the movement is asserted against the bytes that actually
+	// landed rather than against the size that was asked for.
+	floor := framework.MovementFloor(written)
+	podDelta := framework.UsedDelta(before.Pod, after.Pod)
+	kubeletDelta := framework.UsedDelta(before.Kubelet, after.Kubelet)
+	t.Logf("after writing %d bytes: the workload's used bytes moved by %d, the control plane's by %d, "+
+		"and either has to move by at least %d", written, podDelta, kubeletDelta, floor)
+
+	// The workload's own view not moving is the case failing to establish its
+	// own precondition rather than a finding about the deployment: the bytes it
+	// meant to write are not where it thinks they are, and nothing downstream
+	// of that is worth asserting.
+	if podDelta < floor {
+		blocked(t, "the workload wrote %d bytes to %s and its own df moved by %d, below the %d this case "+
+			"needs to have written before it can ask whether the control plane saw it. Nothing is known "+
+			"here about what the control plane publishes", written, pvc.Name, podDelta, floor)
+	}
+	if kubeletDelta < floor {
+		t.Errorf("the workload wrote %d bytes and its own df moved by %d, while the control plane's "+
+			"reading of the same claim moved by %d, below the %d floor. The bytes are on the volume, so "+
+			"this is a usage figure that does not track the volume it describes: a threshold on it would "+
+			"never fire, whatever an operator set it to. Control plane rows: %s then %s",
+			written, podDelta, kubeletDelta, floor, before.Kubelet, after.Kubelet)
+	}
+
+	// Last, and on purpose: everything above is measured and recorded before
+	// this can stop the case.
+	if claimBytes <= 0 {
+		// Without a capacity on the bound claim there is nothing to compare
+		// against, and failing here would name the provisioner for a number the
+		// case never read.
+		blocked(t, "claim %s is bound and its status carries no capacity, so what df reports as the total "+
+			"cannot be checked against what was provisioned", pvc.Name)
+	}
+	if !framework.MatchesClaimCapacity(after.Pod.CapacityBytes, claimBytes) {
+		t.Errorf("claim %s is provisioned at %d bytes and df inside the pod reports a total of %d. The "+
+			"export is a subdirectory of a larger filesystem with no per-volume quota, so both sources "+
+			"are measuring that filesystem rather than this volume, and no threshold on that number "+
+			"describes this claim. This is the provisioner's configuration, not the NFS server: the "+
+			"driver behind StorageClass %s is %s, and a quota option it does not have on cannot produce "+
+			"a per-volume total", pvc.Name, claimBytes, after.Pod.CapacityBytes, f.Env.StorageClass, csiDriver(f))
+	}
+}
+
+// agreeOnUsage reads both views of one claim, waits for a control plane reading
+// at least as new as the workload's, and asserts the two agree.
+//
+// The three ways it can end without a comparison are routed differently on
+// purpose. A refused node proxy is blocked: the suite could not reach the
+// source, so nothing was learned about the deployment. No reading and a reading
+// that never catches up are both failures that name the deployment, because on
+// that cluster an operator has no input either and no rule they write will
+// change that.
+func agreeOnUsage(ctx context.Context, t *testing.T, f *framework.Framework, node, claim, label string,
+	claimBytes int64, report *framework.UsageReport) framework.UsageComparison {
+	t.Helper()
+
+	podUsage, err := f.ClaimUsage(ctx, "writer", mountPath, claim)
+	if err != nil {
+		t.Fatalf("reading what the workload sees of %s: %v", claim, err)
+	}
+	kubeletUsage, err := f.FreshKubeletUsage(ctx, node, "writer", claim, podUsage.At, slo.VolumeStatsFreshness)
+	switch {
+	case framework.IsBlocked(err):
+		blocked(t, "%v", err)
+	case errors.Is(err, framework.ErrNoVolumeStats):
+		t.Fatalf("%v. Volume statistics are an optional node capability in the CSI specification, and the "+
+			"driver %s behind StorageClass %s does not report them for this volume, so how full %s is "+
+			"cannot be seen from outside the workload at all. There is no number here for a threshold to "+
+			"sit on, which is a property of this deployment rather than of the NFS server",
+			err, csiDriver(f), f.Env.StorageClass, claim)
+	case errors.Is(err, framework.ErrStaleVolumeStats):
+		t.Fatalf("%v. The kubelet recomputes volume statistics every %s by default and this case waited "+
+			"%s, so a reading on node %s still behind the workload's means the control plane's view of "+
+			"this volume is not being refreshed. A usage figure nobody updates cannot report a volume "+
+			"filling up", err, slo.VolumeStatsPeriod, slo.VolumeStatsFreshness, node)
+	case err != nil:
+		t.Fatalf("reading what the control plane sees of %s on node %s: %v", claim, node, err)
+	}
+
+	cmp := framework.CompareUsage(podUsage, kubeletUsage, claimBytes)
+	report.Record(label, cmp)
+	t.Logf("%s: %s", label, cmp)
+	if cmp.Verdict != framework.UsageAgrees {
+		t.Errorf("the two views of %s %s at the %s reading. The workload's own df says %s; the control "+
+			"plane says %s; they differ by %d bytes against a tolerance of %d, which is %.0f%% of the "+
+			"smaller of the claim's %d bytes and the capacity the workload is shown. An operator watching "+
+			"the control plane's number is not watching the volume the application is writing to",
+			claim, cmp.Verdict, label, cmp.Pod, cmp.Kubelet, cmp.DeltaBytes, cmp.ToleranceBytes,
+			slo.VolumeUsageTolerance*100, claimBytes)
+	}
+	return cmp
+}
+
+// csiDriver names the driver behind the class under test, for a message that
+// has to say whose configuration produced a finding. Preflight takes it from
+// the StorageClass; a record without one still has to produce a readable
+// sentence rather than a gap where the owner should be.
+func csiDriver(f *framework.Framework) string {
+	if f.Env.CSIDriver == "" {
+		return "(not recorded by preflight)"
+	}
+	return f.Env.CSIDriver
 }
