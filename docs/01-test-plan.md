@@ -341,6 +341,20 @@ If either is absent, CHAOS-03 is reported as **blocked on cluster configuration*
 - No distro-specific APIs. Chaos is expressed as Kubernetes operations or a signal through the node agent, so the same case runs on GKE and on bare metal. `pkg/chaos` holds two operations today, both portable; the per-platform interface arrives with node power in step 10, which is the one thing that genuinely differs.
 - Every case is skippable by capability, never by platform name. `if !caps.CanKillNode { t.Skip() }`, never `if platform == "gke"`.
 
+**Conventions that hold for every case, whatever section it comes from.** These
+were settled while building the phases below and are stated here rather than in
+any one design doc, because a convention that lives inside a phase is one the
+next phase has to rediscover:
+
+- **Fault operations live in `pkg/chaos`, not on the per-case fixture.** Faults are the one thing a reader should be able to enumerate in one file, and a fault that records itself cannot be forgotten by the case that injected it.
+- **Targets are resolved live, at case time, never from the cached environment record.** Preflight names the pod that was there when it ran; the chaos cases move pods around. A stale target either fails to act or acts on the wrong thing.
+- **A fault that was not injected is never measured.** An operation that cannot identify its target, or that matched nothing, is an error, and the case reports blocked. A recovery measured from a fault that never landed passes for the wrong reason.
+- **Both ends of any measurement come from one clock.** Times that will be compared are read from the same pod, never one from a pod and one from the workstation: a few seconds of skew is invisible and moves every number. Where two clocks are unavoidable, because the two ends are on different nodes by construction, the window is narrowed by a guard band in `pkg/slo` and only an unambiguous violation is reported.
+- **A case waits past its target rather than up to it.** Stopping at the SLO reports "timed out" where the case could report how long recovery actually took, and the second is what a defect report needs.
+- **A tool the image may not carry is probed before it is used**, and its absence reports blocked, naming the flag that fixes it. A missing tool is never a protocol finding.
+- **Timing and correctness bounds live in `pkg/slo`**, against the profile preflight pinned. No case carries a literal.
+- **What a case reports** (passed, failed, blocked, skipped) is defined in the repository `README.md`, and the same four words mean the same four things in every section.
+
 ### 4.2 Execution by Category
 
 | Target | Contents | Budget |
@@ -371,6 +385,12 @@ Triage order:
 4. **Provisioning or data path?** Provisioning failures go to the CSI driver owner. Data path failures go to the server owner.
 5. **Version skew?** Compare the two versions in `environment.json`. If they are independently versioned and differ from the last green run, suspect skew first.
 6. **Reproduce minimally**, then file with the artifact bundle attached. A failure filed without `environment.json` will be closed as unreproducible.
+
+Before filing, read [`findings.md`](findings.md). It is the citation of record
+for this suite: a case that reports blocked, a constant that is the value it is,
+or a teardown step that looks like more work than it should be usually has an
+`F-NNN` behind it, and several of the failure modes this runbook hunts have
+already been met once.
 
 Defect routing when the sharing layer is independently versioned: reproduce outside Kubernetes against the server directly with a plain Linux NFS client. Reproducing outside Kubernetes routes the bug upstream to the server. Not reproducing routes it to the CSI driver or the packaging.
 

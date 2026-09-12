@@ -36,20 +36,23 @@ Done means an operator on this deployment can answer four questions from data
 that exists: is the server reachable, is it near its memory ceiling, is the
 volume near capacity, and do the server's own metrics survive a restart.
 
-## 2. Rules, and how each is checked
+## 2. What these four cases assert
 
-| # | Rule | Check |
+Shared conventions are in [`01-test-plan.md`](01-test-plan.md) Section 4.1, and
+the four words a case reports are defined in the repository README. What is
+specific to observability:
+
+| # | Assertion | Where it comes from |
 |---|---|---|
-| 1 | The suite deploys no monitoring stack and depends on no hosted one | Every control-plane reading goes through the API server with the existing kubeconfig. The one workload-side reading, `df` in a pod, is the existing exec path, because the point of it is to be what the workload sees |
-| 2 | No case asserts that an alert fired, reads a rule, a threshold or a severity | Those are the operator's |
-| 3 | One verdict rule, used everywhere (Section 4) | A source the suite cannot reach is blocked; a deployment that publishes nothing fails; a precondition the case failed to create is blocked, with the number reached. Nothing is a capability skip |
-| 4 | No case passes on a signal its own fault produced | Deleting a pod moves every container-derived signal by construction, so no case asserts on one |
-| 5 | A case that reads a live value shows it moves | A frozen counter and a gauge that ignores its subject both exist and neither is usable. A case reading configuration rather than a value is exempt and says so |
+| 1 | No case asserts that an alert fired, or reads a rule, a threshold or a severity | Those are the operator's, and organization-specific |
+| 2 | The suite deploys no monitoring stack and depends on no hosted one | Every control-plane reading goes through the API server with the existing kubeconfig. The one workload-side reading, `df` in a pod, is the existing exec path, because the point of it is to be what the workload sees |
+| 3 | One verdict rule, used in every case (Section 4) | An earlier revision stated it four different ways in four places, which is worse than choosing wrong |
+| 4 | No case passes on a signal its own fault produced | Deleting a pod moves every container-derived signal by construction, so such a case would pass on a deployment with no monitoring at all |
+| 5 | A case that reads a live value shows it moves | A frozen counter and a gauge that ignores its subject both exist, and neither is usable. A case that reads configuration rather than a value is exempt and says so |
 | 6 | Build only what a case asserts on | No reader, endpoint or classifier for a series no assertion reads. Section 7 lists what was cut and what each would have served |
-| 7 | No case drives the server to OOMKill or fills a filesystem it does not own | The storm and the write are both bounded |
-| 8 | Two readings of one quantity agree within a tolerance derived from the slower sampler's period, or the case says by how much they disagreed | OBS-06 |
-| 9 | No bound is asserted that cannot fail | A timing assertion belongs in Section 3.8 with a fault that can violate it, or it is reported rather than asserted |
-| 10 | Every rule from steps 3, 4 and 6 still holds | This phase adds two readers and amends no existing case's contract |
+| 7 | No case drives the server to OOMKill or fills a filesystem it does not own | Producing the failure would mean deliberately destroying the cluster's storage to observe an ordering |
+| 8 | Two readings of one quantity agree within a stated tolerance, or the case says by how much they disagreed | Two samplers reading at two moments never produce equal numbers. The tolerance is derived from the slower sampler's period and lives in `pkg/slo` |
+| 9 | No bound is asserted that cannot fail | A timing assertion belongs in the SLO table with a fault that can violate it, or it is reported rather than asserted. This is why `AlertSLO` was deleted rather than renamed |
 
 ## 3. What this phase builds
 

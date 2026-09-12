@@ -47,68 +47,48 @@ The same workload log yields all three assertions, which is the point: a
 separate poller, error probe and durability check could disagree with each
 other, and one log cannot.
 
-## 3. Rules, and how each is checked
+## 3. What these two cases assert
 
-A reviewer can accept or reject this phase from this table without reading code.
+The general conventions this phase settled, and which now hold for every case in
+every section, are in [`01-test-plan.md`](01-test-plan.md) Section 4.1: fault
+operations in their own package, live target resolution, a fault that was not
+injected is never measured, one clock per measurement, waiting past the target,
+and bounds from `pkg/slo`. What is specific to CHAOS-01 and CHAOS-02:
 
-| # | Rule | Check |
+| # | Assertion | Where it comes from, and how it is checked |
 |---|---|---|
-| 1 | A fault that was not injected is never measured | An unresolvable target, an underivable process name and a kill that matched nothing each error, and the case reports blocked |
-| 2 | A signal is never sent to a pattern that could match an unrelated process | Unit tested both ways: shells and wrappers refused whether derived or passed by flag, real server names accepted |
-| 3 | A server pod no controller owns is never deleted | The operation refuses the target; the case reports blocked |
-| 4 | Recovery is time to first successful client I/O, never time to pod `Ready` | The number comes from the workload log; pod readiness is a diagnostic only |
-| 5 | Both ends of a recovery measurement come from one clock | The fault reference is read from the writer pod immediately before the fault, and the recovery line comes from that same pod |
-| 6 | A logged success means the server committed the write | The workload fsyncs before logging. Unit tested against a local directory: every logged success is a full-size file |
-| 7 | I/O errors across a failover on a hard mount are zero | Asserted separately from timing. An unreadable log line fails the case rather than counting as a success |
-| 8 | Every write acknowledged before a fault is readable after it | The committed set is swept from a pod on another node, so the read crosses the server rather than the writer's page cache |
-| 9 | No timing literal in a case | Targets come from `pkg/slo` against the profile preflight pinned |
-| 10 | The workload never reports its progress through the filesystem under test | Log and stop file are on the pod's own filesystem, stated in the script itself |
-| 11 | No case asserts how failover happens | Every assertion reads a client, a claim or a Kubernetes object |
-| 12 | Chaos never runs in the fast gate | The fast gate excludes the chaos prefix; visible in the `make` targets |
+| 1 | Recovery is time to first successful client I/O, never time to pod `Ready` | Ready is not serving, and that number would flatter every result. It comes from the workload log; pod readiness is a diagnostic only |
+| 2 | A logged success means the server committed the write | RFC 8881 Section 18.3: after `COMMIT` is acknowledged the data is on stable storage. The workload fsyncs before logging, and a unit test against a local directory asserts every logged success is a full-size file |
+| 3 | I/O errors across a failover are zero | A protocol statement, not a tolerance: a `hard` mount blocks and retries rather than returning an error ([`nfs(5)`](https://man7.org/linux/man-pages/man5/nfs.5.html)). Asserted separately from timing, and an unreadable log line fails the case rather than counting as a success |
+| 4 | Every write acknowledged before the fault is readable after it | Swept from a pod on another node, so the read crosses the server rather than the writer's own page cache |
+| 5 | A signal is never sent to a pattern that could match an unrelated process | Killing everything matching `sh` on a node is a worse outage than the one being measured. Unit tested both ways: shells and wrappers refused whether derived or passed by flag, real server names accepted |
+| 6 | A server pod no controller owns is never deleted | It would not come back, and the case would measure a permanent outage against a recovery target |
+| 7 | The workload never reports its progress through the filesystem under test | A stalled mount must not be able to stall the harness reading its own progress. Log and stop file are on the pod's own filesystem, stated in the script itself |
+| 8 | No case asserts how failover happens | The HA mechanism is a black box (test plan Section 2.3). Every assertion reads a client, a claim or a Kubernetes object |
 
-Rule 7 is a protocol statement, not a tolerance: a `hard` mount blocks and
-retries rather than returning an error
-([`nfs(5)`](https://man7.org/linux/man-pages/man5/nfs.5.html)), so an error is a
-violation and belongs in its own assertion. Rule 8 rests on RFC 8881 Section
-18.3: once `COMMIT` has been acknowledged, the data is on stable storage.
+## 4. What the workload produces
 
-## 4. Data contract
+The shapes are in the code and are not repeated here:
+`pkg/framework/load.go` and `pkg/framework/scripts/write-load.sh` for the
+workload and its log, `pkg/framework/sweep.go` for the record sweep,
+`pkg/chaos/chaos.go` for the fault timeline.
 
-**Workload log**, one append-only line per write attempt, on the pod's own
-filesystem:
+What matters about them, and what a later change must not break:
 
-| Field | Type | Meaning |
-|---|---|---|
-| outcome | `OK` or `ERR` | whether the write committed |
-| index | integer from 1, monotonic | which attempt |
-| at | Unix seconds, pod clock | when the attempt finished |
-
-`at` is when the attempt **finished**, so the first `OK` after the fault is the
-moment the outage ended. Resolution is one second against targets of 60 seconds
-and up. A line the harness cannot parse is kept and fails the case: reporting
-zero errors from a partly unreadable log is worse than reporting the problem.
-
-**Records on the share**: `rec-<index>`, 4096 bytes. Absent or short counts as
-lost. The set a fault may not lose is every index logged `OK` at or before the
-fault time.
-
-**Fault timeline**: one entry per fault, naming when, what, which target, and
-what was matched or owned. Triage only, in the artifact bundle, asserted on by
-nothing.
+- The log line's time is when the attempt **finished**, so the first success
+  after a fault is the moment the outage ended.
+- Resolution is one second, against targets of 60 seconds and up.
+- A line the harness cannot parse is kept and fails the case. Reporting zero
+  errors from a partly unreadable log is worse than reporting the problem.
+- The set a fault may not lose is every index logged as committed at or before
+  the fault time, and nothing weaker.
+- The fault timeline is triage only. Nothing asserts on it.
 
 The lock probe in step 4 reuses this log format unchanged, so one parser serves
-both. Adding a fault-kind or latency field is backward compatible. Moving the
-log onto the share would not be, and rule 10 exists to prevent it.
+both. Moving the log onto the share would break assertion 7 above, which is why
+it is stated as an assertion rather than left to habit.
 
 ## 5. Decisions
-
-**The operations live in their own package, not on the fixture.** Faults are the
-one thing a reader should be able to enumerate in one file.
-
-**Targets are resolved live.** Preflight is cached per cluster and names the pod
-that was there an hour ago; chaos cases move pods around, including pods this
-suite deleted itself. A stale target either fails to act or acts on the wrong
-thing.
 
 **The process name comes from the flag, else the container command, and both are
 checked.** The container command is the only place a cluster states what the
@@ -124,10 +104,6 @@ starts the measurement at the wrong moment.
 **One write per second.** The targets are 60 to 120 seconds at one second of
 resolution. A tighter loop fills the share without sharpening anything.
 
-**Wait past the target, not up to it.** A case that gives up at the SLO reports
-"timed out" where it could report how long recovery actually took, and the
-second is what a defect report needs.
-
 **CHAOS-02 asserts lock exclusivity after the failover, not the reclaim
 mechanism.** A lock is taken before the fault and never released, so grace has
 outstanding state to reclaim and the case cannot pass vacuously. Whether the
@@ -139,12 +115,9 @@ Alternatives rejected, each for one reason:
 | Option | Why not |
 |---|---|
 | A per-platform chaos interface now | Both operations here are Kubernetes operations or a node-agent signal, and neither differs per platform. The interface arrives with node power, which does |
-| Measure recovery by polling from the harness | Starts the clock when the harness notices, not when the fault landed |
-| Measure recovery from the server pod reporting `Ready` | Ready is not serving. That number flatters every result |
-| Take the fault time from the workstation clock | Compares two clocks; a few seconds of skew is invisible and moves every measurement |
+| Measure recovery by polling from the harness | Starts the clock when the harness notices, not when the fault landed, and the client is where the outage is felt |
 | A workload without fsync | A success would mean the client accepted the write, which says nothing about durability |
 | Force delete the server pod | The measurement would start before the outage does |
-| Skip when the fault cannot be injected | Blocked and skipped read the same in a test runner but not to a person. Why a cluster could not be injured is itself the finding |
 
 ## 6. Configuration
 
@@ -173,6 +146,11 @@ of process names.
 - **Node and network faults moved.** They were "a later phase" here and are now
   step 10, after PROV, DATA, OBS, SEC and SCALE are closed out.
 
+- **The conventions moved out.** What this phase settled about faults in
+  general (their package, live targets, one clock, waiting past the target, a
+  fault that was not injected is never measured) is in the test plan's Section
+  4.1, where every later phase inherits it rather than rediscovering it here.
+
 Open items this phase left, still open: the process name is not discoverable on
 every server, and server discovery without a selector remains a heuristic whose
 exclusion of the suite's own pods is unit tested, because getting it wrong points
@@ -183,9 +161,9 @@ the chaos cases at the harness.
 - [RFC 8881](https://www.rfc-editor.org/rfc/rfc8881.html) Section 8.4.2 for what
   a server does on restart, and Section 18.3 for what `COMMIT` guarantees.
 - [`nfs(5)`](https://man7.org/linux/man-pages/man5/nfs.5.html) for `hard` mount
-  retry behaviour, which is rule 7.
+  retry behaviour, which is assertion 3.
 - Kubernetes [pod lifecycle and
   eviction](https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/)
   for what a graceful delete does, and the [API
   reference](https://kubernetes.io/docs/reference/kubernetes-api/) for owner
-  references, which is how rule 3 is enforced.
+  references, which is how assertion 6 is enforced.

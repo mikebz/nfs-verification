@@ -58,10 +58,16 @@ that renaming or renumbering one does not leave a stale pointer here.
     line; a typo fix does not move it. Both dates are checkable against history:
     `TZ=UTC git log --diff-filter=A --format=%ad --date=format-local:%F -1 -- <file>`
     for created, and the same without `--diff-filter=A` for the last change.
-  - Keep it short enough to be read in one sitting. Decisions and the reasons
-    for them, the rules a reviewer can accept or reject the phase from, the data
-    contract, and what was deferred. Not a restatement of the test plan's case
-    table, and not a narrative of every draft.
+  - Keep it short enough to be read in one sitting. **What is being tested and
+    why, and the decisions, including the ones that were later reversed.** Not a
+    restatement of the test plan's case table, not a narrative of every draft,
+    and not a copy of anything the code already states: field lists, output
+    formats, subcommands and constants belong in the code, and the doc links to
+    the file instead of repeating a table that goes stale the first time someone
+    edits it.
+  - A convention that would hold for any case, whatever section it comes from,
+    is not a phase decision. It goes in the test plan's harness design section,
+    where the next phase inherits it instead of rediscovering it.
   - When a later phase overturns a decision, record the supersession in the
     later document and in the earlier one's "what changed after this was
     written" section. The decision itself stays where it was made.
@@ -328,11 +334,17 @@ Recurring review feedback, all of it from this repository:
 
 ## Record what a real run teaches
 
-The findings log in `docs/` is the memory of this project. When a run against a
-real cluster teaches something worth keeping, add an `F-NNN` entry at the top saying
-what happened, why, what changed in the code, and what it implies for the system
-under test as opposed to the harness. A finding that lives only in a PR comment
-is lost by the next PR.
+The findings log in `docs/` is the memory of this project, and **the citation of
+record.** When a run against a real cluster teaches something worth keeping, add
+a dated `F-NNN` entry at the top saying what happened, why, what changed in the
+code, and what it implies for the system under test as opposed to the harness. A
+finding that lives only in a PR comment is lost by the next PR.
+
+Cite it afterwards rather than re-explaining it. A case that skips or reports
+blocked, a constant that is the value it is, a teardown step that looks like more
+work than it should be: if the reason came from a real run, the code comment and
+the design doc name the `F-NNN`. That is what keeps the explanation in one place
+and lets the next person read the whole story instead of a summary of it.
 
 Not every bug is a finding. A finding is something a future run would otherwise
 have to rediscover: a hazard in the architecture, a cluster precondition nobody

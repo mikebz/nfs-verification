@@ -231,8 +231,9 @@ func (f *Framework) WaitPVCCapacity(ctx context.Context, name, size string, time
 // No condition at all is the third answer, and the one that costs the most time
 // to work out from the outside: the claim was accepted for resize and nothing
 // ever picked it up. A StorageClass may advertise allowVolumeExpansion whether
-// or not the provisioner behind it can perform one, so this says where to look
-// rather than leaving a bare timeout.
+// or not the provisioner behind it can perform one, which is F-004 in
+// docs/findings.md, so this says where to look rather than leaving a bare
+// timeout.
 func describeResizeConditions(pvc *corev1.PersistentVolumeClaim) string {
 	var parts []string
 	for _, c := range pvc.Status.Conditions {

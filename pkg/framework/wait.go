@@ -17,7 +17,10 @@ const (
 	// PodTerminateTimeout bounds teardown's wait for pods to leave the API. It
 	// is deliberately short: test pods have a 5 second grace period, so a pod
 	// still present after this is a node that has stopped answering, and every
-	// case paying five minutes for that exhausts the go test timeout.
+	// case paying five minutes for that exhausts the go test timeout. Both
+	// halves of that are field findings: docs/findings.md F-001 for why a node
+	// that stops answering is the dangerous state rather than a slow unmount,
+	// and F-003 for a wrapper that wedged every terminating pod.
 	PodTerminateTimeout = 90 * time.Second
 	// ArtifactTimeout bounds one case's artifact collection.
 	ArtifactTimeout = 60 * time.Second

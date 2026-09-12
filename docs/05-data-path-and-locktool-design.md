@@ -60,72 +60,55 @@ specific byte survived a crash. Three gaps:
 
 DATA-14 was built as designed and then removed. Section 7 says why.
 
-## 3. Rules, and how each is checked
+## 3. What these cases assert
 
-| # | Rule | Check |
+Shared conventions, including probing a tool before using it and reporting
+blocked when it is absent, are in [`01-test-plan.md`](01-test-plan.md) Section
+4.1. What is specific to the data path:
+
+| # | Assertion | Where it comes from, and how it is checked |
 |---|---|---|
-| 1 | A pod dying and a node dying are different failures; a case says which it injected | DATA-06 injects a pod death and asserts one lease as an upper bound, classifying which mechanism released the lock. Node loss is CHAOS-03 and SEC-07 |
-| 2 | Locks are asserted only on a mount that sends them to the server, per lock type | The lock cases read `/proc/mounts` first and report blocked naming the option |
+| 1 | A pod dying and a node dying release locks differently, and a case says which it injected | One lease per client per server, shared by every mount and pod on that node ([kernel client-identifier](https://docs.kernel.org/filesystems/nfs/client-identifier.html)). A pod's death closes descriptors in about a second; a node's death drops every pod's locks together when the lease expires. DATA-06 injects the first and bounds it by one lease; node loss is CHAOS-03 and SEC-07 |
+| 2 | Locks are asserted only on a mount that sends them to the server, per lock type | `nolock` and `local_lock=all\|flock\|posix` keep locks on the node, so cross-node exclusion does not exist to be tested and a failure would name the server for a mount option's fault. The lock cases read `/proc/mounts` first and report blocked naming the option |
 | 3 | A lock the harness cannot express is never silently replaced by a weaker one | A whole-file lock stands only where the case says whole file |
-| 4 | A mount option a case depends on is read back from the node before anything is asserted on it | DATA-08 confirms `noac` in `/proc/mounts` on the reader's node; a dropped option fails the case rather than passing vacuously |
-| 5 | A force delete does not return until the node released the mount, and teardown refuses a claim whose unmount was never proven | The fixture marks the claim unproven, the wait clears the mark only on an observed unmount, and `DeleteCaseObjects` keeps and names every still-marked claim |
-| 6 | Data never committed may be absent; that is never a failure | DATA-13 passes on `absent` and `short`, records both |
-| 7 | A short record is acceptable only where no fsync was issued; a wrong byte never is | The sweep's four verdicts, Section 4 |
-| 8 | A tool the image may not carry is probed before use; its absence is blocked, naming the flag | DATA-07 probes `oflag=direct`, DATA-11 probes `fallocate -p` |
-| 9 | An operation NFSv4.1 does not define is recorded as unsupported, not failed | DATA-11 records an `EOPNOTSUPP` punch on a 4.1 mount |
-| 10 | A listing racing deletes may miss an entry; it may never return a name that was never created | DATA-10 asserts on `unknown` names and records counts |
-| 11 | Every file a case verifies is verified by content | The existence check is gone from the durability path |
-| 12 | Steps 3 and 4 still hold | `make test-chaos` passes unchanged before and after the extensions |
+| 4 | A mount option a case depends on is read back from the node before anything is asserted on it | Otherwise a driver that dropped `noac` turns DATA-08 into a slower DATA-04 that passes when the timing is kind |
+| 5 | A force delete does not return until the node released the mount, and teardown refuses a claim whose unmount was never proven | This is [F-001](findings.md)'s exact ordering. A force-deleted pod is not in the API, so the usual "is a pod still using this claim" check sees nothing; the fixture marks the claim unproven and only an observed unmount clears it |
+| 6 | Data never committed may be absent, and that is never a failure | RFC 8881 Section 18.3 promises durability after `COMMIT` and nothing before it |
+| 7 | A short record is acceptable exactly where no fsync was issued; a wrong byte never is | Without an fsync the client is free to have flushed a prefix, and a prefix is lawful. A wrong byte inside it is corruption under any reading |
+| 8 | An operation NFSv4.1 does not define is recorded as unsupported, not failed | Hole punching is NFSv4.2 (RFC 7862), and preflight pins `vers=4.1` |
+| 9 | A listing racing deletes may miss an entry; it may never return a name that was never created | The defect this comes from is a use-after-free in directory chunk reuse during READDIR, which surfaces as an invented name, not as a count being off |
+| 10 | Every file a case verifies is verified by content | Existence is not a check. [F-007](findings.md) is what happens when it is treated as one |
 
-## 4. Data contract
+## 4. What the tools produce
 
-**`locktool`**, three subcommands, one line of output each, parsed by
-`strings.Fields` and a switch:
+The shapes are in the code: `cmd/locktool/main.go` for the three subcommands and
+their output, `pkg/framework/locktool.go` for how they are driven,
+`pkg/framework/sweep.go` for the record verdicts, `pkg/framework/dircensus.go`
+for the directory census, and `pkg/slo/slo.go` for every bound. What matters
+about them:
 
-| Subcommand | Prints |
-|---|---|
-| `hold` (path, start, len, mode, run-file, state-file) | `launched`, then `waiting`, `held`, `released` or `failed` in the state file |
-| `try` (path, start, len, mode) | `GRANTED`, or `REFUSED type=<r\|w> start=<n> len=<n>` |
-| `getlk` (path, start, len, mode) | `FREE`, or `HELD type=<r\|w> start=<n> len=<n>` |
-
-`len` of 0 means "to end of file", which is how a whole-file `fcntl` lock is
-expressed. Exit codes separate refusal (1) from error (2), because a refusal is
-the expected result in half these cases and an error never is.
-
-**`hold` never blocks in `F_SETLKW`.** A blocking acquire cannot notice its
-run-file being removed, and on a hard mount the process may be unkillable in `D`
-state, which leaves the pod `Terminating` and turns teardown into the
-F-001-adjacent path it exists to avoid. It polls `F_SETLK` at the probe rate
-instead.
-
-**No `pid` field.** The protocol does not carry one: a denied `LOCK` or `LOCKT`
-gives the conflicting offset, length and type plus an opaque lock owner, and
-nothing that identifies a process on another node. Which pod holds which range is
-something the harness knows because it put it there.
-
-**`getlk` as well as `try`**, because `F_SETLK` answers "who holds this" by
-acquiring, which changes what every later attempt observes. CHAOS-06 asserts
-"still held by the original holder" and a probe that acquires cannot say that.
-
-**Record sweep verdicts.** A record is `<dir>/rec-<index>`, `RecordBytes` long,
-filled with a pattern derived from the index, so any byte's expected value is
-computable from its offset:
-
-| Verdict | Meaning | DATA-12 | DATA-13 |
-|---|---|---|---|
-| `correct` | full length, every byte as written | pass | pass |
-| `absent` | no file, or zero length | **fail** | pass, recorded |
-| `short` | correct prefix, less than full length | **fail** | pass, recorded |
-| `wrong` | a differing byte at a written offset, or longer than `RecordBytes` | **fail** | **fail** |
-
-The verdicts are exhaustive over observed length. A record that grew is a byte
-nobody wrote. The sweep runs in one exec for the whole set, because a round trip
-per record would take longer than the outage being measured, and reports the
-index and offset of the first wrong byte.
-
-**Directory census** for DATA-10: `created`, `listed`, `deleted`, and `unknown`,
-the names a listing returned that do not match `e-<index>` in range. `unknown` is
-the assertion; `listed` is a record.
+- **`locktool hold` never blocks in `F_SETLKW`.** A blocking acquire cannot
+  notice its run-file being removed, and on a hard mount the process may be
+  unkillable in `D` state, which leaves the pod `Terminating` and turns teardown
+  into [F-001](findings.md)'s path. It polls instead.
+- **Nothing prints a holder's pid.** The protocol does not carry one: a denied
+  `LOCK` or `LOCKT` gives the conflicting offset, length and type plus an opaque
+  lock owner, and nothing that identifies a process on another node. Which pod
+  holds which range is something the harness knows because it put it there.
+- **`getlk` exists as well as `try`**, because `F_SETLK` answers "who holds
+  this" by acquiring, which changes what every later attempt observes. CHAOS-06
+  asserts "still held by the original holder", and a probe that acquires cannot
+  say that.
+- **The sweep returns four verdicts, not a boolean.** `correct`, `absent`,
+  `short` and `wrong` are exhaustive over observed length, and a record longer
+  than it should be is `wrong` whatever its prefix says, because that is a byte
+  nobody wrote. DATA-12 fails on anything but `correct`; DATA-13 fails only on
+  `wrong`. That asymmetry is the whole content of the pair.
+- **The sweep runs in one exec for the whole set.** A round trip per record
+  would take longer than the outage being measured, and would run while the
+  mount is still recovering.
+- **The census asserts on names, and records counts.** A listing racing deletes
+  is supposed to have a count that is off.
 
 ## 5. What a byte-range lock is
 
@@ -198,24 +181,19 @@ locks that also does direct I/O is a harness-specific busybox, and the next case
 adds a fourth thing to it. The cost is that DATA-07 reports blocked rather than
 falling back when an image lacks `oflag=direct`.
 
-**DATA-06 asserts one lease as an upper bound and classifies the release.** The
-client is the node, not the pod: the kernel establishes one lease per server per
-client and every mount and pod on that node shares it
-([client-identifier](https://docs.kernel.org/filesystems/nfs/client-identifier.html)).
-So a pod dying closes descriptors and the lock goes in about a second, affecting
-one pod; a node dying closes nothing and every pod's locks on that node drop
-together when the lease expires. Asserting expiry would fail on a healthy
-cluster; asserting promptness would fail wherever kubelet was slow for reasons
-unrelated to NFS. The plan's bound holds under both, and the recorded
-classification is what makes the result readable. The re-acquirer sits on another
+**DATA-06 bounds the release by one lease and classifies which mechanism
+produced it** (assertion 1). Asserting expiry would fail on a healthy cluster,
+and asserting promptness would fail wherever kubelet was slow for reasons that
+have nothing to do with NFS. The plan's bound holds under both, and the recorded
+classification is what makes the result readable: a second means one
+application's locks moved, a lease means every pod on that node lost theirs, and
+an operator is looking at two different problems. The re-acquirer sits on another
 node so the request crosses the server.
 
-**The force delete waits for the unmount, and teardown carries its own guard.**
-The ordering in DATA-06 is exactly F-001's: force delete, then claim delete. A
-force-deleted pod is not in the API, so the usual "is a pod still using this
-claim" check sees nothing. The fixture marks the claim unproven, and only an
-observed unmount clears it. Leaking a claim is recoverable; wedging a node is
-not.
+**The force delete waits for the unmount rather than trusting the API**
+(assertion 5). This is the "uglier path" [F-001](findings.md)'s follow-up asks
+for, approached from the safe side: the same two API calls, with an observation
+between them. Leaking a claim is recoverable; wedging a node is not.
 
 **DATA-08 reads the option back before asserting on visibility.** Without that,
 a driver that dropped `noac` turns DATA-08 into a slower DATA-04 that passes when

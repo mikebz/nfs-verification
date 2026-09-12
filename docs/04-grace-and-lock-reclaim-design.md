@@ -46,46 +46,46 @@ duration.
 - **Gate naming**: the chaos prefix marks a case that injures the server whatever
   plan section it comes from, which is why OBS-02 and OBS-03 carry it.
 
-## 3. Rules, and how each is checked
+## 3. What these five cases assert
 
-| # | Rule | Check |
+The conventions they share with every other case, including the guard band for
+two clocks, are in [`01-test-plan.md`](01-test-plan.md) Section 4.1. What is
+specific here:
+
+| # | Assertion | Where it comes from, and how it is checked |
 |---|---|---|
-| 1 | Grace is read from what the server publishes, never inferred from a stalled client | The observer's only input is the log stream. No case computes a window from client behaviour |
-| 2 | A case that needs a window and has none reports blocked | CHAOS-07 reports blocked when the observer returns nothing; OBS-03 is the case that fails for the missing signal |
-| 3 | An API timestamp and a pod timestamp are two clocks | The window is narrowed at both ends by `slo.ClockSkewGuard`. Unit tested on the arithmetic, including a grant exactly on a boundary |
-| 4 | Reclaim is asserted from both ends | Every reclaim assertion reads the holder's state and probes from a second client. A client that lost its lock does not find out until it uses it |
-| 5 | Every lock the case took, not one | The reclaim case takes locks on several files from two clients and reports a fraction against the SLO row, which is 100% |
-| 6 | A new lock granted during grace fails, deliberate or not | The assertion is on the grant. The message names both readings and the recovery backend preflight recorded |
-| 7 | A refusal is not evidence that grace was enforced | The window comes from the server's own signal first; only then is the probe read inside it |
-| 8 | Repeated failover is measured per cycle | Each cycle is asserted against the restart target; the wall clock is recorded only |
-| 9 | Grace entered more than once per failover is a re-entry loop | The count is per cycle, and the failure message says grace re-entry, not client stall |
-| 10 | A case that injures the server is named for the chaos gate | All five carry the prefix; the fast gate excludes it |
-| 11 | No case asserts how grace is implemented | Every assertion reads a log line's existence, a lock outcome or a Kubernetes object |
-| 12 | Step 3's rules still hold | The recovery path is step 3's, unchanged, asserted five times by CHAOS-05 |
+| 1 | Grace is read from what the server publishes, never inferred from a stalled client | A stalled client is the symptom this phase exists to tell apart from grace. The observer's only input is the log stream |
+| 2 | A case that needs a window and has none reports blocked | Grace begins when the server restarts, which is later than the fault by an unknown amount, so a window derived from the configured value ends late and would report a lawful grant as a violation. CHAOS-07 reports blocked; OBS-03 is the case that fails for the missing signal ([F-008](findings.md)) |
+| 3 | Reclaim is asserted from both ends: the holder still holds, and a second client is still refused | A client that has lost its lock does not find out until it uses it, so the holder alone proves nothing |
+| 4 | Every lock the case took, not one | The SLO row is 100%, and a case that checks one lock cannot report a fraction |
+| 5 | A new lock granted during grace fails, whether the server granted it deliberately or lost the state that would have refused it | RFC 8881 Section 8.4.2 bars new state during grace. Neither reading is acceptable, and the case does not have to tell them apart to fail |
+| 6 | A refusal during an outage is not evidence that grace was enforced | Every attempt fails while the server is down, for the ordinary reason. The window is established from the server's own signal first, and only then is the probe read inside it |
+| 7 | Repeated failover is measured per cycle | A total that fits inside a wall clock proves nothing if one cycle inside it took four minutes |
+| 8 | Grace entered more than once per failover is a re-entry loop, and a finding about the server | It presents as a hung client in front of a healthy server, which the triage runbook calls the most common wrong diagnosis here. The count is per cycle, and the failure message says grace re-entry, not client stall |
+| 9 | No case asserts how grace is implemented | Every assertion reads a log line's existence, a lock outcome or a Kubernetes object |
 
-## 4. Data contract
+## 4. What the observer and the probe produce
 
-**Grace observation**, one entry per transition: `at` (the runtime's timestamp on
-the line), `exit` (false for entry, true for its end), and the line itself for
-the failure message.
+The shapes are in `pkg/framework/grace.go` and `pkg/framework/probes.go`, with
+the bounds in `pkg/slo/slo.go`, and are not repeated here. What matters about
+them:
 
-Entry and exit are two observations, not one interval with a duration: an entry
-with no exit is the re-entry symptom and has to be representable. A line that
-mentions grace but classifies as neither is kept and reported, because reporting
-"grace was never observed" while holding a line that says otherwise would be
-diagnosed as a server defect.
+- **Entry and exit are two observations, not one interval with a duration.** An
+  entry with no exit is the re-entry symptom and has to be representable.
+- **A line that mentions grace but classifies as neither is kept and reported.**
+  Reporting "grace was never observed" while holding a line that says otherwise
+  would be diagnosed as a server defect.
+- **The probe's success means granted and immediately released.** A probe that
+  kept what it was granted would change what the next attempt means.
+- **An attempt that blocks is not an attempt that failed.** A Linux client
+  handling the server's grace error retries in the kernel rather than returning
+  it, so the expected shape during grace is a long gap and then a grant, not a
+  run of refusals. The assertion is about grants, which is why it survives
+  either shape.
+- **The per-cycle record attributes grace entries to one cycle.** The count
+  means nothing summed over a run.
 
-**Lock probe log**: step 3's three fields, same order, same format. `OK` means
-granted and immediately released; a probe that kept what it was granted would
-change what the next attempt means. An attempt that blocks is not an attempt that
-failed: a Linux client handling the server's grace error retries in the kernel
-rather than returning it, so the expected shape during grace is a long gap and
-then a grant, not a run of refusals. The assertion is about grants, which is why
-it survives either shape.
-
-**Per-cycle failover record**: cycle number, fault time (writer pod clock),
-recovery duration, and grace entries observed since the previous cycle. The count
-means nothing summed over a run, which is why it is attributed per cycle.
+The probe log reuses step 3's format, so one parser serves both.
 
 ## 5. Decisions
 
@@ -113,13 +113,14 @@ nothing at all fails OBS-03, and that is a finding rather than a harness gap,
 because an operator on that deployment cannot see grace either. F-008 in
 [`findings.md`](findings.md) is exactly this, met in the field.
 
-**Two clocks are handled with a guard band, not a measured offset.** The window
-is stamped by the kubelet on the server's node, the probe by the client pod;
-there is no way to put both on one clock, because the probe runs on a client by
-construction. The band lives in `pkg/slo`, narrows the window at both ends, and
-makes a boundary grant a note rather than a failure. The direction is deliberate:
-miss a marginal violation rather than file a lawful one. A measured offset was
-rejected as a number nobody checks, against a constant a reviewer can argue with.
+**The two clocks here are unavoidable**, because the window is stamped by the
+kubelet on the server's node and the probe by a client pod, which is on a
+different node by construction. This is the case that produced the guard band
+convention in the test plan: the band narrows the window at both ends, a
+boundary grant is a note rather than a failure, and the direction is deliberate,
+missing a marginal violation rather than filing a lawful one. A measured offset
+was rejected as a number nobody checks, against a constant a reviewer can argue
+with.
 
 **The probe asserts on grants, never on refusals.** During an outage every
 attempt fails for the ordinary reason that the server is not there. The
