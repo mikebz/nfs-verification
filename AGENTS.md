@@ -1,18 +1,23 @@
 # Agent Guide for nfs-verification
 
+Author: mikebz@
+Created: 2026-09-10
+Updated: 2026-09-12
+
 This repository is a test harness, not a product. It verifies NFS RWX
 persistent volumes on Kubernetes by driving a real cluster and asserting what a
 client can observe.
 
 This guide is about **how to work here**: how to approach a change, how to write
 a case, what to claim when you are done, how to behave in review. It is not a
-description of what gets tested, and it must not become one. Read these first:
+description of what gets tested, and it must not become one.
 
-- `docs/01-test-plan.md`: the requirements. Case IDs, Section 0 preconditions,
-  the SLO table, what is in scope for v1.
-- `docs/findings.md`: what running the suite against a real cluster taught us.
-  **Read this before touching teardown, deletion, or anything that unmounts.**
-- `README.md`: layout, flags, and how to build and run.
+**What gets tested lives in `docs/`.** The repository README lists those
+documents and says which answers what, on top of covering layout, flags and how
+to build and run. Read the requirements and the delivery order before you start,
+and read the findings log before touching teardown, deletion, or anything that
+unmounts. This guide names documents by what they are, never by filename, so
+that renaming or renumbering one does not leave a stale pointer here.
 
 ## Three facts that shape the work
 
@@ -32,16 +37,40 @@ description of what gets tested, and it must not become one. Read these first:
 ## Approach to a change
 
 - **Requirements live in the test plan.** If what a case must verify changes,
-  edit `docs/01-test-plan.md`. Do not bury the new version in a PR comment or a
-  commit message.
+  edit the test plan in `docs/`. Do not bury the new version in a PR comment or
+  a commit message.
 - **One vector per change.** A case lands with the harness pieces it needs and
   nothing more. A change that adds a helper no case calls yet does not land.
 - **A large change is two PRs.** Anything you estimate at 1000 lines or more
   lands as a design doc first, approved before implementation code is written.
   Code written ahead of an approved design gets thrown away.
-  - The doc is a numbered file in `docs/`, for example
-    `docs/02-chaos-operations-design.md`, and it links the cases in the test
-    plan it serves so the requirement traces back to one place.
+  - The doc is the next numbered file in `docs/`, and it links the cases in the
+    test plan it serves so the requirement traces back to one place. Add its row
+    to the design doc table in the README in the same change.
+  - It opens with a header block: `Author:`, `Created:`, `Updated:`, `Status:`
+    (designed, shipped, or superseded, with the step and the PR), and `Serves:`
+    (the case IDs and the test plan sections). A reader who gets no further than
+    the header should still know whether the document describes code that exists.
+    Every document in `docs/`, plus this file and the README, carries `Author:`,
+    `Created:` and `Updated:` in UTC. `Created:` never changes once the file has
+    landed. **Move `Updated:` in the same change that alters what the document
+    says**, so a doc nobody has reconciled with the code says so on its first
+    line; a typo fix does not move it. Both dates are checkable against history:
+    `TZ=UTC git log --diff-filter=A --format=%ad --date=format-local:%F -1 -- <file>`
+    for created, and the same without `--diff-filter=A` for the last change.
+  - Keep it short enough to be read in one sitting. **What is being tested and
+    why, and the decisions, including the ones that were later reversed.** Not a
+    restatement of the test plan's case table, not a narrative of every draft,
+    and not a copy of anything the code already states: field lists, output
+    formats, subcommands and constants belong in the code, and the doc links to
+    the file instead of repeating a table that goes stale the first time someone
+    edits it.
+  - A convention that would hold for any case, whatever section it comes from,
+    is not a phase decision. It goes in the test plan's harness design section,
+    where the next phase inherits it instead of rediscovering it.
+  - When a later phase overturns a decision, record the supersession in the
+    later document and in the earlier one's "what changed after this was
+    written" section. The decision itself stays where it was made.
   - The design PR contains only the doc. **No code inside the doc either.**
     State object shapes, exec flows and interfaces in prose and tables, not Go
     or YAML: code in a design doc goes stale the moment implementation starts,
@@ -54,7 +83,7 @@ description of what gets tested, and it must not become one. Read these first:
   flags, the timeouts and the run ID, and they are what a reviewer will run
   when they check your claim. If you need something `make` does not do, add the
   target instead of running a one-off command, so that what you ran is what
-  anyone else can run. `README.md` lists the targets.
+  anyone else can run. The repository README lists the targets.
 - **Settle the open question before implementing, not in the PR.** Where the
   plan marks something unresolved, resolve it first. Implementing against a
   guess and explaining the guess in the PR description is the expensive order.
@@ -75,29 +104,77 @@ no way to tell which of its greens were earned.
 So the order is: establish what the correct assertion is, from the documents
 below; assert that; and report what this deployment does about it. A deployment
 that cannot meet a correct assertion is a finding about that deployment. It goes
-in `docs/findings.md` and stays red, or reports blocked where the rules for the
+in the findings log and stays red, or reports blocked where the rules for the
 case say blocked, and either way the message says whose configuration produced
 it. What it does not do is change the assertion.
 
 **State the assumption, and say where it came from.** Every assertion rests on
 something somebody wrote down, and the citation is what lets a reviewer disagree
-with the assertion rather than with you:
+with the assertion rather than with you. Cite the specific document in the case
+comment. In order of authority:
 
-- **NFSv4.1 semantics**: RFC 8881, and RFC 7530 where v4.0 behaviour is being
-  contrasted. Close-to-open, post-COMMIT durability, lock reclaim during grace
-  and client identity all come from here.
-- **The Linux NFS client**: `Documentation/filesystems/nfs/` in the kernel tree,
-  for anything about mount options, `local_lock`, the shared lease per server,
-  or what a `hard` mount does on retry. Client behaviour is not protocol
-  behaviour and the difference belongs in the comment.
-- **Kubernetes**: the API reference and the component docs, for pod conditions,
-  endpoint readiness, finalizers, kubelet timers and aggregation periods.
-- **CSI**: the specification, for what a driver must implement against what it
-  may implement. Volume statistics, expansion and snapshots are all optional
-  capabilities, and a driver that omits one is not defective.
-- **The implementation in front of us**: the provisioner's flags, its chart
-  templates, its source. The least authoritative source, but enough for a
-  statement about this deployment as long as it is labelled as one.
+**NFS protocol**
+
+- [RFC 8881](https://www.rfc-editor.org/rfc/rfc8881.html), NFSv4.1. The
+  guarantee under test. Section 8, State Management, and Section 8.4.2, Server
+  Failure and Recovery, for leases, grace and reclaim; Section 9, File Locking
+  and Share Reservations, for `LOCK`, `LOCKT`, `LOCKU` and byte ranges; Section
+  10, Client-Side Caching, for what a client may cache; Section 18.3 for
+  `COMMIT`, which is what post-fsync durability means here.
+- [RFC 7530](https://www.rfc-editor.org/rfc/rfc7530.html), NFSv4.0, where v4.0
+  behaviour is being contrasted.
+- [RFC 7862](https://www.rfc-editor.org/rfc/rfc7862.html), NFSv4.2, for
+  `ALLOCATE`, `DEALLOCATE` and `READ_PLUS`. Out of reach on the `vers=4.1` mount
+  preflight pins, which is why DATA-11 records a hole punch rather than
+  asserting one.
+
+**Linux NFS client**, which is not the protocol and where the difference belongs
+in the comment
+
+- [`nfs(5)`](https://man7.org/linux/man-pages/man5/nfs.5.html) for mount
+  options: `hard`, `ac` and `noac`, `local_lock`, `nolock`, and the close-to-open
+  cache consistency the client actually implements.
+- [Kernel NFS documentation](https://docs.kernel.org/filesystems/nfs/), in
+  particular
+  [client-identifier](https://docs.kernel.org/filesystems/nfs/client-identifier.html):
+  one lease per client per server, shared by every mount and every pod on that
+  node. DATA-06 is written around this.
+- [`fcntl(2)`](https://man7.org/linux/man-pages/man2/fcntl.2.html) and
+  [`flock(2)`](https://man7.org/linux/man-pages/man2/flock.2.html) for what an
+  application sees, and why `locktool` exists.
+
+**Kubernetes**
+
+- [Persistent volumes](https://kubernetes.io/docs/concepts/storage/persistent-volumes/),
+  for reclaim policies, [storage object in use
+  protection](https://kubernetes.io/docs/concepts/storage/persistent-volumes/#storage-object-in-use-protection)
+  (PROV-03) and [expansion](https://kubernetes.io/docs/concepts/storage/persistent-volumes/#expanding-persistent-volumes-claims)
+  (PROV-04, PROV-11).
+- [Storage classes](https://kubernetes.io/docs/concepts/storage/storage-classes/),
+  for `volumeBindingMode: WaitForFirstConsumer`, which decides the order in
+  which every case creates its pod and its claim.
+- [Volume snapshots](https://kubernetes.io/docs/concepts/storage/volume-snapshots/)
+  (PROV-05).
+- [Taints and tolerations](https://kubernetes.io/docs/concepts/scheduling-eviction/taint-and-toleration/)
+  for the default `tolerationSeconds: 300` on `not-ready` and `unreachable`, and
+  the non-graceful node shutdown section of
+  [Nodes](https://kubernetes.io/docs/concepts/architecture/nodes/) for the
+  `out-of-service` taint. These are the two platform defaults behind the floor
+  note in test plan Section 3.8, and the reason CHAOS-03 reports blocked on a
+  stock cluster.
+- [Node metrics data](https://kubernetes.io/docs/reference/instrumentation/node-metrics/),
+  the kubelet Summary API that OBS-05 and OBS-06 read.
+
+**CSI**
+
+- [The CSI specification](https://github.com/container-storage-interface/spec/blob/master/spec.md).
+  Volume statistics, expansion and snapshots are optional capabilities; a driver
+  that omits one is not defective, and the cases that need them say so rather
+  than failing the storage system.
+
+**The implementation in front of us**, the least authoritative source, enough
+only for a statement labelled as being about this deployment: the provisioner's
+flags, chart templates and source.
 
 Where no document settles it, say that in the same breath as the assertion:
 "this is this implementation's behaviour, not a protocol guarantee" is a
@@ -179,8 +256,8 @@ told it works stops trusting every later claim, including the true ones.
 
 ## Not breaking the cluster
 
-The rules below are the ones the harness has already violated once. `docs/findings.md`
-has the mechanism; this is what it means for code you write:
+The rules below are the ones the harness has already violated once. The findings
+log has the mechanism; this is what it means for code you write:
 
 - Teardown deletes pods gracefully and waits for them to leave the API before
   touching a claim.
@@ -257,11 +334,17 @@ Recurring review feedback, all of it from this repository:
 
 ## Record what a real run teaches
 
-`docs/findings.md` is the memory of this project. When a run against a real
-cluster teaches something worth keeping, add an `F-NNN` entry at the top saying
-what happened, why, what changed in the code, and what it implies for the system
-under test as opposed to the harness. A finding that lives only in a PR comment
-is lost by the next PR.
+The findings log in `docs/` is the memory of this project, and **the citation of
+record.** When a run against a real cluster teaches something worth keeping, add
+a dated `F-NNN` entry at the top saying what happened, why, what changed in the
+code, and what it implies for the system under test as opposed to the harness. A
+finding that lives only in a PR comment is lost by the next PR.
+
+Cite it afterwards rather than re-explaining it. A case that skips or reports
+blocked, a constant that is the value it is, a teardown step that looks like more
+work than it should be: if the reason came from a real run, the code comment and
+the design doc name the `F-NNN`. That is what keeps the explanation in one place
+and lets the next person read the whole story instead of a summary of it.
 
 Not every bug is a finding. A finding is something a future run would otherwise
 have to rediscover: a hazard in the architecture, a cluster precondition nobody

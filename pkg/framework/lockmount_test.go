@@ -6,7 +6,7 @@ import (
 )
 
 // TestLocalLockingPerLockKind is the check behind rule 2 of
-// docs/04-data-path-and-locktool-design.md: a lock case runs only on a mount
+// docs/05-data-path-and-locktool-design.md: a lock case runs only on a mount
 // that sends its locks to the server, and the options that stop it are
 // per-kind.
 //

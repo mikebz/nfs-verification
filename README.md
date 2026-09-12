@@ -1,17 +1,51 @@
 # nfs-verification
 
+Author: mikebz@
+Created: 2026-09-10
+Updated: 2026-09-12
+
 End-to-end verification of NFS RWX persistent volumes on Kubernetes.
 
-- [`docs/01-test-plan.md`](docs/01-test-plan.md) is the test plan: what gets
-  verified and why.
-- [`docs/plan.md`](docs/plan.md) is the implementation plan: the test approach, and the
-  order the plan gets built in.
-- [`docs/findings.md`](docs/findings.md) records what running the suite against a
-  real cluster taught us.
+This repository holds the harness, preflight, the fault injection package, grace
+observability, `locktool`, the kubelet stats reader, and the thirty-five cases
+listed below: all of PROV, all of DATA except the deferred soak, both SEC cases
+that predate step 8, five CHAOS cases and four OBS cases. The rest land in the
+steps listed in [`plan.md`](plan.md).
 
-This repository currently holds the harness skeleton, preflight, twenty-seven cases,
-the fault injection engine, and grace observability. The remaining cases land in the steps listed in
-[`docs/plan.md`](docs/plan.md).
+## Documentation
+
+Read this file first, then the test plan, then the delivery order. Thirty
+minutes on those two is enough to read any case in the repository; the design
+docs are reference material, not prerequisites.
+
+| Document | What it answers |
+|---|---|
+| [`docs/01-test-plan.md`](docs/01-test-plan.md) | What gets verified and why: the architecture under test, every case ID, the SLO table |
+| [`plan.md`](plan.md) | In what order it gets built, and what is done. A working document in the root, not part of the record in `docs/` |
+| [`docs/findings.md`](docs/findings.md) | What running against a real cluster taught, `F-001` upward. **Read it before touching teardown, deletion, or anything that unmounts** |
+| [`AGENTS.md`](AGENTS.md) | How to work here: change size, case conventions, the sources every assertion cites, what to claim when you are done |
+
+One design doc per delivery step, in `docs/`, each stating at its top which
+cases it serves and whether it shipped:
+
+| Design doc | Step | Cases | Status |
+|---|---|---|---|
+| [`03-chaos-operations-design.md`](docs/03-chaos-operations-design.md) | 3 | CHAOS-01, CHAOS-02 | Shipped |
+| [`04-grace-and-lock-reclaim-design.md`](docs/04-grace-and-lock-reclaim-design.md) | 4 | CHAOS-05, CHAOS-06 (whole-file locks), CHAOS-07, OBS-02, OBS-03 | Shipped |
+| [`05-data-path-and-locktool-design.md`](docs/05-data-path-and-locktool-design.md) | 6 | DATA-06 to DATA-13, the byte-range half of DATA-05 and the disjoint-range half of CHAOS-06, plus `locktool` | Shipped, DATA-14 deferred |
+| [`06-observability-design.md`](docs/06-observability-design.md) | 7 | OBS-01 (half), OBS-05, OBS-06, OBS-07 | In progress: OBS-06 and the kubelet reader shipped |
+
+Every fact has one home: what a case must verify is the test plan's, what is
+built and how to run it is this file's, why a phase is shaped the way it is
+belongs to its design doc, and what a real run taught is `findings.md`'s. A copy
+anywhere else is how these documents drifted the first time.
+
+A case reports one of four things. **Passed**: the assertion held. **Failed**:
+the deployment did not do what the protocol, the Kubernetes API or the CSI spec
+requires, which is a finding about the deployment. **Blocked**: the case could
+not run, because the cluster or the tools image gave it nothing to assert on,
+and the reason is itself the finding. **Skipped**: the cluster lacks a
+capability the case needs, discovered at preflight.
 
 ## Layout
 
@@ -20,7 +54,7 @@ the fault injection engine, and grace observability. The remaining cases land in
 | `pkg/slo` | Timing and correctness targets, and the two lease/grace profiles |
 | `pkg/env` | The environment record written to `artifacts/<run-id>/environment.json` |
 | `pkg/framework` | Clients, per-case fixture, pods and PVCs from embedded manifests, exec, locks and the lock probe, locktool delivery, the grace observer, the kubelet stats reader, the privileged node agent, artifact collection |
-| `pkg/framework/manifests` | The YAML the suite applies: the client pod and the node agent DaemonSet |
+| `pkg/framework/manifests` | The YAML the suite applies, rendered and decoded into typed objects so it can be diffed against what was applied: the client pod and the node agent DaemonSet |
 | `pkg/framework/scripts` | The shell the suite runs inside pods, as scripts rather than as Go strings |
 | `pkg/chaos` | The fault operations the CHAOS cases inject |
 | `pkg/preflight` | Section 0 checks and all discovery |
@@ -73,7 +107,10 @@ cases (`-run '^TestObs'`), and `test-sec` runs security cases (`-run '^TestSec'`
 
 The suite creates no namespaces. Everything lands in `default`. Objects are
 named `nfsv-<case>-<run>-<what>` and labelled with the run and the case, so
-teardown deletes exactly that selector, pods first and then claims. The full run
+teardown deletes exactly that selector, pods first and then claims. A namespace
+per case would be tidier and is deliberately not done: it hides ownership behind
+a generated name, and it puts a namespace deletion, which is slow and can wedge
+on a stuck finalizer, on the path of every case. The full run
 ID stays in the name: truncating it collides across runs and turns triage into
 guesswork. The node agent is privileged by design, so a cluster enforcing a
 restricted Pod Security level on `default` cannot run the suite as it stands.
@@ -109,10 +146,15 @@ and dmesg from every involved node, and the injected-fault timeline.
 
 ## Timeouts and budgets
 
-Every wait in the harness is bounded, and the bounds are named constants in
-`pkg/framework/wait.go` rather than literals at call sites. A timeout bug here
-does not look like a timeout bug: it looks like a test runner killed by its own
-`-timeout` and a pile of leaked claims.
+Every wait in the harness is bounded. The bounds below are named constants, the
+exported ones in `pkg/framework/wait.go` and the two lowercase ones next to the
+code they bound, and a new wait should take one of them rather than a literal. A
+handful of helpers predate the rule and still pass their own: the workload, lock
+and lock-probe helpers wait two minutes for a holder to report, `io.go` waits a
+minute for a writer to start, and `pkg/preflight` derives `classProbeTimeout`
+from `BindTimeout`. A timeout bug here does not look like a timeout bug: it
+looks like a test runner killed by its own `-timeout` and a pile of leaked
+claims.
 
 | Constant | Value | What it bounds |
 |---|---|---|
@@ -122,7 +164,12 @@ does not look like a timeout bug: it looks like a test runner killed by its own
 | `PodTerminateTimeout` | 90s | A deleted pod leaving the API |
 | `DeleteTimeout` | 5m | The whole cleanup for one case |
 | `ArtifactTimeout` | 60s | The failure bundle, inside the cleanup budget |
+| `ExpandTimeout` | 5m | One volume expansion, control plane round trip included |
+| `SnapshotProbeTimeout` | 15s | A `VolumeSnapshot` reaching ready |
+| `ServerOutageObserveDuration` | 10s | How long claim state is watched while the server is down |
+| `FastPoll` | 250ms | Between polls where a second would blur the measurement |
 | `nodeInspectTimeout` | 10s | One node's inspection, per node |
+| `kubeletReadTimeout` | 30s | One kubelet stats read, per node |
 
 Two of these are not round numbers by accident. Test pods carry a 5 second
 termination grace period, so a pod still in the API after
@@ -143,12 +190,12 @@ charged to every case eats the `go test -timeout` budget for the package.
 | PROV-02 | Provision 20 RWX PVCs concurrently; no duplicate export IDs or paths | PROV |
 | PROV-03 | Delete a claim a pod still mounts; it stays Terminating until the mount is gone | PROV |
 | PROV-04 | Volume expansion, or a clean rejection when the class does not advertise it | PROV |
-| PROV-05 | Snapshot and restore, or clean rejection if unsupported | PROV |
+| PROV-05 | Snapshot and restore verified from two nodes, or clean rejection where no snapshot class names the driver | PROV |
 | PROV-06 | Reclaim policy Retain: PV persists and rebinds with data intact | PROV |
 | PROV-07 | Provision while server pod is down; recovers cleanly once server returns | PROV |
 | PROV-08 | Delete claim while server pod is down; completes deletion once server returns | PROV |
 | PROV-09 | Rapid create/delete churn (100 cycles); no export ID or fd exhaustion | PROV |
-| PROV-10 | Volume name edge cases (1000-character names, boundary RFC 1123 names) | PROV |
+| PROV-10 | Volume name edge cases: invalid names rejected at admission, and a 253-character name binds, mounts and exports correctly | PROV |
 | PROV-11 | Two-stage volume expansion under active I/O; zero I/O errors | PROV |
 | DATA-01 | Four pods writing at once, four files, cross-verified checksums | DATA |
 | DATA-02 | Four pods appending to one file through a held-open descriptor | DATA |
@@ -165,14 +212,15 @@ charged to every case eats the `go test -timeout` budget for the package.
 | DATA-13 | Negative durability: un-fsynced records may be absent, never wrong | DATA |
 | SEC-01 | uid and gid preservation across pods on two nodes | SEC |
 | SEC-02 | What the export does to a root-owned write, and whether it does it coherently | SEC |
+| OBS-02 | A failover reaches the operator with a timestamp and a measurable duration | OBS |
+| OBS-03 | Grace entry and exit are both observable, and the window is measurable | OBS |
 | OBS-04 | A mount that cannot succeed reaches the operator as a Kubernetes Event | OBS |
+| OBS-06 | The control plane reports this volume's usage, it agrees with `df` in the pod, and both move with the workload | OBS |
 | CHAOS-01 | SIGKILL the server process during an active write | CHAOS |
 | CHAOS-02 | Delete the server pod during an active write, with a lock held across it | CHAOS |
 | CHAOS-05 | Five failovers in a row, each recovering on its own and entering grace once | CHAOS |
 | CHAOS-06 | Whole-file and disjoint byte-range locks across a failover, read from both ends | CHAOS |
 | CHAOS-07 | A second client attempting a new lock while the server is in grace | CHAOS |
-| OBS-02 | A failover reaches the operator with a timestamp and a measurable duration | OBS |
-| OBS-03 | Grace entry and exit are both observable, and the window is measurable | OBS |
 
 Several are deliberately careful about what they blame. SEC-01 reports
 **blocked**, with the export's own error in the message, when an ordinary uid
@@ -274,7 +322,21 @@ Lease and grace must match one of the two profiles in `pkg/slo`: tuned (20s/30s)
 or default (60s/90s). A third value fails preflight rather than silently
 invalidating every timing assertion.
 
-## Two details that bite on real clusters
+The rest are operational rather than descriptive of the deployment, and `-h`
+prints all of them with their defaults:
+
+| Flag | Default | What it does |
+|---|---|---|
+| `-kubeconfig`, `-context` | `$KUBECONFIG` then `~/.kube/config`, current context | which cluster, resolved once by client-go |
+| `-artifacts-dir`, `-run-id` | `artifacts`, a UTC timestamp | where the bundle lands and what names the objects; a relative directory is anchored to the repository root |
+| `-profile` | either accepted | require a lease/grace profile, `tuned` or `default` |
+| `-preflight-max-age`, `-env-file` | 8h, none | how long a cached preflight result stays usable, and a specific record to reuse instead |
+| `-csi-driver` | taken from the StorageClass | names the driver when the class does not |
+| `-delegations` | `auto` | whether delegations are enabled; gates CHAOS-18, which is not written yet |
+| `-keep-objects`, `-v-harness` | off | leave a case's objects behind for triage, and log every harness action |
+| `-platform`, `-gcloud-project`, `-gcloud-zone`, `-node-power-cmd` | `auto`, empty | how a node would be powered off. Recorded in `environment.json` and read by the capability probe that gates CHAOS-03; the node power operations themselves land in step 10 |
+
+## Three details that bite on real clusters
 
 **StorageClasses that bind on first consumer.** GKE's Filestore classes, and
 plenty of others, set `volumeBindingMode: WaitForFirstConsumer`. Such a claim
@@ -302,14 +364,32 @@ The harness compiles, `go vet` is clean, and the unit tests in `pkg/slo` and
 
 The data path cases were run against a three-worker GKE cluster on 2026-09-11,
 on Kubernetes v1.37 with the in-cluster `nfs-server-provisioner`. DATA-05
-through DATA-09, DATA-11, DATA-12, DATA-13 and CHAOS-06 passed, along with the
-SEC, OBS and CHAOS cases alongside them. DATA-11's hole-punch half reported
-blocked, which is the documented answer on a busybox image.
+through DATA-09, DATA-11, DATA-12, DATA-13 and CHAOS-06 passed, with the SEC
+cases alongside them. DATA-11's hole-punch half reported blocked, which is the
+documented answer on a busybox image.
 
-Two things that suite does not cover today. **DATA-10 has not been run**, so
-whether a directory-backed export holds 100k entries is still unmeasured. And
-**DATA-14 is deferred**, so nothing covers sustained mixed load at scale; that
-gap belongs to SCALE-07. Section 3.2 of the test plan has the reasoning.
+Not everything on that cluster is green, and none of the red is the data path.
+This provisioner never announces grace, so **OBS-03 fails** and **CHAOS-07
+reports blocked**, which is F-008; CHAOS-06's reclaim assertion needs no grace
+window, which is why it passed anyway. **OBS-02 failed** on that run for a
+reason unrelated to grace. A green CHAOS run against this provisioner is not
+evidence that grace behaves.
+
+OBS-06 and the kubelet stats reader were run against the same cluster on
+2026-09-11. The control plane publishes per-volume usage, it agrees with `df`
+inside the pod exactly, and both move with the write. The case still comes back
+red on its last assertion, because the export has no per-volume quota and both
+sources are therefore reporting the provisioner's backing filesystem rather than
+the 1 GiB claim. That is F-009, and it is a limitation of this deployment rather
+than a defect in the server or the harness.
+
+Three gaps in what runs today. **DATA-10 has not been run**, so whether a
+directory-backed export holds 100k entries is still unmeasured. **DATA-14 is
+deferred**, so nothing covers sustained mixed load at scale; that gap belongs to
+SCALE-07, and Section 3.2 of the test plan has the reasoning. And **step 7 is
+two thirds unwritten**: OBS-05, OBS-07 and the configuration half of OBS-01 have
+a design doc and no code
+([`docs/06-observability-design.md`](docs/06-observability-design.md)).
 
 An earlier run found two cases reporting more than they had measured; both are
 fixed and the reasoning is F-007.

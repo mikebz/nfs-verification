@@ -413,7 +413,8 @@ func TestObsVolumeUsageAgreesWithControlPlane(t *testing.T) {
 			"are measuring that filesystem rather than this volume, and no threshold on that number "+
 			"describes this claim. This is the provisioner's configuration, not the NFS server: the "+
 			"driver behind StorageClass %s is %s, and a quota option it does not have on cannot produce "+
-			"a per-volume total", pvc.Name, claimBytes, after.Pod.CapacityBytes, f.Env.StorageClass, csiDriver(f))
+			"a per-volume total. See F-009 in docs/findings.md",
+			pvc.Name, claimBytes, after.Pod.CapacityBytes, f.Env.StorageClass, csiDriver(f))
 	}
 }
 

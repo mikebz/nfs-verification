@@ -1,10 +1,33 @@
 # Findings
 
-Things learned by running the suite against a real cluster that are worth
-remembering. Each entry says what happened, why, what changed in the code, and
-what it implies for the system under test as opposed to the harness.
+Author: mikebz@
+Created: 2026-09-10
+Updated: 2026-09-12
 
-New entries go at the top.
+Things learned by running the suite against a real cluster that are worth
+remembering. Each entry is dated, and says what happened, why, what changed in
+the code, and what it implies for the system under test as opposed to the
+harness.
+
+**This file is the citation of record.** A case that skips or reports blocked, a
+constant that is the value it is, a teardown step that looks like more work than
+it should be: if the reason came from a real run, the code comment and the design
+doc name the `F-NNN` rather than re-explaining it. A reason that lives only in a
+commit message or a pull request comment is lost by the next one.
+
+New entries go at the top, and take the next number.
+
+| # | Found | What it says | Cited by |
+|---|---|---|---|
+| [F-009](#f-009-the-export-has-no-per-volume-quota-so-capacity-monitoring-describes-the-backing-filesystem-and-not-the-claim) | 2026-09-11 | The export has no per-volume quota, so both capacity sources describe the backing filesystem rather than the claim | OBS-06's failure message |
+| [F-008](#f-008-nfs-server-provisioner-never-announces-grace-so-the-grace-cases-cannot-run-against-it) | 2026-09-11 | This provisioner never announces grace, so OBS-03 fails and CHAOS-07 reports blocked | CHAOS-07's blocked message, doc 04, doc 06 |
+| [F-007](#f-007-two-cases-in-the-data-path-phase-reported-results-they-had-not-measured) | 2026-09-11 | Two cases reported results they had not measured | doc 05 |
+| [F-006](#f-006-scriptslock-probesh-passed-flock--w-which-busybox-does-not-have) | 2026-09-11 | `flock -w` does not exist on busybox, so the lock probe never waited | `scripts_test.go` |
+| [F-005](#f-005-exponential-mount-propagation-in-gkes-mountnfs-wrapper-wedges-worker-nodes) | 2026-09-11 | A GKE `mount.nfs` wrapper multiplies mounts until the node wedges | preflight records mount propagation |
+| [F-004](#f-004-allowvolumeexpansion-is-a-claim-not-a-capability) | 2026-09-10 | `allowVolumeExpansion` is advertised, not implemented, so PROV-04 cannot trust it | `pvc.go`'s expansion helper |
+| [F-003](#f-003-a-broken-umountnfs-wrapper-on-gke-wedges-every-terminating-pod) | 2026-09-10 | A broken `umount.nfs` wrapper wedges every terminating pod | teardown's terminate bound |
+| [F-002](#f-002-2gb-worker-nodes-cannot-host-the-suite) | 2026-09-10 | 2GB worker nodes cannot host the suite | the node shape a run reports |
+| [F-001](#f-001-force-deleting-a-mounted-pod-can-take-a-node-out-of-service) | 2026-09-10 | Force-deleting a mounted pod, then its claim, takes a node out of service | teardown, the force-delete helper, PROV-03, doc 05 |
 
 ---
 
@@ -258,7 +281,7 @@ Section 3.2 of the test plan says why.
 ## F-006: `scripts/lock-probe.sh` passed `flock -w`, which busybox does not have
 
 **Found:** 2026-09-11, by reading the applet sources while writing
-[`04-data-path-and-locktool-design.md`](04-data-path-and-locktool-design.md).
+[`05-data-path-and-locktool-design.md`](05-data-path-and-locktool-design.md).
 Not found by a run: on a workstation and on the default `alpine:3.20` tools
 image the probe works, because both carry the util-linux `flock`.
 
@@ -335,7 +358,7 @@ exec unshare --mount --propagation shared -- bash -c '
 The bug is the combination of `--propagation shared` with `mount --bind` *before* `mount --make-private`:
 
 1. `unshare --mount --propagation shared` places the new namespace root and `/etc` into the **same shared peer group** as the host namespace.
-2. Inside that shared namespace, executing `mount --bind /etc /etc` causes Linux VFS mount propagation to immediately clone the new bind mount across all peers in the group—including the host namespace.
+2. Inside that shared namespace, executing `mount --bind /etc /etc` causes Linux VFS mount propagation to immediately clone the new bind mount across all peers in the group, including the host namespace.
 3. The subsequent `mount --make-private /etc` only makes the child namespace's mount private; the cloned mount in the host namespace remains shared.
 4. Each subsequent NFS mount starts with $2^N$ mounts on the host, duplicating all existing peer mounts on every execution: $1 \to 2 \to 4 \to 8 \to 16 \dots \to 8192$.
 5. By mount 13, the kernel mount table holds over 16,384 mounts. Every subsequent operation iterating mounts (container creation, exec, `cat /proc/mounts`, kubelet housekeeping) acquires `namespace_sem` and spends excessive CPU traversing stacked mounts. Worker threads enter uninterruptible D-state, container runtimes hang, and the node becomes unresponsive.
