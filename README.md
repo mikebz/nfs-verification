@@ -6,21 +6,46 @@ Updated: 2026-09-12
 
 End-to-end verification of NFS RWX persistent volumes on Kubernetes.
 
-[`docs/00-index.md`](docs/00-index.md) is the map of the documentation and the
-order to read it in. The three you need first:
-
-- [`docs/01-test-plan.md`](docs/01-test-plan.md): what gets verified and why.
-- [`docs/implementation-plan.md`](docs/implementation-plan.md): the delivery
-  order and what is done. A working document, not a record.
-- [`docs/findings.md`](docs/findings.md): what running the suite against a real
-  cluster taught us.
-
 This repository holds the harness, preflight, the fault injection package, grace
 observability, `locktool`, the kubelet stats reader, and the thirty-five cases
 listed below: all of PROV, all of DATA except the deferred soak, both SEC cases
 that predate step 8, five CHAOS cases and four OBS cases. The rest land in the
-steps listed in
-[`docs/implementation-plan.md`](docs/implementation-plan.md).
+steps listed in [`plan.md`](plan.md).
+
+## Documentation
+
+Read this file first, then the test plan, then the delivery order. Thirty
+minutes on those two is enough to read any case in the repository; the design
+docs are reference material, not prerequisites.
+
+| Document | What it answers |
+|---|---|
+| [`docs/01-test-plan.md`](docs/01-test-plan.md) | What gets verified and why: the architecture under test, every case ID, the SLO table |
+| [`plan.md`](plan.md) | In what order it gets built, and what is done. A working document in the root, not part of the record in `docs/` |
+| [`docs/findings.md`](docs/findings.md) | What running against a real cluster taught, `F-001` upward. **Read it before touching teardown, deletion, or anything that unmounts** |
+| [`AGENTS.md`](AGENTS.md) | How to work here: change size, case conventions, the sources every assertion cites, what to claim when you are done |
+
+One design doc per delivery step, in `docs/`, each stating at its top which
+cases it serves and whether it shipped:
+
+| Design doc | Step | Cases | Status |
+|---|---|---|---|
+| [`03-chaos-operations-design.md`](docs/03-chaos-operations-design.md) | 3 | CHAOS-01, CHAOS-02 | Shipped |
+| [`04-grace-and-lock-reclaim-design.md`](docs/04-grace-and-lock-reclaim-design.md) | 4 | CHAOS-05, CHAOS-06 (whole-file locks), CHAOS-07, OBS-02, OBS-03 | Shipped |
+| [`05-data-path-and-locktool-design.md`](docs/05-data-path-and-locktool-design.md) | 6 | DATA-06 to DATA-13, the byte-range half of DATA-05 and the disjoint-range half of CHAOS-06, plus `locktool` | Shipped, DATA-14 deferred |
+| [`06-observability-design.md`](docs/06-observability-design.md) | 7 | OBS-01 (half), OBS-05, OBS-06, OBS-07 | In progress: OBS-06 and the kubelet reader shipped |
+
+Every fact has one home: what a case must verify is the test plan's, what is
+built and how to run it is this file's, why a phase is shaped the way it is
+belongs to its design doc, and what a real run taught is `findings.md`'s. A copy
+anywhere else is how these documents drifted the first time.
+
+A case reports one of four things. **Passed**: the assertion held. **Failed**:
+the deployment did not do what the protocol, the Kubernetes API or the CSI spec
+requires, which is a finding about the deployment. **Blocked**: the case could
+not run, because the cluster or the tools image gave it nothing to assert on,
+and the reason is itself the finding. **Skipped**: the cluster lacks a
+capability the case needs, discovered at preflight.
 
 ## Layout
 
