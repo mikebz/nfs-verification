@@ -908,7 +908,8 @@ func TestProvRapidProvisionChurn(t *testing.T) {
 //  3. Create a claim with a maximum-length valid RFC 1123 name (253 characters).
 //  4. Mount the boundary claim in a writer on node A and a reader on node B.
 //  5. Confirm the claim reaches Bound, resolve the PV, and inspect the minted export
-//     path and CSI volumeHandle for truncation or malformation.
+//     server, path and CSI volumeHandle for truncation or malformation. A PV whose
+//     export the harness cannot read reports blocked, not pass.
 //  6. Write a payload from the writer on node A and verify the SHA-256 checksum from
 //     the reader on node B across the wire.
 //  7. Delete both pods gracefully, await API departure, and delete the claim.
@@ -948,8 +949,12 @@ func TestProvVolumeNameEdgeCases(t *testing.T) {
 
 	// 2. Admission barrier: direct API call with invalid characters (uppercase letters).
 	// Must be rejected cleanly by kube-apiserver admission (RFC 1123 subdomain syntax).
+	// The name is alphanumeric on purpose. A name carrying underscores as well
+	// is rejected for the underscores, so it would pass this check on a cluster
+	// that accepted capital letters, which is the one thing it is here to rule
+	// out.
 	badCharPVC := &corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{Name: "INVALID_UPPERCASE_NAME", Namespace: framework.Namespace},
+		ObjectMeta: metav1.ObjectMeta{Name: "InvalidUppercaseName", Namespace: framework.Namespace},
 		Spec: corev1.PersistentVolumeClaimSpec{
 			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany},
 			Resources: corev1.VolumeResourceRequirements{
@@ -997,7 +1002,7 @@ func TestProvVolumeNameEdgeCases(t *testing.T) {
 	}
 	t.Logf("253-character boundary claim %s bound to PV %s on StorageClass %s", bound.Name, pv.Name, f.Env.StorageClass)
 
-	var volumeHandle, exportPath string
+	var volumeHandle string
 	if pv.Spec.CSI != nil {
 		volumeHandle = pv.Spec.CSI.VolumeHandle
 		if volumeHandle == "" {
@@ -1007,19 +1012,23 @@ func TestProvVolumeNameEdgeCases(t *testing.T) {
 			t.Errorf("bound PV %s volumeHandle contains newline characters: %q", pv.Name, volumeHandle)
 		}
 	}
-	nfsSource, srcErr := framework.ExtractNFSSource(pv)
-	if srcErr != nil {
-		t.Logf("could not extract NFS source from PV %s: %v", pv.Name, srcErr)
-	} else {
-		exportPath = nfsSource.Path
-		if nfsSource.Path == "" || nfsSource.Server == "" {
-			t.Errorf("bound PV %s produced incomplete NFS source: server=%q path=%q", pv.Name, nfsSource.Server, nfsSource.Path)
-		}
-		if strings.ContainsAny(exportPath, "\r\n") {
-			t.Errorf("bound PV %s export path contains newline characters: %q", pv.Name, exportPath)
-		}
+	// The minted export is what the boundary name is being tested against, so a
+	// source the harness cannot read leaves this case with nothing to assert.
+	// It reports blocked, as DATA-08 does, rather than logging past it: a pass
+	// carried by mount and I/O alone would claim an export assertion that never
+	// ran.
+	nfsSource, err := framework.ExtractNFSSource(pv)
+	if err != nil {
+		blocked(t, "the export behind the 253-character claim %s could not be read, so PROV-10 cannot "+
+			"assert on the minted export configuration: %v", bound.Name, err)
 	}
-	t.Logf("boundary volume configuration: PV=%s volumeHandle=%q export=%s", pv.Name, volumeHandle, exportPath)
+	// Server and path are one source. A newline in either builds a mount
+	// address nobody asked for, so both are checked and both are reported.
+	if strings.ContainsAny(nfsSource.Server, "\r\n") || strings.ContainsAny(nfsSource.Path, "\r\n") {
+		t.Errorf("bound PV %s export source contains newline characters: server=%q path=%q",
+			pv.Name, nfsSource.Server, nfsSource.Path)
+	}
+	t.Logf("boundary volume configuration: PV=%s volumeHandle=%q export=%s", pv.Name, volumeHandle, nfsSource)
 
 	// 6. Write a payload from writer on node A and verify checksum from reader on node B.
 	want, err := f.WriteFile(ctx, writer.Name, fileIn("prov10.dat"), 1<<20, "prov10")

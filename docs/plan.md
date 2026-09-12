@@ -408,8 +408,9 @@ and volume expansion under active I/O:
   the ceiling.
 - PROV-10: volume name edge cases. Asserts admission-layer rejection for invalid
   names (1000 characters, uppercase), and for the maximum valid RFC 1123 boundary
-  name (253 characters) asserts successful binding, valid export path/volumeHandle,
-  and cross-node write/read verification without malformed export configuration.
+  name (253 characters) asserts successful binding, valid export server/path and
+  volumeHandle, and cross-node write/read verification without malformed export
+  configuration. A volume whose export the harness cannot read reports blocked.
 - PROV-11: two-stage expansion under active I/O. Grows the backing block volume,
   then grows the share, while `pkg/framework/load.go` runs. Client `df` reflects
   the new capacity with no unmount, no server restart, and zero I/O errors.
