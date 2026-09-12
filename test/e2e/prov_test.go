@@ -891,28 +891,43 @@ func TestProvRapidProvisionChurn(t *testing.T) {
 	}
 }
 
-// PROV-10: volume name edge cases (1000-character names, unusual characters,
-// and boundary names). Rejections must be clean and boundary names must not
-// produce malformed export configuration.
+// PROV-10: volume name edge cases. Assert that Kubernetes admission cleanly rejects
+// invalid names (1000-character length, uppercase letters) before storage provisioning,
+// and that the maximum-length valid RFC 1123 name (253 characters) binds, mounts,
+// produces a well-formed export configuration, and supports cross-node I/O without
+// server restart.
+//
+// Note: 1000-character and uppercase rejections are Kubernetes apiserver schema admission
+// barriers (RFC 1123), not storage driver validation. The NFS verification exercises
+// the maximum valid boundary name through the storage backend to verify that export
+// paths, volume handles, and mount syntax are not truncated or malformed.
 //
 // Steps:
-//  1. Attempt to create a claim with a 1000-character name: assert clean rejection.
-//  2. Attempt to create a claim with invalid characters (uppercase, underscores): assert clean rejection.
-//  3. Create a claim with a maximum-length valid RFC 1123 name.
-//  4. Verify it binds cleanly (or fails with a clean API rejection if backend driver limits name length)
-//     without malforming export configuration.
-//  5. Confirm server remains healthy.
+//  1. Verify admission-layer rejection: attempt to create a PVC with a 1000-character name.
+//  2. Verify admission-layer rejection: attempt to create a PVC with uppercase characters.
+//  3. Create a claim with a maximum-length valid RFC 1123 name (253 characters).
+//  4. Mount the boundary claim in a writer on node A and a reader on node B.
+//  5. Confirm the claim reaches Bound, resolve the PV, and inspect the minted export
+//     path and CSI volumeHandle for truncation or malformation.
+//  6. Write a payload from the writer on node A and verify the SHA-256 checksum from
+//     the reader on node B across the wire.
+//  7. Delete both pods gracefully, await API departure, and delete the claim.
+//  8. Confirm server remains healthy with no restarts.
 func TestProvVolumeNameEdgeCases(t *testing.T) {
 	f := framework.New(t, "PROV-10")
+	requireCap(t, f.Caps.MultiNode, "cross-node verification needs two schedulable workers")
 	ctx, cancel := caseCtx(t, 15*time.Minute)
 	defer cancel()
+
+	nodeA, nodeB := f.TwoNodes(ctx)
 
 	restartsBefore, err := framework.ServerRestartCount(ctx, f.C)
 	if err != nil {
 		t.Fatalf("reading initial server restart count: %v", err)
 	}
 
-	// 1. Direct API call with 1000-character name. Must be rejected cleanly.
+	// 1. Admission barrier: direct API call with 1000-character name.
+	// Must be rejected cleanly by kube-apiserver admission (RFC 1123 limit).
 	longName := strings.Repeat("a", 1000)
 	longPVC := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{Name: longName, Namespace: framework.Namespace},
@@ -924,14 +939,15 @@ func TestProvVolumeNameEdgeCases(t *testing.T) {
 		},
 	}
 	if _, err := f.C.Kube.CoreV1().PersistentVolumeClaims(framework.Namespace).Create(ctx, longPVC, metav1.CreateOptions{}); err == nil {
-		t.Fatalf("API accepted PVC with 1000-character name")
+		t.Fatalf("API accepted PVC with 1000-character name; expected admission rejection")
 	} else if !apierrors.IsInvalid(err) && !apierrors.IsBadRequest(err) {
-		t.Fatalf("expected Invalid/BadRequest API error for 1000-character name, got: %v", err)
+		t.Fatalf("expected Invalid/BadRequest admission error for 1000-character name, got: %v", err)
 	} else {
-		t.Logf("1000-character volume name rejected cleanly with validation error: %v", err)
+		t.Logf("1000-character PVC name rejected cleanly at admission layer: %v", err)
 	}
 
-	// 2. Direct API call with invalid characters (uppercase letters). Must be rejected cleanly.
+	// 2. Admission barrier: direct API call with invalid characters (uppercase letters).
+	// Must be rejected cleanly by kube-apiserver admission (RFC 1123 subdomain syntax).
 	badCharPVC := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{Name: "INVALID_UPPERCASE_NAME", Namespace: framework.Namespace},
 		Spec: corev1.PersistentVolumeClaimSpec{
@@ -942,30 +958,101 @@ func TestProvVolumeNameEdgeCases(t *testing.T) {
 		},
 	}
 	if _, err := f.C.Kube.CoreV1().PersistentVolumeClaims(framework.Namespace).Create(ctx, badCharPVC, metav1.CreateOptions{}); err == nil {
-		t.Fatalf("API accepted PVC with invalid uppercase name")
+		t.Fatalf("API accepted PVC with uppercase name; expected admission rejection")
 	} else if !apierrors.IsInvalid(err) && !apierrors.IsBadRequest(err) {
-		t.Fatalf("expected Invalid/BadRequest API error for uppercase name, got: %v", err)
+		t.Fatalf("expected Invalid/BadRequest admission error for uppercase name, got: %v", err)
 	} else {
-		t.Logf("invalid name rejected cleanly with validation error: %v", err)
+		t.Logf("uppercase PVC name rejected cleanly at admission layer: %v", err)
 	}
 
 	// 3. Boundary RFC 1123 name at maximum allowed length (253 characters).
 	prefix := f.Name("")
 	pad := 253 - len(prefix)
-	if pad > 0 {
-		boundaryLogical := strings.Repeat("x", pad)
-		boundPVC, err := f.CreatePVC(ctx, framework.PVCSpec{Name: boundaryLogical})
-		if err != nil {
-			t.Logf("253-character boundary name rejected cleanly by driver: %v", err)
-		} else {
-			t.Logf("boundary 253-character claim created: %s", boundPVC.Name)
-			// Ensure cleanup if accepted
-			defer func() {
-				_ = f.DeletePVC(ctx, boundPVC.Name)
-			}()
-		}
+	if pad <= 0 {
+		t.Fatalf("framework prefix %q length %d is >= 253 characters; shorten -run-id", prefix, len(prefix))
+	}
+	boundaryLogical := strings.Repeat("x", pad)
+	boundPVC, err := f.CreatePVC(ctx, framework.PVCSpec{Name: boundaryLogical})
+	if err != nil {
+		t.Fatalf("creating 253-character boundary claim %s: %v", prefix+boundaryLogical, err)
+	}
+	if len(boundPVC.Name) != 253 {
+		t.Fatalf("expected boundary PVC name length 253, got %d (%s)", len(boundPVC.Name), boundPVC.Name)
 	}
 
+	// 4. Mount the boundary claim in a writer on node A and a reader on node B.
+	// The pods come before the bind check: a class that binds on first consumer
+	// has nothing to bind to until something is scheduled.
+	writer := f.MustPod(ctx, toolsPod("writer", boundPVC.Name, nodeA))
+	reader := f.MustPod(ctx, toolsPod("reader", boundPVC.Name, nodeB))
+
+	// 5. Confirm the claim reached Bound, resolve the PV, and inspect export configuration.
+	bound, err := f.WaitPVCBound(ctx, boundPVC.Name, framework.BindTimeout)
+	if err != nil {
+		t.Fatalf("boundary claim %s did not reach Bound once pods consumed it: %v", boundPVC.Name, err)
+	}
+	pv, err := f.C.Kube.CoreV1().PersistentVolumes().Get(ctx, bound.Spec.VolumeName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("resolving bound PV %s for claim %s: %v", bound.Spec.VolumeName, bound.Name, err)
+	}
+	t.Logf("253-character boundary claim %s bound to PV %s on StorageClass %s", bound.Name, pv.Name, f.Env.StorageClass)
+
+	var volumeHandle, exportPath string
+	if pv.Spec.CSI != nil {
+		volumeHandle = pv.Spec.CSI.VolumeHandle
+		if volumeHandle == "" {
+			t.Errorf("bound PV %s has empty CSI volumeHandle", pv.Name)
+		}
+		if strings.ContainsAny(volumeHandle, "\r\n") {
+			t.Errorf("bound PV %s volumeHandle contains newline characters: %q", pv.Name, volumeHandle)
+		}
+	}
+	nfsSource, srcErr := framework.ExtractNFSSource(pv)
+	if srcErr != nil {
+		t.Logf("could not extract NFS source from PV %s: %v", pv.Name, srcErr)
+	} else {
+		exportPath = nfsSource.Path
+		if nfsSource.Path == "" || nfsSource.Server == "" {
+			t.Errorf("bound PV %s produced incomplete NFS source: server=%q path=%q", pv.Name, nfsSource.Server, nfsSource.Path)
+		}
+		if strings.ContainsAny(exportPath, "\r\n") {
+			t.Errorf("bound PV %s export path contains newline characters: %q", pv.Name, exportPath)
+		}
+	}
+	t.Logf("boundary volume configuration: PV=%s volumeHandle=%q export=%s", pv.Name, volumeHandle, exportPath)
+
+	// 6. Write a payload from writer on node A and verify checksum from reader on node B.
+	want, err := f.WriteFile(ctx, writer.Name, fileIn("prov10.dat"), 1<<20, "prov10")
+	if err != nil {
+		t.Fatalf("writing to boundary share from writer pod %s on %s: %v", writer.Name, nodeA, err)
+	}
+	got, err := f.Sha256(ctx, reader.Name, fileIn("prov10.dat"))
+	if err != nil {
+		t.Fatalf("reader pod %s on %s failed reading file written by writer pod %s on %s (profile %s, want %s): %v",
+			reader.Name, nodeB, writer.Name, nodeA, profile(t).Name, want, err)
+	}
+	if got != want {
+		t.Fatalf("reader on %s did not see what writer on %s closed (profile %s): got %s want %s",
+			nodeB, nodeA, profile(t).Name, got, want)
+	}
+
+	// 7. Graceful teardown: pods first, wait for API departure, then delete the claim.
+	for _, pod := range []*corev1.Pod{writer, reader} {
+		if err := f.DeletePod(ctx, pod.Name); err != nil {
+			t.Fatalf("deleting pod %s: %v", pod.Name, err)
+		}
+		if err := f.WaitPodGone(ctx, pod.Name, framework.DeleteTimeout); err != nil {
+			t.Fatalf("pod %s did not go away: %v", pod.Name, err)
+		}
+	}
+	if err := f.DeletePVC(ctx, bound.Name); err != nil {
+		t.Fatalf("deleting boundary claim %s: %v", bound.Name, err)
+	}
+	if err := f.WaitPVCGone(ctx, bound.Name, framework.DeleteTimeout); err != nil {
+		t.Fatalf("boundary claim %s did not delete: %v", bound.Name, err)
+	}
+
+	// 8. Confirm server remained healthy.
 	restartsAfter, err := framework.ServerRestartCount(ctx, f.C)
 	if err != nil {
 		t.Fatalf("reading final server restart count: %v", err)
