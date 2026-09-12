@@ -1,7 +1,8 @@
 # Findings
 
 Author: mikebz@
-Updated: 2026-09-11
+Created: 2026-09-10
+Updated: 2026-09-12
 
 Things learned by running the suite against a real cluster that are worth
 remembering. Each entry says what happened, why, what changed in the code, and

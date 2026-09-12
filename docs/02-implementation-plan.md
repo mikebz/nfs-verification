@@ -1,7 +1,8 @@
 # Implementation plan
 
 Author: mikebz@
-Updated: 2026-09-11
+Created: 2026-09-10
+Updated: 2026-09-12
 
 How the test plan in [`01-test-plan.md`](01-test-plan.md) gets built. The test
 plan says what to verify; this file says in what order, in what shape, and what

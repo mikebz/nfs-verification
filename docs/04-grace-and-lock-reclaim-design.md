@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-10
-Updated: 2026-09-11
+Updated: 2026-09-12
 Status: shipped, delivery step 4 ([PR #8](https://github.com/mikebz/nfs-verification/pull/8))
 Serves: CHAOS-05, CHAOS-06, CHAOS-07, OBS-02, OBS-03. Requirements in
 [`01-test-plan.md`](01-test-plan.md) Sections 3.3, 3.5 and 3.8.

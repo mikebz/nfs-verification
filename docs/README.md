@@ -1,12 +1,39 @@
 # Documentation map
 
 Author: mikebz@
-Updated: 2026-09-11
+Created: 2026-09-11
+Updated: 2026-09-12
 
 This suite verifies NFS RWX persistent volumes on Kubernetes by driving a real
 cluster and asserting what a client can observe. These documents say what is
 verified, in what order it was built, what was decided along the way, and what
 real runs taught.
+
+## Every document carries its dates
+
+Each file here, plus [`../README.md`](../README.md) and
+[`../AGENTS.md`](../AGENTS.md), opens with a header block:
+
+```
+Author: mikebz@
+Created: <the date the document first landed in the repository>
+Updated: <the date of the last change to what it says>
+```
+
+Both dates are UTC, and both matter for different reasons. **Created** says how
+old the thinking is: a design written before the first real run was written
+without evidence that has since arrived. **Updated** says whether anyone has
+reconciled it with the code since. A design doc adds `Status:` and `Serves:` so
+that a reader who gets no further than the header still knows whether it
+describes code that exists.
+
+A typo fix does not move `Updated`; a change to what the document claims does.
+Both dates are checkable against history:
+
+```sh
+TZ=UTC git log --diff-filter=A --format=%ad --date=format-local:%F -1 -- docs/<file>   # created
+TZ=UTC git log               --format=%ad --date=format-local:%F -1 -- docs/<file>   # last change
+```
 
 ## Read in this order
 

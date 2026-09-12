@@ -1,5 +1,9 @@
 # Agent Guide for nfs-verification
 
+Author: mikebz@
+Created: 2026-09-10
+Updated: 2026-09-12
+
 This repository is a test harness, not a product. It verifies NFS RWX
 persistent volumes on Kubernetes by driving a real cluster and asserting what a
 client can observe.
@@ -50,6 +54,12 @@ description of what gets tested, and it must not become one. Read these first:
     (designed, shipped, or superseded, with the step and the PR), and `Serves:`
     (the case IDs and the test plan sections). A reader who gets no further than
     the header should still know whether the document describes code that exists.
+    Every document in `docs/`, plus this file and the README, carries `Author:`,
+    `Created:` and `Updated:` in UTC. `Created:` never changes once the file has
+    landed. **Move `Updated:` in the same change that alters what the document
+    says**, so a doc nobody has reconciled with the code says so on its first
+    line; a typo fix does not move it. `docs/README.md` has the two git commands
+    that check both against history.
   - Keep it short enough to be read in one sitting. Decisions and the reasons
     for them, the rules a reviewer can accept or reject the phase from, the data
     contract, and what was deferred. Not a restatement of the test plan's case

@@ -1,8 +1,9 @@
 # E2E Test Plan: NFS RWX Persistent Volumes on Kubernetes
 
 Author: mikebz@
+Created: 2026-09-10
+Updated: 2026-09-12
 Version: 1.0 (v1 scope)
-Updated: 2026-09-11
 
 This is the requirements document: what gets verified, and why. How it gets
 built is [`02-implementation-plan.md`](02-implementation-plan.md); what is

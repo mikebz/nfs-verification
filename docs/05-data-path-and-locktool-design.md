@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-11
-Updated: 2026-09-11
+Updated: 2026-09-12
 Status: shipped, delivery step 6. Designed in
 [PR #12](https://github.com/mikebz/nfs-verification/pull/12), implemented from
 [PR #14](https://github.com/mikebz/nfs-verification/pull/14) onward. DATA-14

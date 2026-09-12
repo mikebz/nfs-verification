@@ -1,5 +1,9 @@
 # nfs-verification
 
+Author: mikebz@
+Created: 2026-09-10
+Updated: 2026-09-12
+
 End-to-end verification of NFS RWX persistent volumes on Kubernetes.
 
 [`docs/README.md`](docs/README.md) is the map of the documentation and the order

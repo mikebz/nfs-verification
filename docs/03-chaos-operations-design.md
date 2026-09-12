@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-10
-Updated: 2026-09-11
+Updated: 2026-09-12
 Status: shipped, delivery step 3 ([PR #4](https://github.com/mikebz/nfs-verification/pull/4))
 Serves: CHAOS-01, CHAOS-02. Requirements in [`01-test-plan.md`](01-test-plan.md)
 Section 3.3, targets in Section 3.8, weighting in Section 2.4.

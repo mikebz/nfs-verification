@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-11
-Updated: 2026-09-11
+Updated: 2026-09-12
 Status: **designed, not implemented.** Delivery step 7, next up.
 Serves: OBS-05, OBS-06, OBS-07, and the half of OBS-01 that needs no fault.
 Requirements in [`01-test-plan.md`](01-test-plan.md) Section 3.5.
