@@ -406,8 +406,11 @@ and volume expansion under active I/O:
 - PROV-09: rapid create/delete churn (100 cycles). Asserts no export ID
   exhaustion, no file descriptor leaks, and server RSS remains bounded under
   the ceiling.
-- PROV-10: provision with a 1000-character volume name or unusual characters.
-  Asserts clean rejection or correct handling without malformed export configuration.
+- PROV-10: volume name edge cases. Asserts admission-layer rejection for invalid
+  names (1000 characters, uppercase), and for the maximum valid RFC 1123 boundary
+  name (253 characters) asserts successful binding, valid export server/path and
+  volumeHandle, and cross-node write/read verification without malformed export
+  configuration. A volume whose export the harness cannot read reports blocked.
 - PROV-11: two-stage expansion under active I/O. Grows the backing block volume,
   then grows the share, while `pkg/framework/load.go` runs. Client `df` reflects
   the new capacity with no unmount, no server restart, and zero I/O errors.
