@@ -1628,6 +1628,7 @@ func TestDataDurabilityWithoutFsync(t *testing.T) {
 
 	sweep, err := f.VerifyRecords(ctx, s.verifier, s.dir, attempted)
 	if err != nil {
+		writeRawSweep(t, f, sweep)
 		t.Fatalf("sweeping the records from %s: %v", s.verifier, err)
 	}
 	recordSweep(t, f, sweep)
