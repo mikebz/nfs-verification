@@ -59,7 +59,7 @@ and states, at the top, which cases it serves and whether it shipped.
 | [`03-chaos-operations-design.md`](03-chaos-operations-design.md) | 3 | CHAOS-01, CHAOS-02 | Shipped |
 | [`04-grace-and-lock-reclaim-design.md`](04-grace-and-lock-reclaim-design.md) | 4 | CHAOS-05, CHAOS-06, CHAOS-07, OBS-02, OBS-03 | Shipped |
 | [`05-data-path-and-locktool-design.md`](05-data-path-and-locktool-design.md) | 6 | DATA-06 to DATA-13, plus `locktool` | Shipped, DATA-14 deferred |
-| [`06-observability-design.md`](06-observability-design.md) | 7 | OBS-01 (half), OBS-05, OBS-06, OBS-07 | Designed, not implemented |
+| [`06-observability-design.md`](06-observability-design.md) | 7 | OBS-01 (half), OBS-05, OBS-06, OBS-07 | In progress: OBS-06 and the kubelet reader shipped, OBS-05, OBS-01 and OBS-07 to come |
 
 A design doc is required for any change estimated at 1000 lines or more, and it
 lands as its own pull request before the code ([`../AGENTS.md`](../AGENTS.md),

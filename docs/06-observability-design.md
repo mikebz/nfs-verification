@@ -3,7 +3,9 @@
 Author: mikebz@
 Created: 2026-09-11
 Updated: 2026-09-12
-Status: **designed, not implemented.** Delivery step 7, next up.
+Status: **in progress.** Delivery step 7, first of three pull requests shipped
+([PR #29](https://github.com/mikebz/nfs-verification/pull/29)): the kubelet
+stats reader and OBS-06. OBS-05, OBS-01 and OBS-07 are designed and not built.
 Serves: OBS-05, OBS-06, OBS-07, and the half of OBS-01 that needs no fault.
 Requirements in [`01-test-plan.md`](01-test-plan.md) Section 3.5.
 Builds on [`03-chaos-operations-design.md`](03-chaos-operations-design.md),
@@ -43,7 +45,7 @@ volume near capacity, and do the server's own metrics survive a restart.
 | 3 | One verdict rule, used everywhere (Section 4) | A source the suite cannot reach is blocked; a deployment that publishes nothing fails; a precondition the case failed to create is blocked, with the number reached. Nothing is a capability skip |
 | 4 | No case passes on a signal its own fault produced | Deleting a pod moves every container-derived signal by construction, so no case asserts on one |
 | 5 | A case that reads a live value shows it moves | A frozen counter and a gauge that ignores its subject both exist and neither is usable. A case reading configuration rather than a value is exempt and says so |
-| 6 | Build only what a case asserts on | No reader, endpoint or classifier for a series no assertion reads. Section 6 lists what was cut |
+| 6 | Build only what a case asserts on | No reader, endpoint or classifier for a series no assertion reads. Section 7 lists what was cut and what each would have served |
 | 7 | No case drives the server to OOMKill or fills a filesystem it does not own | The storm and the write are both bounded |
 | 8 | Two readings of one quantity agree within a tolerance derived from the slower sampler's period, or the case says by how much they disagreed | OBS-06 |
 | 9 | No bound is asserted that cannot fail | A timing assertion belongs in Section 3.8 with a fault that can violate it, or it is reported rather than asserted |
@@ -228,7 +230,8 @@ Three pull requests, smallest runnable slice first, all `TestObs` under
 `make test-obs`:
 
 1. The kubelet reader and **OBS-06**. No fault, and the case in this phase most
-   directly about storage.
+   directly about storage. **Shipped**; Section 11 says what the first run
+   returned.
 2. **OBS-05**: the memory reading from the same reader, the declared-limit
    assertion, and the bounded storm.
 3. **OBS-01 and OBS-07**: the availability configuration assertion, the metrics
@@ -246,12 +249,43 @@ entry.
 
 - A server publishing on a port it declares nowhere is where a flag would earn
   its place. None has been met, so none is added.
-- The agreement tolerance in OBS-06 is derived from the kubelet's period and has
-  not been checked against a real disagreement.
+- The agreement tolerance in OBS-06 has still not met a real disagreement: on
+  the first run the two sources matched to the byte, because both were reading
+  the same backing filesystem (F-009). A deployment with a real per-volume quota
+  is what would exercise it.
 - The step 10 wedge fault, and the bound OBS-01's behavioral half will assert
   against.
 
-## 11. Sources
+## 11. What the first shipped slice returned
+
+PR 1 landed the kubelet stats reader, the volume usage reading with its
+agreement, movement and quota checks, OBS-06, and four bounds in `pkg/slo`.
+`AlertSLO` was deleted with it, as Section 7 said it should be.
+
+Run against GKE v1.37, StorageClass `nfs`, default profile, 2026-09-11:
+
+- The CSI driver **does** implement volume statistics: the kubelet publishes
+  per-volume usage for the claim through the node proxy.
+- The two sources agreed exactly, before and after the write, and both moved by
+  the full 128 MiB, the kubelet's reading arriving 1m33s later, which is its
+  documented aggregation period.
+- The case still failed, on the quota check: the claim is provisioned at 1 GiB
+  and both sources report the provisioner's 10 GiB backing filesystem. That is
+  [F-009](findings.md), and it is the verdict rule in Section 4 doing its job.
+  An operator alerting at 80% of that number is watching the wrong volume.
+
+Two things this settles that the design could only assert. The tolerance is a
+fraction of the **smaller** of the claim's provisioned size and the capacity the
+workload is shown: taking it from the reported capacity alone gave a 199 MiB
+tolerance against a 128 MiB write on the first run, which is an assertion that
+had quietly stopped being able to fail. And the byte counts decode as pointers,
+because a driver that does not implement volume statistics omits them and a
+plain `int64` would read as an empty volume rather than as no reading at all.
+
+The quota check runs last on purpose, so everything above it is measured and
+recorded before the case goes red.
+
+## 12. Sources
 
 - Kubernetes [node metrics data](https://kubernetes.io/docs/reference/instrumentation/node-metrics/)
   for the kubelet stats summary, and the

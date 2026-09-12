@@ -156,7 +156,7 @@ design doc, where it has one, is named in its row.
 | 4 | Grace and lock reclaim: CHAOS-05, CHAOS-06, CHAOS-07, OBS-02, OBS-03. Designed in [`04-grace-and-lock-reclaim-design.md`](04-grace-and-lock-reclaim-design.md) | done, [PR #8](https://github.com/mikebz/nfs-verification/pull/8) |
 | 5 | Close out PROV: PROV-02, PROV-05 to PROV-11 | done, [PR #10](https://github.com/mikebz/nfs-verification/pull/10) |
 | 6 | Close out DATA: DATA-06 to DATA-13, `locktool`. Designed in [`05-data-path-and-locktool-design.md`](05-data-path-and-locktool-design.md) | done except the soak, [PR #12](https://github.com/mikebz/nfs-verification/pull/12) onward. Run on GKE 2026-09-11: DATA-05 to DATA-09 and DATA-11 to DATA-13 pass, with CHAOS-06. DATA-11's punch half reports blocked on a busybox image, DATA-10 has not been run, DATA-14 is deferred (test plan Section 3.2) |
-| 7 | OBS: OBS-05, OBS-06, OBS-07 and the half of OBS-01 that needs no fault. Designed in [`06-observability-design.md`](06-observability-design.md) | **next**, design written, no code. Does not close out Section 3.5: OBS-01's behavioral half needs a fault from step 10 |
+| 7 | OBS: OBS-05, OBS-06, OBS-07 and the half of OBS-01 that needs no fault. Designed in [`06-observability-design.md`](06-observability-design.md) | **in progress**, first of three PRs done ([PR #29](https://github.com/mikebz/nfs-verification/pull/29)): the kubelet stats reader and OBS-06, run on GKE 2026-09-11. The control plane publishes per-volume usage, it agrees with `df` exactly and both move with the write; the case fails its last assertion because the export has no per-volume quota, which is [F-009](findings.md). OBS-05 follows, then OBS-01 and OBS-07. Does not close out Section 3.5: OBS-01's behavioral half needs a fault from step 10 |
 | 8 | Close out SEC: SEC-03 to SEC-09 | not started |
 | 9 | Close out SCALE: SCALE-01 to SCALE-07 | not started |
 | 10 | Close out CHAOS: CHAOS-03, CHAOS-04, CHAOS-08 to CHAOS-18 | not started |
@@ -247,16 +247,24 @@ both deferred to it by step 4, and the fix for `scripts/lock-probe.sh` passing
 `flock -w` (F-006). DATA-14 is deferred. See
 [`05-data-path-and-locktool-design.md`](05-data-path-and-locktool-design.md).
 
-### Step 7: observability
+### Step 7: observability, in progress
 
 Four cases asserting that an operator on this deployment has inputs to monitor
 with, under one decision: **the suite verifies what the deployment publishes,
 never the alert rules.** Two readers, no new flags, no new fault, no new
-capability. Expect most of it to come back red on the provisioner this project
-runs against, which declares no probes, no resource limits and no metrics
-endpoint; that is the phase working, and it belongs in
-[`findings.md`](findings.md) as one entry. See
-[`06-observability-design.md`](06-observability-design.md).
+capability. See [`06-observability-design.md`](06-observability-design.md).
+
+The first of three pull requests has landed: the kubelet stats reader, the
+volume usage reading with its agreement, movement and quota checks, OBS-06, and
+the `pkg/slo` bounds they use. `AlertSLO` went with it, as the design said it
+should, because nothing read it and nothing could violate it. OBS-05 follows,
+then OBS-01 and OBS-07.
+
+The first run did what the design expected: the two sources agree and move
+together, and the case still comes back red, because the export reports the
+backing filesystem rather than the claim. That is F-009, and it is the phase
+working rather than failing. Expect the rest to be red too on a provisioner
+that declares no probes, no resource limits and no metrics endpoint.
 
 ### Steps 8 to 11: not started
 

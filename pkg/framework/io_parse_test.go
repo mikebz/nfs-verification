@@ -46,7 +46,10 @@ func TestCapacityParsersAgainstRealTools(t *testing.T) {
 		t.Fatalf("parsing real df output %q: %v", dfOut, err)
 	}
 
-	for name, got := range map[string]Capacity{"stat -f": fromStat, "df -P -k": fromDF} {
+	for name, got := range map[string]Capacity{
+		"stat -f":  fromStat,
+		"df -P -k": {TotalBytes: fromDF.TotalBytes, AvailBytes: fromDF.AvailBytes},
+	} {
 		if got.TotalBytes <= 0 {
 			t.Errorf("%s parsed a total of %d bytes, which would read as a volume with no capacity",
 				name, got.TotalBytes)
@@ -54,6 +57,18 @@ func TestCapacityParsersAgainstRealTools(t *testing.T) {
 		if got.AvailBytes > got.TotalBytes {
 			t.Errorf("%s parsed %d bytes available out of %d total", name, got.AvailBytes, got.TotalBytes)
 		}
+	}
+	// Used is the field OBS-06 compares against the control plane's reading, so
+	// it is checked against the same filesystem rather than trusted. It is not
+	// capacity minus available: a filesystem with reserved blocks keeps some of
+	// the difference for root, which is why the parser carries all three.
+	if fromDF.UsedBytes < 0 || fromDF.UsedBytes > fromDF.TotalBytes {
+		t.Errorf("df parsed %d bytes used out of %d total", fromDF.UsedBytes, fromDF.TotalBytes)
+	}
+	if fromDF.UsedBytes+fromDF.AvailBytes > fromDF.TotalBytes+1024 {
+		t.Errorf("df parsed %d used plus %d available, which is more than the %d total it reported: "+
+			"at least one field is being read from the wrong column",
+			fromDF.UsedBytes, fromDF.AvailBytes, fromDF.TotalBytes)
 	}
 	// Both derive the total from the same statfs fields, so they agree except
 	// for df rounding to whole kilobytes.
@@ -116,6 +131,9 @@ some-server:/exports/pvc-1  1048576   10240   1038336       1% /mnt/share`
 	}
 	if got.AvailBytes != 1038336*1024 {
 		t.Errorf("available is %d bytes, want %d", got.AvailBytes, 1038336*1024)
+	}
+	if got.UsedBytes != 10240*1024 {
+		t.Errorf("used is %d bytes, want %d", got.UsedBytes, 10240*1024)
 	}
 	for name, bad := range map[string]string{
 		"header only":   "Filesystem 1024-blocks Used Available Capacity Mounted on",
