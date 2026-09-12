@@ -92,6 +92,14 @@ comment says it returns a file's device and inode *as a pod sees them*.
   match node B's, and the inode alone still matches so an unreadable `stat` does
   not become a reported protocol failure.
 
+Verified on the cluster, 2026-09-12, by running the case with and without the
+change fifteen minutes apart against `gke-w1` on the same flags. Without it, run
+`pr37-chaos-20260912` failed `byte-ranges-after-failover` having matched node
+`97537137-x2ev`'s lock table against `00:a1:524306`, which is the other node's
+device. With it, run `pr36v2-chaos-20260912` passed, reading `00:a1:524305` for
+one node and `00:166:524305` for the other. Different inodes between the two
+runs because each run provisions its own file; the device split is the point.
+
 ### What it means for the system under test
 
 Nothing, and that is the point. Server-side reclaim worked: both byte-range
