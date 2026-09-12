@@ -231,8 +231,9 @@ That rule was later superseded by strict sorting by category
 PROV-02 (20 concurrent claims, no duplicate export IDs), PROV-05 (snapshot and
 restore, or clean rejection), PROV-06 (`Retain` and rebind with data intact),
 PROV-07 and PROV-08 (provision and delete while the server is down), PROV-09
-(100 create/delete cycles), PROV-10 (name edge cases), PROV-11 (two-stage
-expansion under active I/O).
+(100 create/delete cycles), PROV-10 (invalid names rejected at admission, and a
+253-character name binding, mounting and exporting correctly), PROV-11
+(two-stage expansion under active I/O).
 
 **Harness added**: snapshot manifests and capability probing, PV retention and
 rebinding fixtures, and a high-churn lifecycle runner.

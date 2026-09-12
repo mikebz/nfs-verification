@@ -163,7 +163,7 @@ charged to every case eats the `go test -timeout` budget for the package.
 | PROV-07 | Provision while server pod is down; recovers cleanly once server returns | PROV |
 | PROV-08 | Delete claim while server pod is down; completes deletion once server returns | PROV |
 | PROV-09 | Rapid create/delete churn (100 cycles); no export ID or fd exhaustion | PROV |
-| PROV-10 | Volume name edge cases (1000-character names, boundary RFC 1123 names) | PROV |
+| PROV-10 | Volume name edge cases: invalid names rejected at admission, and a 253-character name binds, mounts and exports correctly | PROV |
 | PROV-11 | Two-stage volume expansion under active I/O; zero I/O errors | PROV |
 | DATA-01 | Four pods writing at once, four files, cross-verified checksums | DATA |
 | DATA-02 | Four pods appending to one file through a held-open descriptor | DATA |
