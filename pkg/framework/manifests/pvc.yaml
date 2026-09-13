@@ -12,9 +12,10 @@ metadata:
 spec:
   accessModes:
     - {{ .AccessMode | q }}
-  {{- if .StorageClass }}
+  # Empty, not absent: an empty class means no storage class and lets a claim
+  # bind by volumeName alone without Kubernetes defaulting it to the cluster's
+  # default StorageClass.
   storageClassName: {{ .StorageClass | q }}
-  {{- end }}
   resources:
     requests:
       storage: {{ .Size | q }}

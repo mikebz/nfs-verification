@@ -386,3 +386,32 @@ func TestPVCManifestWithDataSource(t *testing.T) {
 		t.Errorf("name is %s, want source-snap", pvc.Spec.DataSource.Name)
 	}
 }
+
+// TestPVCManifestEmptyStorageClass verifies that an empty StorageClass is rendered
+// explicitly as storageClassName: "" rather than omitted, so Kubernetes does not
+// default it to the cluster's default StorageClass.
+//
+// Steps:
+//  1. Render a PVC with StorageClass: "".
+//  2. Assert Spec.StorageClassName is non-nil and points to "".
+func TestPVCManifestEmptyStorageClass(t *testing.T) {
+	f := &Framework{CaseID: "OBS-04"}
+	var emptyPVC corev1.PersistentVolumeClaim
+	err := render("pvc.yaml", pvcTemplateData{
+		Name:         f.Name("static-claim"),
+		Namespace:    Namespace,
+		Labels:       f.Labels(),
+		AccessMode:   "ReadWriteMany",
+		StorageClass: "",
+		Size:         "1Gi",
+	}, &emptyPVC)
+	if err != nil {
+		t.Fatalf("rendering PVC with empty class: %v", err)
+	}
+	if emptyPVC.Spec.StorageClassName == nil {
+		t.Fatal("storageClassName was omitted; it must be explicitly empty so Kubernetes does not assign a default class")
+	}
+	if *emptyPVC.Spec.StorageClassName != "" {
+		t.Errorf("storageClassName is %q, want \"\"", *emptyPVC.Spec.StorageClassName)
+	}
+}
