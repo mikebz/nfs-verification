@@ -138,38 +138,106 @@ func assertRecovered(ctx context.Context, t *testing.T, s chaosSetup, faultAt ti
 	return recovery
 }
 
-// waitRecovered waits for the first write committed after the fault and returns
-// how long that took. It is separate from the assertion because the repeated
-// failover case measures five of these before it asserts anything about the
-// workload as a whole.
+// waitRecovered waits for the workload to lose service and get it back, and
+// returns how long that took measured from the fault. It is separate from the
+// assertion because the repeated failover case measures five of these before it
+// asserts anything about the workload as a whole.
+//
+// The outage is found as a stall in the record stream, not as the first write
+// stamped after the fault. Those are not the same thing, and the difference is
+// not small: records carry one-second resolution and the server keeps serving
+// through its termination grace, so the naive reading returned a write that
+// committed before service was lost and reported a two-minute outage as 0s. See
+// F-014, which has the runs.
+//
+// Reading the outage as a silence puts a floor under what can be measured: a
+// failover the client rides out in less than slo.LoadStallFloor leaves no
+// silence to find. That is the storage system doing better than the SLO asks,
+// so the case passes and says so, rather than waiting out the budget and
+// failing a deployment for recovering too fast to observe. It is only credible
+// once the workload has written its way past the whole budget without a stall,
+// which is what separates it from a client that is still blocked.
 func waitRecovered(ctx context.Context, t *testing.T, s chaosSetup, faultAt time.Time) time.Duration {
 	t.Helper()
 	// Waited out well past the budget on purpose: a case that gives up at the
 	// SLO reports "timed out" where it could report how long recovery actually
 	// took, and the second is what a defect report needs.
 	waitFor := s.budget + slo.ObservationMargin
-	var resumed framework.LoadRecord
+	var stall framework.Stall
+	var measured bool
+	var uninterrupted framework.LoadRecord
 	err := framework.Poll(ctx, framework.PollInterval, waitFor, func(ctx context.Context) (bool, error) {
 		rep, err := s.load.Report(ctx)
 		if err != nil {
 			return false, err
 		}
-		rec, ok := rep.FirstSuccessAfter(faultAt)
-		if ok {
-			resumed = rec
+		if st, ok := rep.StallAfter(faultAt, slo.LoadStallFloor); ok {
+			stall, measured = st, true
+			return true, nil
 		}
-		return ok, nil
+		last, ok := rep.LastRecord()
+		if ok && last.At.Sub(faultAt) > s.budget {
+			uninterrupted = last
+			return true, nil
+		}
+		return false, nil
 	})
 	if err != nil {
-		t.Fatalf("no write committed in the %s after the fault: the client never recovered. %v", waitFor, err)
+		// No stall in the log, and the stream never reached the far side of the
+		// budget either, so the client is blocked in an outage that has not
+		// ended. describeQuiet reads the stream one more time to say so in
+		// terms of the pod's own clock.
+		t.Fatalf("no completed outage in the %s after the fault: %s. %v",
+			waitFor, describeQuiet(ctx, t, s), err)
 	}
-	recovery := resumed.At.Sub(faultAt)
+	if !measured {
+		t.Logf("no client-visible outage: %s kept writing for the whole %s budget after the fault, up to "+
+			"record %d, with no gap longer than the %s stall floor. Recovery is reported as zero because "+
+			"there was nothing to recover from, not because it was measured (profile %s)",
+			s.writer, s.budget, uninterrupted.Index, slo.LoadStallFloor, profile(t).Name)
+		return 0
+	}
+	recovery := stall.Resumed.At.Sub(faultAt)
 	if recovery < 0 {
 		recovery = 0
 	}
-	t.Logf("first committed write %s after the fault (budget %s, profile %s)",
-		recovery.Round(time.Second), s.budget, profile(t).Name)
+	t.Logf("recovered %s after the fault: the client made no progress for %s, from record %d to record %d "+
+		"(budget %s, profile %s)", recovery.Round(time.Second), stall.Duration().Round(time.Second),
+		stall.Last.Index, stall.Resumed.Index, s.budget, profile(t).Name)
 	return recovery
+}
+
+// describeQuiet explains an absence of any completed outage in terms of the
+// pod's own clock, for the failure message above.
+//
+// It is reached only when the workload neither stalled nor wrote its way past
+// the budget, so the expected answer is that the client is still blocked and
+// the outage never ended. The other branches are there because that is the
+// answer a broken workload gives too, and "the writer logged nothing at all"
+// sends the reader somewhere very different from "the writer is stuck in a
+// hard-mount retry loop".
+func describeQuiet(ctx context.Context, t *testing.T, s chaosSetup) string {
+	t.Helper()
+	rep, err := s.load.Report(ctx)
+	if err != nil {
+		return fmt.Sprintf("and the workload log in %s could not be read either: %v", s.writer, err)
+	}
+	last, ok := rep.LastRecord()
+	if !ok {
+		return fmt.Sprintf("and %s logged no attempts at all, so the workload never ran", s.writer)
+	}
+	now, err := s.f.PodNow(ctx, s.writer)
+	if err != nil {
+		return fmt.Sprintf("last attempt was record %d, and %s's clock could not be read to say how long "+
+			"ago that was: %v", last.Index, s.writer, err)
+	}
+	if quiet := now.Sub(last.At); quiet > slo.LoadStallFloor {
+		return fmt.Sprintf("%s is still blocked: its last attempt was record %d, %s ago, so the outage "+
+			"never ended", s.writer, last.Index, quiet.Round(time.Second))
+	}
+	return fmt.Sprintf("%s is writing again, up to record %d, but its records never reached %s past the "+
+		"fault, which a stream that keeps moving should have done long ago: suspect the record stamps "+
+		"or the writer's clock rather than the storage system", s.writer, last.Index, s.budget)
 }
 
 // assertLoadHealthy stops the workload and reads the rest of the story out of

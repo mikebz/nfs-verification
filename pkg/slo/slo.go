@@ -159,6 +159,29 @@ const PromptLockRelease = 5 * time.Second
 // lawful lock grant reported as a protocol violation costs a week.
 const ClockSkewGuard = 5 * time.Second
 
+// LoadStallFloor is how long the workload's record stream has to go quiet
+// before the silence counts as the client having lost service.
+//
+// Recovery is "time to first successful I/O after the fault", and the obvious
+// reading of that -- the first success timestamped after the fault -- does not
+// measure it. The workload writes one record per second and stamps it from the
+// pod's clock at one-second resolution, the fault is stamped from the same
+// clock, and the server keeps serving through its termination grace. So a write
+// committed in the same second as the fault, or in the moments after it while
+// the server is still up, satisfies that reading immediately and reports a
+// recovery of zero from an outage that had not started. See F-014.
+//
+// What separates the two is the shape of the stream, not the timestamps. On a
+// hard mount the client blocks rather than erroring, so an outage is a silence:
+// consecutive records normally sit one or two seconds apart, and a fault opens
+// a gap measured in tens of seconds. This floor sits well above that cadence
+// and well below the 60s smallest recovery bound any profile states, so it
+// separates the two without being near either.
+//
+// It classifies an interval, it gates nothing. The bound still decides pass or
+// fail.
+const LoadStallFloor = 10 * time.Second
+
 // The bounds OBS-06 compares two readings of one volume against.
 //
 // Two samplers reading one quantity at two moments never produce equal numbers,
