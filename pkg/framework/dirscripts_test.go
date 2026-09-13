@@ -234,7 +234,7 @@ func TestAppendRecordsScriptKeepsDescriptorAndWritesRecords(t *testing.T) {
 		t.Errorf("pass 2 stdout was %q, want \"done\"", string(out2))
 	}
 
-	// 5. Exact byte comparison: verifies append order and exact line boundaries.
+	// 6. Exact byte comparison: verifies append order and exact line boundaries.
 	content, err := os.ReadFile(target)
 	if err != nil {
 		t.Fatalf("reading appended file: %v", err)
