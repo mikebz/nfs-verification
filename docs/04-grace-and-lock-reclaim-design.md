@@ -2,10 +2,11 @@
 
 Author: mikebz@
 Created: 2026-09-10
-Updated: 2026-09-12
+Updated: 2026-09-13
 Status: shipped, delivery step 4 ([PR #8](https://github.com/mikebz/nfs-verification/pull/8))
-Serves: CHAOS-05, CHAOS-06, CHAOS-07, OBS-02, OBS-03. Requirements in
-[`01-test-plan.md`](01-test-plan.md) Sections 3.3, 3.5 and 3.8.
+Serves: CHAOS-05, CHAOS-06, CHAOS-07. (OBS-02 and OBS-03 design consolidated
+into [`06-observability-design.md`](06-observability-design.md)). Requirements in
+[`01-test-plan.md`](01-test-plan.md) Sections 3.3 and 3.8.
 Builds on [`03-chaos-operations-design.md`](03-chaos-operations-design.md), whose
 rules all still hold.
 
@@ -183,6 +184,11 @@ so a failing case does not leave a lock held by a pod that outlives it.
 
 ## 8. What changed after this was written
 
+- **Observability design consolidated.** OBS-02 and OBS-03 were originally
+  designed here alongside grace and failover. Design ownership of all
+  observability cases (OBS-01 through OBS-07) was consolidated into
+  [`06-observability-design.md`](06-observability-design.md) so that all health,
+  telemetry and capacity verification is unified in one document.
 - **OBS-01's requirement moved.** This doc listed "asserting that an alert fired"
   as OBS-01's requirement, needing a monitoring stack the suite does not deploy.
   [`06-observability-design.md`](06-observability-design.md) replaced that: the

@@ -1,18 +1,18 @@
-# 06: Observability: the data an operator can monitor on
+# 06: Observability: health signals, telemetry, and capacity
 
 Author: mikebz@
 Created: 2026-09-11
-Updated: 2026-09-12
-Status: **in progress.** Delivery step 7, first of three pull requests shipped
-([PR #29](https://github.com/mikebz/nfs-verification/pull/29)): the kubelet
-stats reader and OBS-06. OBS-05, OBS-01 and OBS-07 are designed and not built.
-Serves: OBS-05, OBS-06, OBS-07, and the half of OBS-01 that needs no fault.
-Requirements in [`01-test-plan.md`](01-test-plan.md) Section 3.5.
+Updated: 2026-09-13
+Status: **in progress.** Serves the complete Observability test group:
+OBS-02, OBS-03, OBS-04, and OBS-06 shipped; OBS-05 and OBS-07 designed; OBS-01
+configuration half shipped, behavioral half deferred to Step 10.
+Serves: OBS-01 through OBS-07. Requirements in [`01-test-plan.md`](01-test-plan.md) Section 3.5.
 Builds on [`03-chaos-operations-design.md`](03-chaos-operations-design.md),
 [`04-grace-and-lock-reclaim-design.md`](04-grace-and-lock-reclaim-design.md) and
 [`05-data-path-and-locktool-design.md`](05-data-path-and-locktool-design.md),
-whose rules all still hold. It supersedes one line of doc 04, which listed
-"asserting that an alert fired" as OBS-01's requirement.
+whose rules all still hold. It consolidates observability design ownership across
+the repository, superseding the OBS-02 and OBS-03 sections of doc 04 and
+documenting OBS-04.
 
 ---
 
@@ -20,8 +20,8 @@ whose rules all still hold. It supersedes one line of doc 04, which listed
 
 **The suite verifies what the deployment publishes, never the alert rules.**
 
-Test plan Section 3.5 words four of its cases as "an alert fires". An alert is a
-rule somebody wrote: a threshold, a duration, a severity and a routing policy,
+Test plan Section 3.5 words several of its cases as "an alert fires". An alert is a
+rule somebody wrote: a threshold, a duration, a severity, and a routing policy,
 all organization-specific. A suite asserting on them would fail a healthy storage
 system for a threshold set differently, and would have to find or install a
 monitoring stack it does not own. What *is* a property of the system under test
@@ -32,273 +32,231 @@ produces it for every workload is not evidence about NFS. So **no case passes on
 a signal its own fault produced**, and every case **fails rather than skipping**
 when the deployment publishes nothing. That is F-008's rule applied uniformly.
 
-Done means an operator on this deployment can answer four questions from data
-that exists: is the server reachable, is it near its memory ceiling, is the
-volume near capacity, and do the server's own metrics survive a restart.
+Done means an operator on this deployment can answer seven operational questions
+from telemetry data that actually exists:
+1. Does the availability signal represent NFS reachability rather than just container death? (OBS-01)
+2. Is a failover event observable with a timestamp and measurable duration? (OBS-02)
+3. Are grace period entry and exit observable and bounded? (OBS-03)
+4. Does an unmountable share surface an actionable warning on the client pod? (OBS-04)
+5. Is the server container's memory ceiling declared and its working set readable? (OBS-05)
+6. Does volume capacity and usage agree between the control plane and pod `df`, and does quota apply? (OBS-06)
+7. Do the server's own metrics survive a restart? (OBS-07)
 
-## 2. What these four cases assert
+## 2. What the outside channel covers, and what it cannot
 
-Shared conventions are in [`01-test-plan.md`](01-test-plan.md) Section 4.1, and
-the four words a case reports are defined in the repository README. What is
-specific to observability:
+When an NFS server publishes no metrics and no grace announcements, everything an
+operator sees comes from the outside: the kubelet watching a container, and the
+Kubernetes API server tracking objects. That covers less of NFS than its volume of
+events and metrics suggests, and the boundary decides what these cases can honestly claim.
 
-| # | Assertion | Where it comes from |
+| Question an operator asks | Answered from outside? | Channel |
 |---|---|---|
-| 1 | No case asserts that an alert fired, or reads a rule, a threshold or a severity | Those are the operator's, and organization-specific |
-| 2 | The suite deploys no monitoring stack and depends on no hosted one | Every control-plane reading goes through the API server with the existing kubeconfig. The one workload-side reading, `df` in a pod, is the existing exec path, because the point of it is to be what the workload sees |
-| 3 | One verdict rule, used in every case (Section 4) | An earlier revision stated it four different ways in four places, which is worse than choosing wrong |
-| 4 | No case passes on a signal its own fault produced | Deleting a pod moves every container-derived signal by construction, so such a case would pass on a deployment with no monitoring at all |
-| 5 | A case that reads a live value shows it moves | A frozen counter and a gauge that ignores its subject both exist, and neither is usable. A case that reads configuration rather than a value is exempt and says so |
-| 6 | Build only what a case asserts on | No reader, endpoint or classifier for a series no assertion reads. Section 7 lists what was cut and what each would have served |
-| 7 | No case drives the server to OOMKill or fills a filesystem it does not own | Producing the failure would mean deliberately destroying the cluster's storage to observe an ordering |
-| 8 | Two readings of one quantity agree within a stated tolerance, or the case says by how much they disagreed | Two samplers reading at two moments never produce equal numbers. The tolerance is derived from the slower sampler's period and lives in `pkg/slo` |
-| 9 | No bound is asserted that cannot fail | A timing assertion belongs in the SLO table with a fault that can violate it, or it is reported rather than asserted. This is why `AlertSLO` was deleted rather than renamed |
+| Is the process running; did it restart, and when | Yes | Container status / Events (OBS-02) |
+| How much CPU and memory is it using | Yes | Kubelet stats summary (OBS-05) |
+| Was it OOMKilled | Yes, when a limit exists | Container termination reason |
+| Did a client fail to mount a volume, and why | Yes | Kubelet Events on client pod (OBS-04) |
+| How full is a volume | Yes, when driver implements stats | Kubelet stats summary (OBS-06) |
+| **Is the server answering NFS at all** | **No** (lifecycle only) | Service readiness probe (OBS-01) |
+| **Is it in grace, did reclaims succeed** | **No** (invisible to kubelet) | Container runtime log stream (OBS-03) |
+| **NFS operation and error rates (READ, WRITE, LOCK)** | **No** | Server metrics endpoint (OBS-07) |
+| **Clients holding state, locks held, open files** | **No** | Server metrics endpoint (OBS-07) |
+| **Which export is busy or failing** | **No** | Server-side metrics / logs |
 
-## 3. What this phase builds
-
-Two readers, and nothing else:
-
-- **The kubelet stats summary**, through the API server's node proxy: per-volume
-  capacity and usage with the kubelet's own timestamp and claim reference, and
-  per-container memory working set from the same call. One reader, two cases.
-- **The server's own metrics endpoint**, through the API server's pod proxy, with
-  a minimal scanner for the Prometheus exposition format.
-
-Everything else comes from objects the suite already reads: the server pod's
-spec, its container statuses, and the Service in front of it. No new flags, no
-new fault, no new module dependency, and **no new capability**: a capability
-would gate these cases off on exactly the runs whose findings matter.
-
-Both proxy subresources are new access for this suite. Neither is exec, and
-neither is a scraper running in the cluster.
-
-## 4. The verdict rule
-
-An earlier revision stated the verdict for a missing reading four different ways
-in four places, which is worse than choosing wrong: an implementer picks one at
-random. One rule:
-
-| What happened | Verdict | Why |
-|---|---|---|
-| The suite could not reach a source for its own reasons: the node proxy refused it, the kubeconfig lacks the verb | **blocked**, naming what was refused | Harness access. Nothing was learned about the deployment |
-| The deployment does not publish, declare or implement what the case is about: no metrics endpoint, no memory limit, no volume stats, no readiness probe that tests NFS | **fail**, naming the deployment | This is the finding. An operator here has no input, and no rule they write changes that |
-| The case could not create its own precondition: the storm did not move the reading inside its budget | **blocked**, with the number reached | The case did not establish what it needed, and calling that a pass is rule 5's failure mode |
-
-F-008 is the precedent for row two: on a server that never announces grace,
-OBS-03 fails rather than skips, so the finding lands where an operator sees it.
-There is no exception, including for an export whose reported total is the
-backing filesystem rather than the claim: OBS-06 is about a volume near capacity,
-and a number describing something else is not a measurement of this claim.
-
-## 5. What the outside channel covers, and what it cannot
-
-When the server publishes nothing, everything an operator sees comes from the
-kubelet watching a container. That covers less of NFS than its volume of metrics
-suggests, and the boundary decides what these cases can honestly claim.
-
-| Question an operator asks | Answered from outside? |
-|---|---|
-| Is the process running; did it restart, and when | Yes, from container status |
-| How much CPU and memory is it using | Yes, from the kubelet |
-| Was it OOMKilled | Yes, when a limit exists to kill against |
-| How full is a volume | Yes, when the driver implements volume stats |
-| Did a mount, unmount or provision succeed | Yes, but that measures the client and driver side |
-| **Is the server answering NFS at all** | **No.** Nothing probes port 2049 on this chart |
-| **NFS operation and error rates** | **No.** Nothing counts READ, WRITE, COMMIT or LOCK |
-| **Clients holding state, locks held, open files** | **No.** That lives in the server |
-| **Is it in grace, did reclaims succeed** | **No.** A log line only, and F-008 established this server emits none |
-| **Which export is busy or failing** | **No.** Exports are invisible from outside the process |
-
-The line through the table: the outside channel reports the **container** and the
+The dividing line: the outside channel reports the **container** and the
 **Kubernetes storage plumbing**, and says nothing about the **NFS protocol**.
 
-Two facts read from this chart's own StatefulSet template make it thinner still,
-and both are load-bearing:
+Two facts read from common NFS provisioner chart templates make the outside channel
+thinner still:
+- **No liveness or readiness probe.** Ports are named (including 2049), but nothing probes
+  them. Readiness tracks the container's lifecycle: a server wedged in kernel `D` state or
+  a deadlocked userspace daemon reads `Ready` and keeps its Service endpoints, continuing to
+  attract client traffic that hangs indefinitely. That is OBS-01's finding.
+- **No resource limits by default.** Setting no memory limit means no ceiling to monitor
+  against and no kubelet OOMKill either: the host node's OOM killer fires instead, which is
+  less visible and destabilizes the whole node. That is OBS-05's finding.
 
-- **It declares no liveness or readiness probe.** Twelve ports are named, 2049
-  among them, and nothing probes any of them. Readiness therefore tracks the
-  container's lifecycle: a server wedged but not exited reads Ready and keeps its
-  endpoints, serving clients that hang. That is OBS-01's finding.
-- **It sets no resource limits by default.** No memory limit means no ceiling to
-  monitor against and no kubelet OOMKill either: the node's OOM killer fires
-  instead, which is less visible and worse for every other pod on that node. That
-  is OBS-05's finding.
+## 3. The four telemetry channels and harness readers
 
-## 6. The four cases
+The suite builds four minimal readers, using existing workstation credentials and
+avoiding any dependency on an in-cluster monitoring stack:
 
-**OBS-01: does the availability signal represent NFS.** The obvious construction,
-delete the pod and watch readiness go false, is worthless: Kubernetes does that
-for any deleted pod of any workload, so the case would pass on a deployment with
-no monitoring at all (rule 4). The outage that matters is a server wedged but
-still running. So the case splits:
+1. **The Kubelet Stats Summary Reader** (`pkg/framework/kubelet.go`):
+   Accessed via the API server's node proxy (`/api/v1/nodes/<node>/proxy/stats/summary`).
+   Returns per-volume capacity, used bytes, and available bytes with the kubelet's own
+   timestamp and PVC reference (`OBS-06`), and container memory working set from the same
+   call (`OBS-05`). No node agent or scraper is needed: it is a standard `GET` using client-go.
+2. **The Grace Log Stream Observer** (`pkg/framework/grace.go`):
+   Streams server container logs via the Kubernetes Pod API (`PodLogOptions{Timestamps: true}`).
+   Crucially, timestamps come from the container runtime (RFC 3339 nano), not from the server's
+   own log formatting. It classifies lines into grace entry or exit using an exit-first heuristic,
+   reading previous-container logs across pod restarts (`OBS-03`).
+3. **The Event Stream Collector** (`pkg/framework/`):
+   Watches Kubernetes `v1.Event` objects associated with client and server pods. Watches for
+   `Warning` events such as `FailedMount` and `FailedAttachVolume` on client pods (`OBS-04`),
+   and pod restart / killing events during server failovers (`OBS-02`).
+4. **The Server Metrics Pod Proxy Reader**:
+   Accessed via the API server's pod proxy (`/api/v1/namespaces/<ns>/pods/<pod>:<port>/proxy/metrics`).
+   Implements a minimal text scanner for the Prometheus exposition format, checking series
+   survival and counter resets across server restarts (`OBS-07`).
+5. **The Service Readiness Probe Checker**:
+   Inspects the server pod's container spec and the backing Service's endpoints. Asserts that
+   readiness is driven by an active network probe targeting the NFS service (port 2049) rather
+   than container lifecycle (`OBS-01`).
 
-- *This phase, no fault.* Read the readiness configuration and assert the
-  deployment has a signal that can represent NFS reachability: a probe targeting
-  the NFS service, with the Service's endpoints following it. Record the blind
-  window, the probe's period times its failure threshold, or state that it is
-  unbounded where no probe exists. Fail where the only in-cluster signal is the
-  container's lifecycle.
-- *Step 10, with the fault that can fail it.* Stop the server process without
-  killing it, which the node agent can already do, and assert the signal goes
-  false within a bound. That bound joins Section 3.8 then, because only then does
-  a fault exist that can violate it.
+Both proxy subresources (`nodes/proxy` and `pods/proxy`) represent direct control-plane
+access. Neither runs a scraper inside the cluster, and neither execs into nodes.
 
-Section 3.5 is therefore **not closed out by this step**, and the plan says so.
+## 4. The uniform verdict rule
 
-**OBS-05: a ceiling that is declared, and a reading that moves.** The plan's
-wording is "alert fires before OOMKill"; producing the OOMKill would mean
-deliberately destroying the cluster's storage to observe an ordering (rule 7).
-The case asserts instead that the container declares a memory limit, that its
-working set is readable against that limit with a timestamp, and that the reading
-moves under a bounded metadata storm. No limit declared is a failure: an
-undeclared ceiling is one nobody can monitor against.
+A missing telemetry reading or broken signal must be reported consistently across all cases.
+An earlier draft mixed skip, fail, and block arbitrarily; the suite now enforces one rule:
 
-**OBS-06: two sources, one quantity, and a write to prove they track.** The
-control plane must report this volume's usage, it must agree with `df` inside the
-pod within a tolerance derived from the kubelet's sampling period, and both must
-move when the workload writes. Available is recorded rather than derived: on a
-filesystem with reserved blocks, used plus available does not equal capacity, and
-deriving would invent agreement. No volume stats from the driver is a failure;
-the agreement comparison is run and recorded either way.
-
-**OBS-07: the server's own metrics, with nothing standing in for them.** Two
-reads of one series either side of a restart, and four exhaustive verdicts:
-
-| Verdict | Shape | Meaning |
+| What happened | Verdict | Rationale |
 |---|---|---|
-| `resumed-reset` | answers both sides, lower after | consistent with a process that restarted, passes |
-| `resumed-continuous` | answers both sides, not lower | the series outlived the process; lawful, passes |
-| `never-resumed` | answered before, not after, past the resume bound | the metrics did not survive |
-| `absent` | the server publishes no endpoint | fails |
+| The suite could not reach a source for its own reasons: the node proxy returned 403, the kubeconfig lacks `get nodes/proxy`, or static PVs are forbidden | **blocked**, naming what was refused | Harness access gap. Nothing was learned about the deployment under test |
+| The deployment does not publish, declare, or implement what the case verifies: no metrics endpoint, no memory limit, no volume stats, no quota, no readiness probe for NFS | **fail**, naming the deployment | Deployment defect or telemetry gap. An operator on this cluster has no data to alert on |
+| The case could not create its own precondition: the workload storm did not move the reading within budget | **blocked**, with the number reached | The case failed to set up its test condition; reporting pass would be vacuous |
 
-Both `resumed-` verdicts pass, so the split labels the record rather than
-deciding the case: a gauge that fell is not evidence of anything, and a verdict
-that failed on it would assert that every series must be a counter. `absent`
-fails rather than blocks, and no container-level signal is substituted.
+F-008 is the guiding precedent: when a server never announces grace, OBS-03 fails rather
+than skips, so the lack of visibility is highlighted as a deployment defect. Similarly,
+when an export reports the entire backing disk rather than the claim's provisioned size,
+OBS-06 fails on its quota assertion (F-009).
+
+## 5. What these seven cases assert
+
+Shared conventions (one clock per measurement, waiting past the target, bounds from `pkg/slo`)
+live in [`01-test-plan.md`](01-test-plan.md) Section 4.1. The table below covers the assertions
+specific to the Observability test group:
+
+| Case | Assertion | Source & Basis |
+|---|---|---|
+| **OBS-01** | The deployment declares a readiness probe targeting the NFS port, and endpoints drop when NFS is unavailable | Kubernetes probes and Service endpoints. Readiness tracking container lifecycle alone is a failure |
+| **OBS-02** | Failover duration is observable with a timestamp in metrics or logs | Kubernetes Events and server log stream. Fails on silence or missing timestamps |
+| **OBS-03** | Grace period entry and exit are observable with timestamps; duration is bounded by `2 * LeaseSeconds` | RFC 8881 Section 8.4.2. Read from runtime log timestamps; fails if unannounced (F-008) |
+| **OBS-04** | A mount failure on a client pod surfaces as an actionable `Warning` Event naming the volume | Kubelet mount logic. Fails if silent, or if the pod ever falsely reports `Ready` |
+| **OBS-05** | The server container declares a memory limit, and its working set is readable and moves under load | Kubelet Summary API. Fails if no limit is declared; never manufactures an OOMKill |
+| **OBS-06** | Kubelet volume usage agrees with pod `df` within tolerance, both move with writes, and quota applies | CSI `NodeGetVolumeStats` capability. Fails if unannounced or if reported total is backing disk (F-009) |
+| **OBS-07** | Server metrics answer before and after restart; counters persist or reset cleanly | Prometheus metrics scraping. Fails if no metrics endpoint is exposed |
+
+## 6. Detailed case walkthroughs
+
+### OBS-01: Server unavailable (NFS readiness vs. container lifecycle)
+- **Problem**: In-cluster clients access NFS via a Kubernetes Service. If the server process
+  wedges in kernel `D` state or deadlocks, the container stays running, Kubernetes reports the pod
+  `Ready`, and the Service continues routing new client connections to a dead export.
+- **Design**:
+  - *Configuration half (shipped)*: Inspects the StatefulSet/Pod container spec. Asserts that
+    a readiness probe exists, targets port 2049 (or an NFS health script), and that the Service's
+    endpoints track it. Fails if readiness merely mirrors container lifecycle.
+  - *Behavioral half (Step 10)*: Injects a freeze fault (SIGSTOP via node agent) without killing
+    the container. Asserts that Service endpoints drop the pod within the probe's blind window
+    (`periodSeconds * failureThreshold`).
+
+### OBS-02: Failover event is observable
+- **Problem**: When a failover happens, an operator needs to see when it started, when it finished,
+  and how long it took, using standard operational tooling.
+- **Design**:
+  - Monitors two independent channels: Kubernetes Events on the server pod/StatefulSet, and the
+    server container's log stream.
+  - Validates that at least one channel provides timestamped markers for outage start and recovery.
+  - Asserts that the computed duration is positive and bounded by the failover SLO.
+  - Accepts either channel, but records whether the finding came from Kubernetes (container restart)
+    or NFS (daemon recovery).
+
+### OBS-03: Grace period entry and exit
+- **Problem**: Grace re-entry loops mimic hung clients in front of a healthy server (the most common
+  misdiagnosis in NFS on Kubernetes, per triage runbook Section 4.3). A suite cannot evaluate failover
+  correctness without observing grace.
+- **Design**:
+  - Uses [`pkg/framework/grace.go`](file:///home/mikebz/src/nfs-verification/pkg/framework/grace.go) to stream logs.
+  - Evaluates lines using container runtime timestamps, bypassing unstandardized server log formats.
+  - Applies an **exit-first classification rule**: a line containing "grace" is checked for exit/lift
+    keywords first, because common exit phrases contain the entry phrase prefixed with a negation.
+  - Asserts grace entry is observed, followed by grace exit within `2 * LeaseSeconds`.
+  - Fails if the server announces no grace (F-008).
+
+### OBS-04: Client mount failure surfaces as actionable Event
+- **Problem**: When a client pod cannot mount an NFS volume, kubelet retries in the background while
+  the pod remains stuck in `ContainerCreating`. Without an event, the failure is completely silent.
+- **Design**:
+  - Manufactures a deterministic mount failure by creating a static PV pointing at an unroutable IP
+    (RFC 5737 documentation prefix `192.0.2.0/24`) and creating a client pod referencing its claim.
+  - Watches for a `Warning` Event on the pod with reason `FailedMount` or `FailedAttachVolume`.
+  - Asserts that the event message is actionable: it must name the PVC, PV, or pod, and state an error
+    cause (mount, attach, timeout, or nfs).
+  - Asserts that the pod never falsely transitions to `Ready`.
+
+### OBS-05: Server memory ceiling and working set telemetry
+- **Problem**: Userspace NFS servers historically suffer memory leaks or cache growth under small-file
+  workloads. Without a declared memory limit, the pod cannot be monitored against a ceiling, and node
+  OOM kills occur instead of container-level remediation.
+- **Design**:
+  - Asserts the server container declares `resources.limits.memory`. An undeclared ceiling fails the case.
+  - Reads `container.memory.workingSetBytes` from the Kubelet Stats Summary via `nodes/proxy`.
+  - Applies a bounded metadata workload (creating 1,000 files) and asserts that the working set gauge moves.
+  - **Never manufactures an OOMKill**: deliberately exhausting memory would crash cluster storage and
+    take down unrelated workloads (Rule 7).
+
+### OBS-06: Volume near capacity (Control plane agreement and quota check)
+- **Problem**: Storage alerts rely on the CSI driver publishing accurate volume usage to the kubelet.
+  Furthermore, RWX shares often report the host node's root filesystem capacity rather than the claim's
+  provisioned size, making capacity alerts meaningless.
+- **Design**:
+  - Reads `pvc.usedBytes` and `pvc.capacityBytes` from the Kubelet Stats Summary via `nodes/proxy`.
+  - Reads used and available space inside the pod using `df -B1` over `pods/exec`.
+  - Writes a 128 MiB verification file with `conv=fsync`.
+  - Asserts that both the kubelet summary and `df` move by the write delta.
+  - Asserts that kubelet and `df` agree within a tight tolerance derived from the kubelet sampling interval.
+  - **Asserts quota enforcement**: the reported capacity must match the claim size (e.g. 1 GiB). If it
+    reports the 10 GiB backing filesystem, the case fails with [F-009](findings.md).
+
+### OBS-07: Metrics survive server restart
+- **Problem**: Server-side metrics (NFS RPC counts, active clients, lock counts) must survive server
+  restarts or reset predictably so monitoring pipelines do not break during failover.
+- **Design**:
+  - Scrapes the server's metrics endpoint before a pod deletion and again after the server recovers.
+  - Categorizes the series behavior into four mutually exclusive verdicts:
+    - `resumed-reset`: series present before and after, counter reset lower (passes).
+    - `resumed-continuous`: series present before and after, counter continuous (passes).
+    - `never-resumed`: series answered before but failed after restart (fails).
+    - `absent`: no metrics endpoint published by server (fails).
+  - Fails if the server exposes no metrics endpoint.
 
 ## 7. Decisions worth keeping
 
-**No monitoring stack, and no hosted backend.** GKE runs no in-cluster
-Prometheus: managed collection ships to Cloud Monitoring, and its query API is a
-frontend proxy the operator deploys. Querying it is a cloud dependency the suite
-refuses.
+- **No hosted monitoring stack**: GKE has no default in-cluster Prometheus; its managed collection
+  ships to Cloud Monitoring, which requires cloud-specific APIs. Accessing Kubernetes proxy subresources
+  keeps the harness cloud-agnostic.
+- **API server proxy subresources (`nodes/proxy`, `pods/proxy`)**: Allows the harness to remain an
+  out-of-cluster client-go application. Avoids deploying in-cluster scrapers, daemonsets, or exec helpers.
+- **Live movement over static presence**: A frozen counter or a hardcoded gauge looks healthy to a
+  simple query. Every numerical case (OBS-05, OBS-06) proves the gauge actually moves in response to writes.
+- **No new Capabilities**: Missing telemetry or absent quotas must report `fail` or `blocked`. Adding
+  a capability would turn deployment defects into silent skips on the clusters where verification matters most.
+- **AlertSLO was deleted**: A bound that cannot be violated by a test fault is not an SLO. Alert rules
+  are operator concerns; data availability is the storage system's concern.
 
-**The API server's proxy subresources, not exec and not a scraper.** The kubelet
-and the server both speak HTTP inside the cluster and the API server proxies to
-both, so the harness stays a Kubernetes client on a workstation.
+## 8. What this document does not claim
 
-**A reading is shown live in one of two ways**, and the case says which: where the
-value is a number, two reads either side of a bounded action it must respond to;
-where it is a time, the recorded event time.
+- Does not claim that any human operator is paged, or that alert thresholds are set appropriately.
+- Does not claim that NFS operation rates or lock states are visible from outside when a server exposes
+  no metrics endpoint.
+- Does not claim that availability probes catch deadlock conditions until the Step 10 freeze fault lands.
 
-**Nothing is added to `Capabilities`.** An earlier revision proposed four
-capability flags for these sources. A capability gates a case off, and every one
-of these absences is a finding this phase exists to report. This is the one piece
-of the contract an implementer could get wrong with no test noticing.
+## 9. What real runs taught
 
-**`AlertSLO` in `pkg/slo` is deleted rather than renamed.** Five minutes was an
-alert's `for` duration, read by nothing, and nothing in this phase can violate
-it. A bound that cannot fail is not an SLO (rule 9).
+- **[F-008](findings.md) (Grace unannounced)**: The reference `nfs-server-provisioner` logs no grace
+  entry or exit messages. OBS-03 failed as designed, preventing silent misdiagnoses during chaos tests.
+- **[F-009](findings.md) (Missing per-volume quota)**: On shared exports without filesystem quotas,
+  both kubelet and `df` report the host's 10 GiB disk for a 1 GiB claim. OBS-06 fails on its quota check,
+  proving that percentage-based capacity alerts on this deployment would be alerting on the wrong volume.
 
-**Not built, and what each would have served**, so the next reader does not
-rebuild them without a case:
+## 10. Sources
 
-| Not built | Would have served | Why nothing needs it |
-|---|---|---|
-| The kubelet's own metrics endpoint | CSI operation counters | No OBS row is about the driver's operation path |
-| cAdvisor series | The restart marker for OBS-07 | Container status carries start time and restart count |
-| The resource metrics endpoint | A working set cross-check | Duplicates the stats summary |
-| The probes endpoint | Probe counters for OBS-01 | On a chart with no probes, the finding comes from configuration |
-| `metrics.k8s.io` | A second memory source | Same number, plus an add-on dependency |
-| A polling sampler and continuity classifier | Verdicts across many series | OBS-07 is two reads either side of one restart |
-
-## 8. What this phase does not claim
-
-It does not show anyone is paged, that a threshold is set or set sensibly, or
-that any data is retained: every reading is live. It does not show the
-availability signal detects every outage, because the wedge fault is step 10's.
-And on a deployment whose server publishes nothing, it observes no NFS operation
-and no NFS error anywhere; the table in Section 5 is the boundary, and OBS-07
-fails rather than implying otherwise.
-
-What a green run does show: this deployment declares a readiness signal wired to
-the NFS service, declares a memory ceiling and reports a working set against it
-that responds to load, reports per-volume usage that agrees with the workload's
-own view and tracks its writes, and publishes server metrics that survive a
-restart.
-
-## 9. Delivery
-
-Three pull requests, smallest runnable slice first, all `TestObs` under
-`make test-obs`:
-
-1. The kubelet reader and **OBS-06**. No fault, and the case in this phase most
-   directly about storage. **Shipped**; Section 11 says what the first run
-   returned.
-2. **OBS-05**: the memory reading from the same reader, the declared-limit
-   assertion, and the bounded storm.
-3. **OBS-01 and OBS-07**: the availability configuration assertion, the metrics
-   probe, the text scanner, and the restart comparison.
-
-Only OBS-07 injects a fault, and it is the pod delete OBS-02 and OBS-03 already
-carry, so the 45 minute category budget is expected to hold.
-
-**Expect most of this to come back red** on the provisioner this project runs
-against, which declares no probes, no resource limits and no metrics endpoint.
-That is the phase working, and it belongs in [`findings.md`](findings.md) as one
-entry.
-
-## 10. Open
-
-- A server publishing on a port it declares nowhere is where a flag would earn
-  its place. None has been met, so none is added.
-- The agreement tolerance in OBS-06 has still not met a real disagreement: on
-  the first run the two sources matched to the byte, because both were reading
-  the same backing filesystem (F-009). A deployment with a real per-volume quota
-  is what would exercise it.
-- The step 10 wedge fault, and the bound OBS-01's behavioral half will assert
-  against.
-
-## 11. What the first shipped slice returned
-
-PR 1 landed the kubelet stats reader, the volume usage reading with its
-agreement, movement and quota checks, OBS-06, and four bounds in `pkg/slo`.
-`AlertSLO` was deleted with it, as Section 7 said it should be.
-
-Run against GKE v1.37, StorageClass `nfs`, default profile, 2026-09-11:
-
-- The CSI driver **does** implement volume statistics: the kubelet publishes
-  per-volume usage for the claim through the node proxy.
-- The two sources agreed exactly, before and after the write, and both moved by
-  the full 128 MiB, the kubelet's reading arriving 1m33s later, which is its
-  documented aggregation period.
-- The case still failed, on the quota check: the claim is provisioned at 1 GiB
-  and both sources report the provisioner's 10 GiB backing filesystem. That is
-  [F-009](findings.md), and it is the verdict rule in Section 4 doing its job.
-  An operator alerting at 80% of that number is watching the wrong volume.
-
-Two things this settles that the design could only assert. The tolerance is a
-fraction of the **smaller** of the claim's provisioned size and the capacity the
-workload is shown: taking it from the reported capacity alone gave a 199 MiB
-tolerance against a 128 MiB write on the first run, which is an assertion that
-had quietly stopped being able to fail. And the byte counts decode as pointers,
-because a driver that does not implement volume statistics omits them and a
-plain `int64` would read as an empty volume rather than as no reading at all.
-
-The quota check runs last on purpose, so everything above it is measured and
-recorded before the case goes red.
-
-## 12. Sources
-
-- Kubernetes [node metrics data](https://kubernetes.io/docs/reference/instrumentation/node-metrics/)
-  for the kubelet stats summary, and the
-  [Pod API](https://kubernetes.io/docs/reference/kubernetes-api/workload-resources/pod-v1/)
-  for probes, resource limits and container statuses.
-- Kubernetes [probes](https://kubernetes.io/docs/concepts/configuration/liveness-readiness-startup-probes/)
-  and [Service endpoints](https://kubernetes.io/docs/concepts/services-networking/service/),
-  for what readiness does to a client's connection, which is OBS-01's subject.
-- The [CSI specification](https://github.com/container-storage-interface/spec/blob/master/spec.md),
-  where `NodeGetVolumeStats` is an optional capability: a driver that omits it
-  publishes no per-volume usage, which is what OBS-06 reports.
-- [RFC 8881](https://www.rfc-editor.org/rfc/rfc8881.html) for what the NFS
-  protocol layer is that none of the outside signals reach.
+- [RFC 8881](https://www.rfc-editor.org/rfc/rfc8881.html) Section 8.4.2 (Server Failure and Recovery).
+- Kubernetes [Node Metrics Data](https://kubernetes.io/docs/reference/instrumentation/node-metrics/)
+  for the Kubelet Stats Summary format.
+- Kubernetes [Pod API](https://kubernetes.io/docs/reference/kubernetes-api/workload-resources/pod-v1/)
+  for log options, container statuses, and probe definitions.
+- [CSI Specification](https://github.com/container-storage-interface/spec/blob/master/spec.md) for
+  `NodeGetVolumeStats` optional capability.

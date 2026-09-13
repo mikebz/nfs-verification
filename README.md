@@ -29,9 +29,9 @@ cases it serves and whether it shipped:
 | Design doc | Step | Cases | Status |
 |---|---|---|---|
 | [`03-chaos-operations-design.md`](docs/03-chaos-operations-design.md) | 3 | CHAOS-01, CHAOS-02 | Shipped |
-| [`04-grace-and-lock-reclaim-design.md`](docs/04-grace-and-lock-reclaim-design.md) | 4 | CHAOS-05, CHAOS-06 (whole-file locks), CHAOS-07, OBS-02, OBS-03 | Shipped |
+| [`04-grace-and-lock-reclaim-design.md`](docs/04-grace-and-lock-reclaim-design.md) | 4 | CHAOS-05, CHAOS-06 (whole-file locks), CHAOS-07 (OBS-02, OBS-03 consolidated into doc 06) | Shipped |
 | [`05-data-path-and-locktool-design.md`](docs/05-data-path-and-locktool-design.md) | 6 | DATA-06 to DATA-13, the byte-range half of DATA-05 and the disjoint-range half of CHAOS-06, plus `locktool` | Shipped, DATA-14 deferred |
-| [`06-observability-design.md`](docs/06-observability-design.md) | 7 | OBS-01 (half), OBS-05, OBS-06, OBS-07 | In progress: OBS-06 and the kubelet reader shipped |
+| [`06-observability-design.md`](docs/06-observability-design.md) | 7 | OBS-01 through OBS-07 (full observability test group) | In progress: OBS-02, OBS-03, OBS-04, OBS-06 shipped |
 
 Every fact has one home: what a case must verify is the test plan's, what is
 built and how to run it is this file's, why a phase is shaped the way it is
