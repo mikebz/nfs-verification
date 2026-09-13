@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-10
-Updated: 2026-09-12
+Updated: 2026-09-13
 Status: shipped, delivery step 3 ([PR #4](https://github.com/mikebz/nfs-verification/pull/4))
 Serves: CHAOS-01, CHAOS-02. Requirements in [`01-test-plan.md`](01-test-plan.md)
 Section 3.3, targets in Section 3.8, weighting in Section 2.4.
@@ -75,9 +75,13 @@ workload and its log, `pkg/framework/sweep.go` for the record sweep,
 
 What matters about them, and what a later change must not break:
 
-- The log line's time is when the attempt **finished**, so the first success
-  after a fault is the moment the outage ended.
-- Resolution is one second, against targets of 60 seconds and up.
+- The log line's time is when the attempt **finished**. It is not enough on its
+  own to say when an outage ended, which is what this document originally
+  claimed; see Section 7 and F-014 in [`findings.md`](findings.md).
+- Resolution is one second, against targets of 60 seconds and up. That is ample
+  for reporting a recovery and nowhere near enough for deciding, from a
+  timestamp alone, whether a write landed before or after a fault stamped in the
+  same second.
 - A line the harness cannot parse is kept and fails the case. Reporting zero
   errors from a partly unreadable log is worse than reporting the problem.
 - The set a fault may not lose is every index logged as committed at or before
@@ -143,6 +147,19 @@ of process names.
 - **Grace is now observable.** This phase could not tell grace from a wedged
   server. Step 4 added the observer; see
   [`04-grace-and-lock-reclaim-design.md`](04-grace-and-lock-reclaim-design.md).
+- **The recovery measurement was wrong and has been replaced.** This phase
+  measured the end of an outage as the first committed write stamped at or after
+  the fault, stated in Section 4 above. It does not measure that: stamps are
+  whole seconds, the fault clock is read by exec before the fault, and a deleted
+  server keeps serving through its termination grace, so the reading returned a
+  write that committed before service was lost and reported failovers of about
+  1m43s as `0s`. Because `0s` passes any budget, the recovery assertion in
+  CHAOS-02, CHAOS-05, CHAOS-06 and CHAOS-07 could not fail, and every green
+  recovery result this suite produced before the fix was unearned. An outage on
+  a hard mount is a **silence**, and it is now found as one:
+  `LoadReport.StallAfter` against `slo.LoadStallFloor`. `FirstSuccessAfter`
+  remains for narrower questions and is documented as not being the recovery
+  measurement. F-014 in [`findings.md`](findings.md) has the runs.
 - **Node and network faults moved.** They were "a later phase" here and are now
   step 10, after PROV, DATA, OBS, SEC and SCALE are closed out.
 

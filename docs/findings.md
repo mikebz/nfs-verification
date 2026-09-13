@@ -219,6 +219,16 @@ only unambiguous evidence of when service was actually lost.
 - `slo.LoadStallFloor` is the floor, at 10s: well above the one-to-two second
   cadence of a healthy stream, well below the 60s smallest recovery bound any
   profile states, so it separates the two without being near either.
+- Both ends of a silence are committed writes. A failed attempt is not progress,
+  so it neither starts nor ends an outage; pairing each record with the one next
+  to it in the log would see `OK, ERR, OK` as two short intervals and miss the
+  outage between them, costing the case its measurement on top of the error it
+  was already going to report.
+- Measuring an outage as a silence means an outage shorter than the floor cannot
+  be measured at all. That is the deployment beating the SLO, so a workload that
+  writes its way past the whole budget with no gap over the floor is a pass with
+  a message that says recovery was too fast to observe — not a case that waits
+  out the budget and then fails a deployment for recovering well.
 - Cases now log what was measured, not just the result: `recovered 1m43s after
   the fault: the client made no progress for 1m41s, from record 12 to record
   13`. A reader can check the claim against the stream.

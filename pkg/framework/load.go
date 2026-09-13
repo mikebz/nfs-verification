@@ -262,10 +262,23 @@ func (s Stall) Duration() time.Duration { return s.Resumed.At.Sub(s.Last.At) }
 // ambiguous on its own -- the client may still be blocked, or it may never have
 // lost service at all -- so a caller that needs to tell those apart asks
 // LastRecord how long the stream has been quiet.
+//
+// Both ends of the silence are committed writes. A failed attempt is not
+// progress, so it neither ends an outage nor starts one: a log of OK, ERR, OK
+// with a hundred seconds between the first two contains a hundred-second
+// outage, and pairing each record with the one next to it in the log would see
+// two short intervals and miss it. Errors are a separate failure on a hard
+// mount, asserted separately, and hiding the outage behind one would cost the
+// case its measurement as well.
 func (r LoadReport) StallAfter(t time.Time, floor time.Duration) (Stall, bool) {
-	for i := 1; i < len(r.Records); i++ {
-		prev, cur := r.Records[i-1], r.Records[i]
+	var prev LoadRecord
+	have := false
+	for _, cur := range r.Records {
 		if !cur.OK {
+			continue
+		}
+		if !have {
+			prev, have = cur, true
 			continue
 		}
 		from := prev.At
@@ -275,6 +288,7 @@ func (r LoadReport) StallAfter(t time.Time, floor time.Duration) (Stall, bool) {
 		if cur.At.Sub(from) > floor {
 			return Stall{Last: prev, Resumed: cur}, true
 		}
+		prev = cur
 	}
 	return Stall{}, false
 }

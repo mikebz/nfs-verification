@@ -298,6 +298,7 @@ func intsAsArgs(indices []int) []string {
 //     credited to it either, and that the outage after it is the answer.
 //  8. Assert an outage that began in the second before the fault is still
 //     found, since that is what an immediate block looks like.
+//  9. Assert a failed attempt in the middle of an outage does not hide it.
 func TestStallAfterMeasuresTheOutage(t *testing.T) {
 	// Records 1-3 are the steady cadence, then the client blocks for 103
 	// seconds, then it resumes. The fault is stamped in the same second as
@@ -402,6 +403,27 @@ OK 3 1700000105
 	}
 	if s.Last.Index != 2 || s.Resumed.Index != 3 {
 		t.Errorf("stall runs from record %d to record %d, want 2 to 3", s.Last.Index, s.Resumed.Index)
+	}
+
+	// An error in the middle of an outage must not hide it. Walking the log
+	// pair by pair sees 105s to a record that does not count and 1s to one that
+	// does, and reports no outage at all, so the case waits out its deadline
+	// and loses both results: the recovery time and the I/O error. Stepping
+	// over the failed attempt keeps the outage, and the error is still there
+	// for the assertion that looks for errors.
+	errMidway := parseLoadLog(`OK 1 1700000000
+ERR 2 1700000105
+OK 3 1700000106
+`)
+	s, ok = errMidway.StallAfter(at(1700000000), slo.LoadStallFloor)
+	if !ok {
+		t.Fatal("an outage was hidden by a failed attempt inside it")
+	}
+	if s.Last.Index != 1 || s.Resumed.Index != 3 {
+		t.Errorf("stall runs from record %d to record %d, want 1 to 3", s.Last.Index, s.Resumed.Index)
+	}
+	if got, want := s.Duration(), 106*time.Second; got != want {
+		t.Errorf("the client made no progress for %s, want %s", got, want)
 	}
 }
 
