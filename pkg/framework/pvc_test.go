@@ -295,6 +295,20 @@ func TestDescribeResizeConditions(t *testing.T) {
 		Status:  corev1.ConditionTrue,
 		Message: "waiting for a pod to start to finish file system resize",
 	}
+	// The two error conditions are the ones a reader most needs to see, because
+	// they name a driver that tried and failed rather than one that never
+	// started. They are covered here so that dropping either from the selection
+	// is a test failure rather than a silently narrower diagnosis.
+	controllerErr := corev1.PersistentVolumeClaimCondition{
+		Type:    corev1.PersistentVolumeClaimControllerResizeError,
+		Status:  corev1.ConditionTrue,
+		Message: "the external-resizer could not expand the volume",
+	}
+	nodeErr := corev1.PersistentVolumeClaimCondition{
+		Type:    corev1.PersistentVolumeClaimNodeResizeError,
+		Status:  corev1.ConditionTrue,
+		Message: "the node could not expand the file system",
+	}
 	const diagnosis = "nothing acted on the request"
 
 	claim := func(cs ...corev1.PersistentVolumeClaimCondition) *corev1.PersistentVolumeClaim {
@@ -331,6 +345,19 @@ func TestDescribeResizeConditions(t *testing.T) {
 		name:       "a resize condition alongside the unrelated one",
 		pvc:        claim(unused, pending),
 		wantHas:    []string{"FileSystemResizePending=True"},
+		wantHasNot: []string{diagnosis, "Unused"},
+	}, {
+		// A driver that tried and failed. Reported, and reported alone: this is
+		// the answer that saves the most time, and burying it next to Unused
+		// would be the original defect in a narrower form.
+		name:       "a controller resize error",
+		pvc:        claim(unused, controllerErr),
+		wantHas:    []string{"ControllerResizeError=True", "external-resizer could not expand"},
+		wantHasNot: []string{diagnosis, "Unused"},
+	}, {
+		name:       "a node resize error",
+		pvc:        claim(unused, nodeErr),
+		wantHas:    []string{"NodeResizeError=True", "node could not expand the file system"},
 		wantHasNot: []string{diagnosis, "Unused"},
 	}} {
 		t.Run(tc.name, func(t *testing.T) {
