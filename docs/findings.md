@@ -19,7 +19,7 @@ New entries go at the top, and take the next number.
 
 | # | Found | What it says | Cited by |
 |---|---|---|---|
-| [F-016](#f-016-concurrent-o_append-from-four-clients-loses-a-quarter-of-the-records-and-tears-none) | 2026-09-13 | Four clients appending to one file landed 150 of 200 records, none torn, twice | DATA-02's failure message, `CompactRanges` |
+| [F-016](#f-016-concurrent-o_append-from-four-clients-loses-a-quarter-of-the-records-and-tears-none) | 2026-09-13 | Four clients appending to one file landed 150 of 200 records, none torn, on two runs; two later runs lost nothing, so it is intermittent | DATA-02's failure message, `CompactRanges` |
 | [F-015](#f-015-a-checksum-that-failed-came-back-as-an-empty-string-and-a-success) | 2026-09-13 | A checksum pipeline ending in `cut` exits zero when `sha256sum` fails, so a helper returned an empty string as a digest | `io.go`'s `sumCmd` and `parseSum`, `io_parse_test.go` |
 | [F-013](#f-013-a-terminating-server-pod-counted-as-the-server-being-back) | 2026-09-11 | A gracefully deleted pod stays Running and ready, so the wait for a replacement was satisfied by the pod it was waiting past | `server.go`'s readiness check, `server_test.go` |
 | [F-012](#f-012-the-resize-diagnosis-was-unreachable-because-an-unrelated-condition-was-always-there) | 2026-09-11 | Listing every claim condition made the "nothing acted on the request" diagnosis unreachable on any mounted claim | `pvc.go`'s resize description, `pvc_test.go` |
@@ -41,9 +41,15 @@ New entries go at the top, and take the next number.
 
 **Found:** 2026-09-13, GKE cluster `gke-w1`, Kubernetes v1.37.0-gke.2941000,
 three workers on Container-Optimized OS, kernel 6.12.94+, StorageClass `nfs`
-backed by `nfs-server-provisioner`, profile `default`. Run
-`full-e2e-20260912b`, `make test-e2e`, DATA-02. Seen identically on the earlier
-full run of 2026-09-11.
+backed by `nfs-server-provisioner`, profile `default`. DATA-02 has now run four
+times on this cluster:
+
+| Run | Target | Result |
+|---|---|---|
+| `e2e-full-20260911` | `make test-e2e` | 150 of 200, 0 torn |
+| `full-e2e-20260912b` | `make test-e2e` | 150 of 200, 0 torn |
+| `pr46-data-20260913` | `make test-data` | 200 of 200 |
+| `pr47-data-20260913` | `make test-data` | 200 of 200 |
 
 **Severity:** a property of this deployment, for the boundary discussion. It is
 not a protocol violation and must not be filed against the server as one.
@@ -60,6 +66,17 @@ the file holds 150 lines, want 200 from 4 appenders writing 50 records each; 150
 
 Fifty records lost. **Zero torn.** Twice, on two runs a day apart, with the same
 count both times.
+
+Then it passed twice, on the same cluster and the same day, with every record
+present. **The loss is intermittent, and a green DATA-02 does not clear this
+deployment** — it means the race did not fire that time.
+
+The two reds were whole-suite runs and the two greens were data-only runs, which
+is 2-2 and therefore a hypothesis rather than a cause. It is a testable one: in
+`make test-e2e` the chaos cases run before the data cases and delete the server
+pod repeatedly, so DATA-02 there starts against a server that has recently
+failed over, and the appenders' cached sizes are that much staler. Nothing yet
+rules out plain timing.
 
 Those two numbers point in opposite directions and both matter:
 
@@ -107,7 +124,9 @@ them apart.
 **An application that appends to a shared file from several pods on this storage
 class will silently lose records, and will not notice.** No error is returned to
 any writer; every `write` succeeds. Nothing is corrupted, which is the good news
-and also why nothing downstream catches it.
+and also why nothing downstream catches it. That it does not happen on every run
+makes it worse rather than better: a workload can do this for months and then
+lose a quarter of a file.
 
 This is worth saying to a platform owner plainly, because "RWX" invites exactly
 this design. The options are a single writer per file, a file per writer, or an
@@ -115,7 +134,10 @@ application-level lock around the append — DATA-05 covers that last one, and i
 passes here.
 
 Open: which appender lost its records, and whether the loss is one contiguous
-run or scattered. The next run of DATA-02 answers it.
+run or scattered. The two runs since have both passed, so **the new message has
+not yet printed against a cluster** and this stays open until a red run answers
+it. Also open, and now the more interesting half: what makes the difference
+between a run that loses fifty records and a run that loses none.
 
 **A count that the protocol does not promise is still worth asserting, as long
 as the failure says who it belongs to.**

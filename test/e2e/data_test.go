@@ -426,6 +426,11 @@ const appendCaveat = "\n\nNote before filing: NFSv4.1 has no append operation. A
 // assertion the plan flags as stronger than the protocol, so it fails with the
 // caveat above rather than as a bare mismatch.
 //
+// This case is intermittent on the deployment it was written against: two runs
+// lost fifty of two hundred records with none torn, and two later runs lost
+// nothing (F-016). A green run here does not clear a storage system, it means
+// the race did not fire, so do not read one pass as an answer either way.
+//
 // Steps:
 //  1. Put four pods on the available worker nodes, round robin, on one claim,
 //     and truncate the shared file.
