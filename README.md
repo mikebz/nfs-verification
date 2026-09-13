@@ -331,9 +331,8 @@ prints all of them with their defaults:
 | `-artifacts-dir`, `-run-id` | `artifacts`, a UTC timestamp | where the bundle lands and what names the objects; a relative directory is anchored to the repository root |
 | `-profile` | either accepted | require a lease/grace profile, `tuned` or `default` |
 | `-preflight-max-age`, `-env-file` | 8h, none | how long a cached preflight result stays usable, and a specific record to reuse instead |
-| `-csi-driver` | taken from the StorageClass | names the driver when the class does not |
 | `-delegations` | `auto` | whether delegations are enabled; gates CHAOS-18, which is not written yet |
-| `-keep-objects`, `-v-harness` | off | leave a case's objects behind for triage, and log every harness action |
+| `-keep-objects` | off | leave a case's objects behind for triage |
 | `-platform`, `-gcloud-project`, `-gcloud-zone`, `-node-power-cmd` | `auto`, empty | how a node would be powered off. Recorded in `environment.json` and read by the capability probe that gates CHAOS-03; the node power operations themselves land in step 10 |
 
 ## Three details that bite on real clusters
