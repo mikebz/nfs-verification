@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-11
-Updated: 2026-09-12
+Updated: 2026-09-13
 Status: shipped, delivery step 6. Designed in
 [PR #12](https://github.com/mikebz/nfs-verification/pull/12), implemented from
 [PR #14](https://github.com/mikebz/nfs-verification/pull/14) onward. DATA-14
@@ -309,9 +309,13 @@ plan.
 - **The run happened.** On 2026-09-11, against a three-worker GKE cluster on
   Kubernetes v1.37 with the in-cluster `nfs-server-provisioner`, DATA-05 to
   DATA-09 and DATA-11 to DATA-13 passed along with CHAOS-06; DATA-11's punch half
-  reported blocked, which is the documented answer on a busybox image. **DATA-10
-  has not been run**, so whether a directory-backed export holds 100k entries is
-  still unmeasured.
+  reported blocked, which is the documented answer on a busybox image.
+- **DATA-10 has since been run, and passes.** Three times: `full-e2e-20260912b`,
+  `pr46-data-20260913` and `pr47-data-20260913`, taking between four and five
+  minutes each. The export holds 100k entries, and a listing racing 50k
+  deletions returned 98–99k of them, which is lawful rather than a defect. This
+  supersedes the sentence that stood here saying it was unmeasured; the README's
+  "State of this code" carries the run it came from.
 - **F-006 and F-007** came out of this phase: `scripts/lock-probe.sh` passed
   `flock -w` to an applet that has no `-w`, and two cases reported results they
   had not measured. Both are fixed and recorded in [`findings.md`](findings.md).
