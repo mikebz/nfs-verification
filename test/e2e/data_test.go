@@ -489,10 +489,7 @@ func TestDataConcurrentAppendToOneFile(t *testing.T) {
 		wg.Add(1)
 		go func(i int, pod string) {
 			defer wg.Done()
-			_, errs[i] = f.C.MustSh(ctx, framework.Namespace, f.Name(pod), "main", fmt.Sprintf(
-				`set -e; name=%s; { i=0; while [ $i -lt %d ]; do i=$((i+1)); `+
-					`printf 'record-from-%%s-%%04d\n' "$name" "$i"; done; } >> %s; echo done`,
-				framework.Quote(pod), records, framework.Quote(path)))
+			errs[i] = f.AppendRecords(ctx, pod, pod, records, path, fmt.Sprintf("app%d", i))
 		}(i, pod)
 	}
 	wg.Wait()
