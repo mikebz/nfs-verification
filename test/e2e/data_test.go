@@ -437,9 +437,11 @@ const appendCaveat = "\n\nNote before filing: NFSv4.1 has no append operation. A
 //     A torn record is corruption under any reading of the protocol.
 //  5. Assert the line count is exactly what was written. This is the flagged
 //     assertion, so a mismatch carries the note that routes it.
-//  6. On a mismatch, name the records that are missing, per appender. The file
-//     is deleted at teardown, so the message is the only evidence there will
-//     be of what the loss looked like.
+//  6. Whenever any of that fails, name the records that are missing, per
+//     appender. Not gated on the line count: a record written twice and
+//     another lost leave a file of exactly the right length. The file is
+//     deleted at teardown, so the message is the only evidence there will be
+//     of what the loss looked like.
 func TestDataConcurrentAppendToOneFile(t *testing.T) {
 	f := framework.New(t, "DATA-02")
 	ctx, cancel := caseCtx(t, 20*time.Minute)
@@ -534,32 +536,45 @@ func TestDataConcurrentAppendToOneFile(t *testing.T) {
 		}
 	}
 
-	// Then the count, which is the part the plan flags.
-	want := appenders * records
-	if len(lines) != want {
-		// Which records went missing, per appender, not just how many. The
-		// shape is the finding: one appender's whole contribution gone means
-		// its writes were overwritten at an offset another client believed was
-		// end of file, while scattered singles across every appender mean
-		// something else entirely. Nobody can go and look afterwards, because
-		// the claim is deleted at teardown and the artifact bundle keeps pod
-		// logs rather than the share. See F-016.
-		var missing []string
-		for _, pod := range pods {
-			var lost []int
-			for n := 1; n <= records; n++ {
-				if valid[fmt.Sprintf("record-from-%s-%04d", pod, n)] == 0 {
-					lost = append(lost, n)
-				}
-			}
-			if len(lost) > 0 {
-				missing = append(missing, fmt.Sprintf("%s lost %d of %d (records %s)",
-					pod, len(lost), records, framework.CompactRanges(lost)))
+	// Which records went missing, per appender, not just how many. Computed
+	// before the assertions because more than one of them needs it, and
+	// because the line count is not a reliable gate: a record written twice
+	// and another lost cancel out, leaving a file of exactly the right length
+	// that is missing a record. The shape is the finding -- one appender's
+	// whole contribution gone means its writes were overwritten at an offset
+	// another client believed was end of file, while scattered singles across
+	// every appender mean something else entirely -- and nobody can go and
+	// look afterwards, because the claim is deleted at teardown and the
+	// artifact bundle keeps pod logs rather than the share. See F-016.
+	var missing []string
+	for _, pod := range pods {
+		var lost []int
+		for n := 1; n <= records; n++ {
+			if valid[fmt.Sprintf("record-from-%s-%04d", pod, n)] == 0 {
+				lost = append(lost, n)
 			}
 		}
+		if len(lost) > 0 {
+			missing = append(missing, fmt.Sprintf("%s lost %d of %d (records %s)",
+				pod, len(lost), records, framework.CompactRanges(lost)))
+		}
+	}
+
+	// Then the count, which is the part the plan flags.
+	want := appenders * records
+	switch {
+	case len(lines) != want:
 		t.Errorf("the file holds %d lines, want %d from %d appenders writing %d records each; "+
 			"%d whole, %d torn. Missing: %s%s", len(lines), want, appenders, records,
 			len(valid), len(torn), strings.Join(missing, "; "), appendCaveat)
+	case len(missing) > 0:
+		// The file is the right length and still does not hold what was
+		// written, which means something was written twice or torn. Whichever
+		// it was has already failed the case above; this is the half of the
+		// story those checks cannot tell, and without it the only record of
+		// the loss would be a duplicate line number.
+		t.Errorf("the file holds the expected %d lines but not the expected records: %s%s",
+			want, strings.Join(missing, "; "), appendCaveat)
 	}
 }
 
