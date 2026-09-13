@@ -1,6 +1,7 @@
 package framework
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -183,4 +184,40 @@ func waitForAnyState(t *testing.T, path string) string {
 	}
 	t.Fatal("the worker never wrote its state file")
 	return ""
+}
+
+// TestAppendRecordsScriptKeepsDescriptorAndWritesRecords runs
+// scripts/append-records.sh under a real shell and checks that the records
+// land intact and in order.
+//
+// Steps:
+//  1. Run append-records.sh to append 10 records with a given name to a file.
+//  2. Assert stdout reports "done".
+//  3. Read the file back and assert each record was formatted and written in order.
+func TestAppendRecordsScriptKeepsDescriptorAndWritesRecords(t *testing.T) {
+	sh := lookOrSkip(t, "sh")
+	target := filepath.Join(t.TempDir(), "appended.log")
+
+	out, err := exec.Command(sh, materializeScript(t, "append-records.sh"), "worker-1", "10", target).CombinedOutput()
+	if err != nil {
+		t.Fatalf("running append-records.sh: %v\n%s", err, out)
+	}
+	if strings.TrimSpace(string(out)) != "done" {
+		t.Errorf("stdout was %q, want \"done\"", string(out))
+	}
+
+	content, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("reading appended file: %v", err)
+	}
+	lines := strings.Split(strings.TrimRight(string(content), "\n"), "\n")
+	if len(lines) != 10 {
+		t.Fatalf("got %d lines, want 10", len(lines))
+	}
+	for i, line := range lines {
+		want := fmt.Sprintf("record-from-worker-1-%04d", i+1)
+		if line != want {
+			t.Errorf("line %d is %q, want %q", i, line, want)
+		}
+	}
 }
