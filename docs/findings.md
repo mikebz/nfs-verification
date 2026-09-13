@@ -19,6 +19,7 @@ New entries go at the top, and take the next number.
 
 | # | Found | What it says | Cited by |
 |---|---|---|---|
+| [F-016](#f-016-concurrent-o_append-from-four-clients-loses-a-quarter-of-the-records-and-tears-none) | 2026-09-13 | Four clients appending to one file landed 150 of 200 records, none torn, twice | DATA-02's failure message, `CompactRanges` |
 | [F-015](#f-015-a-checksum-that-failed-came-back-as-an-empty-string-and-a-success) | 2026-09-13 | A checksum pipeline ending in `cut` exits zero when `sha256sum` fails, so a helper returned an empty string as a digest | `io.go`'s `sumCmd` and `parseSum`, `io_parse_test.go` |
 | [F-013](#f-013-a-terminating-server-pod-counted-as-the-server-being-back) | 2026-09-11 | A gracefully deleted pod stays Running and ready, so the wait for a replacement was satisfied by the pod it was waiting past | `server.go`'s readiness check, `server_test.go` |
 | [F-012](#f-012-the-resize-diagnosis-was-unreachable-because-an-unrelated-condition-was-always-there) | 2026-09-11 | Listing every claim condition made the "nothing acted on the request" diagnosis unreachable on any mounted claim | `pvc.go`'s resize description, `pvc_test.go` |
@@ -33,6 +34,91 @@ New entries go at the top, and take the next number.
 | [F-003](#f-003-a-broken-umountnfs-wrapper-on-gke-wedges-every-terminating-pod) | 2026-09-10 | A broken `umount.nfs` wrapper wedges every terminating pod | teardown's terminate bound |
 | [F-002](#f-002-2gb-worker-nodes-cannot-host-the-suite) | 2026-09-10 | 2GB worker nodes cannot host the suite | the node shape a run reports |
 | [F-001](#f-001-force-deleting-a-mounted-pod-can-take-a-node-out-of-service) | 2026-09-10 | Force-deleting a mounted pod, then its claim, takes a node out of service | teardown, the force-delete helper, PROV-03, doc 05 |
+
+---
+
+## F-016: Concurrent O_APPEND from four clients loses a quarter of the records, and tears none
+
+**Found:** 2026-09-13, GKE cluster `gke-w1`, Kubernetes v1.37.0-gke.2941000,
+three workers on Container-Optimized OS, kernel 6.12.94+, StorageClass `nfs`
+backed by `nfs-server-provisioner`, profile `default`. Run
+`full-e2e-20260912b`, `make test-e2e`, DATA-02. Seen identically on the earlier
+full run of 2026-09-11.
+
+**Severity:** a property of this deployment, for the boundary discussion. It is
+not a protocol violation and must not be filed against the server as one.
+
+### What happened
+
+DATA-02 puts four pods on the worker nodes, each appending fifty short records
+to one file through a single descriptor held open for the whole loop, and reads
+the file back from a pod that never wrote to it:
+
+```
+the file holds 150 lines, want 200 from 4 appenders writing 50 records each; 150 whole, 0 torn
+```
+
+Fifty records lost. **Zero torn.** Twice, on two runs a day apart, with the same
+count both times.
+
+Those two numbers point in opposite directions and both matter:
+
+- **0 torn** is the assertion that holds under any reading of the protocol. Every
+  record that arrived, arrived whole. Nothing is corrupt.
+- **150 of 200** is the count, which the test plan already flags as stronger
+  than NFSv4.1 promises.
+
+### Why
+
+NFSv4.1 has no append operation. There is no `WRITE` that means "at end of
+file": [RFC 8881](https://www.rfc-editor.org/rfc/rfc8881.html) Section 18.2
+takes an explicit offset. A client implements `O_APPEND` by writing at the
+offset it believes to be the end of the file, and that belief is a cached
+attribute.
+
+With one descriptor held open for the whole loop there is nothing to refresh it.
+The Linux client's cache consistency is close-to-open
+([`nfs(5)`](https://man7.org/linux/man-pages/man5/nfs.5.html)): it revalidates
+size on **open**, not before each write. Four clients each believing the file
+ends where it ended when they opened it will write the same offsets, and the
+last writer wins. A record is lost, not torn, which is exactly the pattern
+observed.
+
+That the harness holds one descriptor open is deliberate, and documented in the
+case: it is the shape of a real log appender, and it is the harder case. A
+client that reopened per record would revalidate each time and mostly avoid
+this.
+
+### What changed
+
+Nothing about the assertion. The case stays red and keeps routing the failure to
+the boundary discussion rather than to the server owner, because a suite that
+relaxed this would have nothing left to say about append behaviour anywhere.
+
+What changed is what the failure tells you. It now names the missing records per
+appender, because the claim is deleted at teardown and the artifact bundle keeps
+pod logs rather than the share: whatever the message says is the only evidence
+the run leaves behind. One appender's whole contribution gone is a different
+story from scattered singles across all four, and the old message could not tell
+them apart.
+
+### What it means for the system under test
+
+**An application that appends to a shared file from several pods on this storage
+class will silently lose records, and will not notice.** No error is returned to
+any writer; every `write` succeeds. Nothing is corrupted, which is the good news
+and also why nothing downstream catches it.
+
+This is worth saying to a platform owner plainly, because "RWX" invites exactly
+this design. The options are a single writer per file, a file per writer, or an
+application-level lock around the append — DATA-05 covers that last one, and it
+passes here.
+
+Open: which appender lost its records, and whether the loss is one contiguous
+run or scattered. The next run of DATA-02 answers it.
+
+**A count that the protocol does not promise is still worth asserting, as long
+as the failure says who it belongs to.**
 
 ---
 
