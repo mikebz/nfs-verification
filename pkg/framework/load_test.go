@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"testing"
 	"time"
+
+	"github.com/mikebz/nfs-verification/pkg/slo"
 )
 
 // The workload is the measuring instrument behind every chaos assertion, so its
@@ -267,4 +269,126 @@ func intsAsArgs(indices []int) []string {
 		out[i] = strconv.Itoa(n)
 	}
 	return out
+}
+
+// TestStallAfterMeasuresTheOutage covers the measurement behind every recovery
+// SLO, using the log shape that made the previous one lie.
+//
+// Recovery is "time to first successful I/O after the fault". Reading that as
+// the first success timestamped after the fault does not measure it: records
+// are stamped from the pod's clock at one-second resolution and the server
+// keeps serving through its termination grace, so a write committed in the same
+// second as the fault, or just after it while the server is still up, satisfies
+// that reading at once. On real runs it reported a failover of about 1m40s as
+// 0s, next to a gap statistic from the same log that said 1m44s. See F-014.
+//
+// The outage is a silence in the stream, because a hard NFSv4.1 mount blocks
+// instead of erroring, and the silence is what has to be measured.
+//
+// Steps:
+//  1. Build a log shaped like a real failover: steady writes, a long silence,
+//     then writes again.
+//  2. Assert the old reading still returns the pre-outage write, so the
+//     difference between the two is pinned here rather than argued in a comment.
+//  3. Assert StallAfter returns the silence and the write that ended it.
+//  4. Assert the one-second cadence of a healthy stream is never an outage.
+//  5. Assert a silence that ended before the fault is not credited to it.
+//  6. Assert a failed attempt does not end an outage.
+func TestStallAfterMeasuresTheOutage(t *testing.T) {
+	// Records 1-3 are the steady cadence, then the client blocks for 103
+	// seconds, then it resumes. The fault is stamped in the same second as
+	// record 3, which is what an exec-read clock does just before a delete.
+	rep := parseLoadLog(`OK 1 1700000000
+OK 2 1700000001
+OK 3 1700000002
+OK 4 1700000105
+OK 5 1700000106
+`)
+	faultAt := at(1700000002)
+
+	// The bug, kept visible: this is a write that committed before service was
+	// lost, and reading recovery off it reports no outage at all.
+	if rec, ok := rep.FirstSuccessAfter(faultAt); !ok || rec.Index != 3 {
+		t.Fatalf("first success after the fault is %+v (found=%v), want index 3: the point of this "+
+			"test is that this reading returns a pre-outage write", rec, ok)
+	}
+
+	stall, ok := rep.StallAfter(faultAt, slo.LoadStallFloor)
+	if !ok {
+		t.Fatal("no stall found in a log that plainly contains one")
+	}
+	if stall.Last.Index != 3 || stall.Resumed.Index != 4 {
+		t.Errorf("stall runs from record %d to record %d, want 3 to 4", stall.Last.Index, stall.Resumed.Index)
+	}
+	if got, want := stall.Duration(), 103*time.Second; got != want {
+		t.Errorf("the client made no progress for %s, want %s", got, want)
+	}
+	// What the case reports: measured from the fault, not from the last write.
+	if got, want := stall.Resumed.At.Sub(faultAt), 103*time.Second; got != want {
+		t.Errorf("recovery measured from the fault is %s, want %s", got, want)
+	}
+
+	// A healthy stream must never look like an outage, or every case would
+	// report a recovery it invented.
+	healthy := parseLoadLog(`OK 1 1700000000
+OK 2 1700000001
+OK 3 1700000002
+`)
+	if s, ok := healthy.StallAfter(at(1700000000), slo.LoadStallFloor); ok {
+		t.Errorf("the one-second cadence was reported as an outage from record %d to record %d",
+			s.Last.Index, s.Resumed.Index)
+	}
+
+	// A silence that ended before the fault belongs to whatever caused it, not
+	// to this fault. Crediting it would report a recovery that finished before
+	// the fault was injected.
+	earlier := parseLoadLog(`OK 1 1700000000
+OK 2 1700000100
+OK 3 1700000101
+`)
+	if s, ok := earlier.StallAfter(at(1700000200), slo.LoadStallFloor); ok {
+		t.Errorf("a stall that ended at %d was credited to a fault at 1700000200 (records %d to %d)",
+			s.Resumed.At.Unix(), s.Last.Index, s.Resumed.Index)
+	}
+
+	// A failed attempt is not a recovery. On a hard mount there should be no
+	// errors at all, and the same case asserts that separately; if one does
+	// appear, reporting "no completed outage" is the honest answer rather than
+	// treating the failure as the moment service returned.
+	errEnded := parseLoadLog(`OK 1 1700000000
+ERR 2 1700000105
+`)
+	if s, ok := errEnded.StallAfter(at(1700000000), slo.LoadStallFloor); ok {
+		t.Errorf("a failed attempt ended the outage (records %d to %d)", s.Last.Index, s.Resumed.Index)
+	}
+}
+
+// TestLastRecordReadsAnAbsence covers how a case tells a client that is still
+// blocked from one that never lost service.
+//
+// Both reach the same place, an absence of any completed outage after a fault,
+// and they are opposite results: one is a failover the client never came back
+// from, the other is a failover it did not notice. Nothing else in the log
+// separates them, so getting this wrong means reporting a wedged client as a
+// clean pass, or the reverse.
+//
+// Steps:
+//  1. Ask an empty log, which must not answer.
+//  2. Ask a log whose lines are out of order, and assert the newest wins.
+func TestLastRecordReadsAnAbsence(t *testing.T) {
+	if _, ok := parseLoadLog("").LastRecord(); ok {
+		t.Error("an empty log named a last record, which would read as a workload that is alive")
+	}
+	// Not assumed sorted: the answer is the newest attempt, not the last line.
+	rep := parseLoadLog(`OK 1 1700000000
+OK 3 1700000200
+OK 2 1700000100
+`)
+	last, ok := rep.LastRecord()
+	if !ok {
+		t.Fatal("a log with three records named no last record")
+	}
+	if last.Index != 3 {
+		t.Errorf("last record is index %d, want 3: the newest attempt, not the final line", last.Index)
+	}
 }

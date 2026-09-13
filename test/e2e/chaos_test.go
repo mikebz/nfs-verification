@@ -138,38 +138,82 @@ func assertRecovered(ctx context.Context, t *testing.T, s chaosSetup, faultAt ti
 	return recovery
 }
 
-// waitRecovered waits for the first write committed after the fault and returns
-// how long that took. It is separate from the assertion because the repeated
-// failover case measures five of these before it asserts anything about the
-// workload as a whole.
+// waitRecovered waits for the workload to lose service and get it back, and
+// returns how long that took measured from the fault. It is separate from the
+// assertion because the repeated failover case measures five of these before it
+// asserts anything about the workload as a whole.
+//
+// The outage is found as a stall in the record stream, not as the first write
+// stamped after the fault. Those are not the same thing, and the difference is
+// not small: records carry one-second resolution and the server keeps serving
+// through its termination grace, so the naive reading returned a write that
+// committed before service was lost and reported a two-minute outage as 0s. See
+// F-014, which has the runs.
 func waitRecovered(ctx context.Context, t *testing.T, s chaosSetup, faultAt time.Time) time.Duration {
 	t.Helper()
 	// Waited out well past the budget on purpose: a case that gives up at the
 	// SLO reports "timed out" where it could report how long recovery actually
 	// took, and the second is what a defect report needs.
 	waitFor := s.budget + slo.ObservationMargin
-	var resumed framework.LoadRecord
+	var stall framework.Stall
 	err := framework.Poll(ctx, framework.PollInterval, waitFor, func(ctx context.Context) (bool, error) {
 		rep, err := s.load.Report(ctx)
 		if err != nil {
 			return false, err
 		}
-		rec, ok := rep.FirstSuccessAfter(faultAt)
+		st, ok := rep.StallAfter(faultAt, slo.LoadStallFloor)
 		if ok {
-			resumed = rec
+			stall = st
 		}
 		return ok, nil
 	})
 	if err != nil {
-		t.Fatalf("no write committed in the %s after the fault: the client never recovered. %v", waitFor, err)
+		// No stall in the log yet, which is two opposite situations wearing the
+		// same face: the client is still blocked in one that has not ended, or
+		// it never lost service at all. The log alone cannot say which, so ask
+		// how long the stream has been quiet.
+		t.Fatalf("no completed outage in the %s after the fault: %s. %v",
+			waitFor, describeQuiet(ctx, t, s), err)
 	}
-	recovery := resumed.At.Sub(faultAt)
+	recovery := stall.Resumed.At.Sub(faultAt)
 	if recovery < 0 {
 		recovery = 0
 	}
-	t.Logf("first committed write %s after the fault (budget %s, profile %s)",
-		recovery.Round(time.Second), s.budget, profile(t).Name)
+	t.Logf("recovered %s after the fault: the client made no progress for %s, from record %d to record %d "+
+		"(budget %s, profile %s)", recovery.Round(time.Second), stall.Duration().Round(time.Second),
+		stall.Last.Index, stall.Resumed.Index, s.budget, profile(t).Name)
 	return recovery
+}
+
+// describeQuiet says whether the workload is still stalled or never stopped, so
+// that the failure above names which of the two happened.
+//
+// Both reach it through the same absence of a completed outage, and they are
+// opposite results: one is a client that never came back, and the other is a
+// failover the client did not notice, which is not a failure at all. A message
+// that did not separate them would send the reader looking for the wrong thing.
+func describeQuiet(ctx context.Context, t *testing.T, s chaosSetup) string {
+	t.Helper()
+	rep, err := s.load.Report(ctx)
+	if err != nil {
+		return fmt.Sprintf("and the workload log in %s could not be read either: %v", s.writer, err)
+	}
+	last, ok := rep.LastRecord()
+	if !ok {
+		return fmt.Sprintf("and %s logged no attempts at all, so the workload never ran", s.writer)
+	}
+	now, err := s.f.PodNow(ctx, s.writer)
+	if err != nil {
+		return fmt.Sprintf("last attempt was record %d, and %s's clock could not be read to say how long "+
+			"ago that was: %v", last.Index, s.writer, err)
+	}
+	if quiet := now.Sub(last.At); quiet > slo.LoadStallFloor {
+		return fmt.Sprintf("%s is still blocked: its last attempt was record %d, %s ago, so the outage "+
+			"never ended", s.writer, last.Index, quiet.Round(time.Second))
+	}
+	return fmt.Sprintf("%s never stopped writing, and is up to record %d: this failover caused no "+
+		"client-visible outage, which is not a failure but is not a recovery measurement either",
+		s.writer, last.Index)
 }
 
 // assertLoadHealthy stops the workload and reads the rest of the story out of

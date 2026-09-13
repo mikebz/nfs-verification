@@ -199,10 +199,14 @@ func (r LoadReport) CommittedBefore(t time.Time) []int {
 	return out
 }
 
-// FirstSuccessAfter returns the first committed write at or after t. This is
-// the measurement behind every recovery SLO in the plan: time to first
-// successful I/O, taken from the workload itself rather than from a probe the
-// harness starts once it notices something happened.
+// FirstSuccessAfter returns the first committed write at or after t.
+//
+// This answers a narrower question than it looks like it answers, and it is not
+// on its own the recovery measurement. Records are stamped from the pod's clock
+// at one-second resolution, so a write committed in the same second as t -- and
+// possibly before it -- is "at or after" t. Recovery is measured with
+// StallAfter; see F-014 for the runs where the difference reported a two-minute
+// outage as zero.
 func (r LoadReport) FirstSuccessAfter(t time.Time) (LoadRecord, bool) {
 	best := LoadRecord{}
 	found := false
@@ -215,6 +219,67 @@ func (r LoadReport) FirstSuccessAfter(t time.Time) (LoadRecord, bool) {
 		}
 	}
 	return best, found
+}
+
+// Stall is one interruption in the record stream: the last write before the
+// client stopped making progress, and the first one after it resumed.
+type Stall struct {
+	// Last is the final record logged before the silence.
+	Last LoadRecord
+	// Resumed is the first record logged after it, and the write that ends
+	// the outage as the client experienced it.
+	Resumed LoadRecord
+}
+
+// Duration is how long the client made no progress at all.
+func (s Stall) Duration() time.Duration { return s.Resumed.At.Sub(s.Last.At) }
+
+// StallAfter returns the first interruption longer than floor whose resuming
+// write lands at or after t, which is the outage a fault injected at t caused.
+//
+// This is the measurement behind every recovery SLO in the plan. It reads the
+// outage off the shape of the stream rather than off the timestamps alone,
+// because on a hard NFSv4.1 mount a client that loses its server blocks instead
+// of erroring: the outage is a silence in a log that is otherwise one line per
+// second, and that silence is the only unambiguous evidence of when service was
+// actually lost. Taking the first success stamped after t instead reports zero
+// whenever a write lands in the same second as the fault or during the server's
+// termination grace, which is what F-014 records happening on real runs.
+//
+// Not found means no such interruption is in the log yet. That is genuinely
+// ambiguous on its own -- the client may still be blocked, or it may never have
+// lost service at all -- so a caller that needs to tell those apart asks
+// LastRecord how long the stream has been quiet.
+func (r LoadReport) StallAfter(t time.Time, floor time.Duration) (Stall, bool) {
+	for i := 1; i < len(r.Records); i++ {
+		prev, cur := r.Records[i-1], r.Records[i]
+		if !cur.OK || cur.At.Before(t) {
+			continue
+		}
+		if cur.At.Sub(prev.At) > floor {
+			return Stall{Last: prev, Resumed: cur}, true
+		}
+	}
+	return Stall{}, false
+}
+
+// LastRecord returns the most recent attempt the workload logged.
+//
+// A caller uses this to read an absence: when no stall has appeared after a
+// fault, a stream still being written to means the client never lost service,
+// and a stream that stopped means the client is blocked in one right now. Those
+// are opposite results, and nothing else in the log distinguishes them.
+func (r LoadReport) LastRecord() (LoadRecord, bool) {
+	if len(r.Records) == 0 {
+		return LoadRecord{}, false
+	}
+	last := r.Records[0]
+	for _, rec := range r.Records[1:] {
+		if rec.At.After(last.At) {
+			last = rec
+		}
+	}
+	return last, true
 }
 
 // LongestGap returns the largest interval between consecutive attempts, which
