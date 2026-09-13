@@ -41,16 +41,25 @@ type Target struct {
 
 // ServerTarget picks the NFS server pod to injure. With fan-out greater than
 // one it takes the first, deterministically, so a rerun hits the same pod.
+//
+// A pod that is already being deleted, or that has not started, is never
+// chosen. Discovery keeps both, on purpose: a terminating pod still belongs in
+// the artifact bundle, and a server stuck Pending is worth reporting. Injuring
+// one is different, because it measures something this case did not cause, and
+// the result would be attributed to the fault anyway.
+//
+// This is the same confusion as F-013 in docs/findings.md, one level up. There
+// it was a terminating pod answering yes to "is a server ready"; here it is a
+// terminating pod answering yes to "is there a server to injure".
 func ServerTarget(ctx context.Context, f *framework.Framework) (Target, error) {
 	pods, err := framework.ServerPods(ctx, f.C)
 	if err != nil {
 		return Target{}, fmt.Errorf("discovering NFS server pods: %w", err)
 	}
-	if len(pods) == 0 {
-		return Target{}, fmt.Errorf("no NFS server pods found: pass -server-namespace and -server-selector, " +
-			"otherwise there is nothing for a chaos case to injure")
+	p, err := firstInjurable(pods)
+	if err != nil {
+		return Target{}, err
 	}
-	p := &pods[0]
 	t := Target{Namespace: p.Namespace, Pod: p.Name, UID: p.UID, Node: p.Spec.NodeName, Containers: p.Spec.Containers}
 	for _, ref := range p.OwnerReferences {
 		if ref.Controller != nil && *ref.Controller {
@@ -61,6 +70,72 @@ func ServerTarget(ctx context.Context, f *framework.Framework) (Target, error) {
 		return t, fmt.Errorf("server pod %s/%s is not scheduled to a node", t.Namespace, t.Pod)
 	}
 	return t, nil
+}
+
+// firstInjurable returns the first server pod that a fault may be aimed at.
+//
+// Discovery is sorted by name and deliberately keeps pods this function must
+// not pick, so with fan-out greater than one the pod sorted first can be unfit
+// while a healthy pod sits behind it. Taking that one injures nothing, and the
+// case credits the result to a fault it believes it caused.
+//
+// Empty-handed is reported with the reason for every pod rejected, because the
+// answers call for different actions: no pods at all is discovery pointed at
+// the wrong place, and pods that are all unfit is something outside this case
+// removing or restarting them.
+func firstInjurable(pods []corev1.Pod) (*corev1.Pod, error) {
+	if len(pods) == 0 {
+		return nil, fmt.Errorf("no NFS server pods found: pass -server-namespace and -server-selector, " +
+			"otherwise there is nothing for a chaos case to injure")
+	}
+	for i := range pods {
+		if unfitToInjure(&pods[i]) == "" {
+			return &pods[i], nil
+		}
+	}
+	why := make([]string, 0, len(pods))
+	for i := range pods {
+		why = append(why, pods[i].Name+" "+unfitToInjure(&pods[i]))
+	}
+	return nil, fmt.Errorf("no NFS server pod found that can be injured (%s), so a fault aimed at one "+
+		"would measure something this case did not cause. Either something outside the suite is removing "+
+		"them, or a previous fault has not finished", strings.Join(why, ", "))
+}
+
+// unfitToInjure says why a fault must not be aimed at this pod, or "" if one
+// may be. One predicate serves both the choice and the error that explains it,
+// so the two cannot drift apart and start disagreeing about which pods count.
+//
+// Two states are refused:
+//
+//   - Being deleted. A gracefully deleted pod keeps phase Running for its whole
+//     grace period, so the phase check below does not catch it. Injuring one
+//     measures the tail of a deletion somebody else started.
+//   - Any phase other than Running. Such a pod has no running container, so
+//     there is no process to signal, and deleting it removes a replica that was
+//     not serving while the pod that is serving carries on untouched.
+//
+// In practice the second means Pending, because discovery only ever returns
+// Running and Pending. It is written as the general rule anyway: the cost of
+// refusing a Succeeded or Failed pod is nothing, and a phase filter that has to
+// agree with another package's filter to stay correct is one edit away from not
+// being correct. Discovery keeps those pods on purpose, because a server that
+// cannot start is worth reporting; that is still not a thing a fault can be
+// aimed at.
+//
+// Readiness is deliberately not required, which is the narrower rule than it
+// may look. A Running server that has gone not-ready is still serving, still
+// exec-able, and is frequently the exact pod a repeated-failover case means to
+// hit. Refusing it would turn "the server is sick" into "the harness found no
+// target", reporting a symptom of the system under test as a harness error.
+func unfitToInjure(p *corev1.Pod) string {
+	if p.DeletionTimestamp != nil {
+		return "is being deleted"
+	}
+	if p.Status.Phase != corev1.PodRunning {
+		return "is " + string(p.Status.Phase)
+	}
+	return ""
 }
 
 // ProcessPattern is the fixed string that identifies the server process on the
