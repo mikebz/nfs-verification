@@ -81,6 +81,50 @@ func TestLoadReportOnAnEmptyLog(t *testing.T) {
 	if got := rep.LongestGap(); got != 0 {
 		t.Errorf("longest gap on an empty log is %s, want 0", got)
 	}
+	if _, ok := rep.LastCommitted(); ok {
+		t.Error("an empty log reported a committed write, which would read as a client with service")
+	}
+}
+
+// TestLastCommittedIgnoresFailedAttempts pins the difference between a workload
+// that is still writing and one that is still working.
+//
+// The chaos cases conclude "no outage happened" when the stream got past the
+// recovery budget. Reading that off attempts rather than commits turns a client
+// that lost its export and is erroring once a second into a clean run with a
+// recovery of zero, because a failing loop keeps logging. This is the failure
+// with no symptom: nothing looks broken, the number is just wrong.
+//
+// Steps:
+//  1. Parse a log that succeeds, then fails from a point onward.
+//  2. Assert the last attempt is the final error, since that is how a caller
+//     tells a failing client from a dead one.
+//  3. Assert the last committed write is the last success before it.
+//  4. Assert a log of nothing but errors reports no committed write at all.
+func TestLastCommittedIgnoresFailedAttempts(t *testing.T) {
+	rep := parseLoadLog(`OK 1 1700000000
+OK 2 1700000001
+ERR 3 1700000002
+ERR 4 1700000003
+ERR 5 1700000004
+`)
+	last, ok := rep.LastRecord()
+	if !ok || last.Index != 5 {
+		t.Fatalf("last attempt is %+v (found=%v), want index 5: a failing client is still logging", last, ok)
+	}
+	lastOK, ok := rep.LastCommitted()
+	if !ok || lastOK.Index != 2 {
+		t.Errorf("last committed write is %+v (found=%v), want index 2: the errors after it are not progress",
+			lastOK, ok)
+	}
+	if lastOK.At != at(1700000001) {
+		t.Errorf("last committed write is stamped %s, want %s", lastOK.At, at(1700000001))
+	}
+
+	none := parseLoadLog("ERR 1 1700000000\nERR 2 1700000001\n")
+	if rec, ok := none.LastCommitted(); ok {
+		t.Errorf("a log of nothing but errors reported %+v as committed, which would read as service", rec)
+	}
 }
 
 // TestWriteLoadScriptRuns runs the rendered workload under a real shell. It
