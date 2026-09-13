@@ -89,9 +89,17 @@ exit 0
 The near-miss is the interesting part. `ReadDirect` and `CountNonZeroBytes` in
 the same file already carried comments warning about exactly this — *"a POSIX
 pipeline reports its last command's status, so piping a failed read into a
-counter yields a confident zero"* — and both then ended their own scripts with
-`sha256sum | cut`. The hazard was understood one command upstream and missed one
-command downstream.
+counter yields a confident zero"* — and both keep their `dd` out of a pipeline
+for that reason. `ReadDirect` then ended its own script with `sha256sum | cut`,
+which recreated the very pattern its comment had just described: a command whose
+failure matters, followed by one that does not care, one line below the `dd` the
+comment was protecting.
+
+`CountNonZeroBytes` did not have a checksum pipeline; it ends with
+`tr -d '\000' < block | wc -c`, and `wc` would likewise report a confident zero
+if `tr` could not read. That one is safe, but only because the `dd` above it
+runs as its own command where `set -e` can see it fail, which is the whole
+point: the guard is the shape of the script, not the tools in it.
 
 ### What changed
 
