@@ -136,8 +136,21 @@ func WaitServersReady(ctx context.Context, c *Client, timeout time.Duration) err
 	})
 }
 
-// PodReady reports whether a pod is in PodRunning phase with all containers ready.
+// PodReady reports whether a pod is in PodRunning phase with all containers
+// ready, and is not on its way out.
+//
+// The deletion check is the whole point of this being a function rather than
+// two lines at each call site. A gracefully deleted pod keeps phase Running and
+// ready containers for the whole of its termination grace period, so without
+// it "is a server ready" is answered yes by the pod the caller has just deleted
+// and is waiting to see replaced. It then leaves the API entirely, and the next
+// question finds no server at all. That is F-013 in docs/findings.md, and it is
+// what made CHAOS-05 fail partway through its cycles with "no NFS server pods
+// found".
 func PodReady(p *corev1.Pod) bool {
+	if p.DeletionTimestamp != nil {
+		return false
+	}
 	if p.Status.Phase != corev1.PodRunning {
 		return false
 	}
