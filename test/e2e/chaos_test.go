@@ -159,6 +159,17 @@ func assertRecovered(ctx context.Context, t *testing.T, s chaosSetup, faultAt ti
 // stall, which is what separates it from a client that is still blocked -- and
 // from one that has an errored mount and is failing once a second, which keeps
 // the record stream moving without ever regaining service.
+//
+// A workload started with framework.WriteLoadSpec.NoFsync is the case this
+// cannot cover, and DATA-13 is the only one that starts one. Without the fsync
+// a logged success means the client accepted the write, not that the server
+// took it, so that log holds no evidence of service at all and no reading of
+// it -- attempts or commits -- can show an export coming back. What DATA-13
+// needs is confirmation from outside the writer's pod. Until it has one this
+// shortcut can fire while the export is still down, and the cost is bounded
+// rather than silent: the sweep that follows reads the share from a second
+// pod, so an export that is still gone blocks that sweep and fails the case
+// there, instead of turning into a durability verdict nobody can trust.
 func waitRecovered(ctx context.Context, t *testing.T, s chaosSetup, faultAt time.Time) time.Duration {
 	t.Helper()
 	// Waited out well past the budget on purpose: a case that gives up at the
