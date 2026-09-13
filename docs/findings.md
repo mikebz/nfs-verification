@@ -37,7 +37,6 @@ New entries go at the top, and take the next number.
 
 ---
 
-<<<<<<< HEAD
 ## F-015: A checksum that failed came back as an empty string, and a success
 
 **Found:** 2026-09-13, GKE cluster `gke-w1`, Kubernetes v1.37.0-gke.2941000,
