@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/mikebz/nfs-verification/pkg/framework"
 )
@@ -125,5 +126,76 @@ func TestProcessPatternValidatesTheFlag(t *testing.T) {
 	}
 	if got != "nfsd" {
 		t.Errorf("pattern is %q, want the flag to win over the container command", got)
+	}
+}
+
+// TestFirstInjurableSkipsTerminating covers which pod a fault gets aimed at
+// when one of the candidates is already going away.
+//
+// Discovery sorts by name and deliberately keeps terminating pods, because a
+// pod on its way out still belongs in the artifact bundle and its log is still
+// worth reading. Selection must not inherit that. With fan-out greater than
+// one, the pod sorted first can be one that a previous cycle deleted, while a
+// healthy pod sits behind it: aiming at the first measures the tail of that
+// deletion and attributes it to a fault this case believes it caused.
+//
+// Not a failure any run has produced, because the deployment under test runs a
+// single-replica StatefulSet whose replacement reuses the name, so the two
+// never coexist. It is the same confusion as F-013 one level up, and the guard
+// is two lines, so it is cheaper to hold down than to rediscover.
+//
+// Steps:
+//  1. Select from nothing, and from a single healthy pod.
+//  2. Select where a terminating pod sorts ahead of a healthy one.
+//  3. Select where every candidate is terminating.
+//  4. Assert the healthy pod is chosen whenever one exists, and that the two
+//     empty-handed answers are distinguishable from each other.
+func TestFirstInjurableSkipsTerminating(t *testing.T) {
+	now := metav1.Now()
+	pod := func(name string, terminating bool) corev1.Pod {
+		p := corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name}}
+		if terminating {
+			p.DeletionTimestamp = &now
+		}
+		return p
+	}
+
+	if _, err := firstInjurable(nil); err == nil {
+		t.Error("selecting from no pods returned a target")
+	} else if !strings.Contains(err.Error(), "-server-selector") {
+		t.Errorf("the empty-discovery error does not name the flags that fix it: %v", err)
+	}
+
+	got, err := firstInjurable([]corev1.Pod{pod("nfs-server-0", false)})
+	if err != nil {
+		t.Fatalf("selecting the only healthy pod: %v", err)
+	}
+	if got.Name != "nfs-server-0" {
+		t.Errorf("selected %q, want the healthy pod", got.Name)
+	}
+
+	// Sorted first and terminating, which is the regression: taking pods[0]
+	// here aims the fault at a pod that is already leaving.
+	got, err = firstInjurable([]corev1.Pod{pod("nfs-server-0", true), pod("nfs-server-1", false)})
+	if err != nil {
+		t.Fatalf("selecting past a terminating pod: %v", err)
+	}
+	if got.Name != "nfs-server-1" {
+		t.Errorf("selected %q, want nfs-server-1: the pod sorted first is already being deleted, and a "+
+			"fault aimed at it would measure that deletion rather than one this case caused", got.Name)
+	}
+
+	// All terminating is a different fact from none found, and has to read
+	// differently: this one is not fixed by passing a selector.
+	_, err = firstInjurable([]corev1.Pod{pod("nfs-server-0", true), pod("nfs-server-1", true)})
+	if err == nil {
+		t.Fatal("selecting from only terminating pods returned a target")
+	}
+	if !strings.Contains(err.Error(), "nfs-server-0") || !strings.Contains(err.Error(), "nfs-server-1") {
+		t.Errorf("the error does not name the pods it rejected: %v", err)
+	}
+	if strings.Contains(err.Error(), "-server-selector") {
+		t.Errorf("the error suggests a discovery flag, but discovery worked and every pod it found is "+
+			"being deleted: %v", err)
 	}
 }

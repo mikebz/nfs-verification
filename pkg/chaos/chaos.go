@@ -41,16 +41,25 @@ type Target struct {
 
 // ServerTarget picks the NFS server pod to injure. With fan-out greater than
 // one it takes the first, deterministically, so a rerun hits the same pod.
+//
+// A pod that is already being deleted is never chosen. Discovery keeps those,
+// on purpose: a terminating pod still belongs in the artifact bundle and its
+// log is still worth reading. Injuring one is different, because it measures
+// the tail of a deletion somebody else started rather than a fault this case
+// caused, and the result would be attributed to the fault anyway.
+//
+// This is the same confusion as F-013 in docs/findings.md, one level up. There
+// it was a terminating pod answering yes to "is a server ready"; here it is a
+// terminating pod answering yes to "is there a server to injure".
 func ServerTarget(ctx context.Context, f *framework.Framework) (Target, error) {
 	pods, err := framework.ServerPods(ctx, f.C)
 	if err != nil {
 		return Target{}, fmt.Errorf("discovering NFS server pods: %w", err)
 	}
-	if len(pods) == 0 {
-		return Target{}, fmt.Errorf("no NFS server pods found: pass -server-namespace and -server-selector, " +
-			"otherwise there is nothing for a chaos case to injure")
+	p, err := firstInjurable(pods)
+	if err != nil {
+		return Target{}, err
 	}
-	p := &pods[0]
 	t := Target{Namespace: p.Namespace, Pod: p.Name, UID: p.UID, Node: p.Spec.NodeName, Containers: p.Spec.Containers}
 	for _, ref := range p.OwnerReferences {
 		if ref.Controller != nil && *ref.Controller {
@@ -61,6 +70,36 @@ func ServerTarget(ctx context.Context, f *framework.Framework) (Target, error) {
 		return t, fmt.Errorf("server pod %s/%s is not scheduled to a node", t.Namespace, t.Pod)
 	}
 	return t, nil
+}
+
+// firstInjurable returns the first server pod that a fault may be aimed at.
+//
+// Discovery is sorted by name and keeps terminating pods, so with fan-out
+// greater than one the first pod in the list can be one that is already going
+// away while a healthy pod sits behind it. Taking that one injures nothing and
+// measures somebody else's deletion.
+//
+// Every pod terminating at once is reported separately from none being found,
+// because the two say different things: no pods is discovery pointed at the
+// wrong place, and all of them terminating is something outside this case
+// removing them.
+func firstInjurable(pods []corev1.Pod) (*corev1.Pod, error) {
+	if len(pods) == 0 {
+		return nil, fmt.Errorf("no NFS server pods found: pass -server-namespace and -server-selector, " +
+			"otherwise there is nothing for a chaos case to injure")
+	}
+	for i := range pods {
+		if pods[i].DeletionTimestamp == nil {
+			return &pods[i], nil
+		}
+	}
+	names := make([]string, 0, len(pods))
+	for i := range pods {
+		names = append(names, pods[i].Name)
+	}
+	return nil, fmt.Errorf("every NFS server pod found is already being deleted (%s), so a fault aimed at "+
+		"one would measure a deletion this case did not cause. Either something outside the suite is "+
+		"removing them, or a previous fault has not finished", strings.Join(names, ", "))
 }
 
 // ProcessPattern is the fixed string that identifies the server process on the
