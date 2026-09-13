@@ -28,8 +28,6 @@ type Config struct {
 	ServerSelector  string
 	ServerProcess   string
 
-	CSIDriver string
-
 	ArtifactsDir string
 	RunID        string
 
@@ -52,7 +50,6 @@ type Config struct {
 	NodePowerCmd  string
 
 	KeepObjects bool
-	Verbose     bool
 
 	Delegations      string
 	RootSquash       string
@@ -75,8 +72,6 @@ func init() {
 	flag.StringVar(&cfg.ServerSelector, "server-selector", "", "label selector for NFS server pods; discovered when empty")
 	flag.StringVar(&cfg.ServerProcess, "server-process", "", "process name pattern to signal for in-place kill; discovered when empty")
 
-	flag.StringVar(&cfg.CSIDriver, "csi-driver", "", "CSI driver name; taken from the StorageClass when empty")
-
 	flag.StringVar(&cfg.ArtifactsDir, "artifacts-dir", "artifacts", "root directory for run artifacts")
 	flag.StringVar(&cfg.RunID, "run-id", "", "run identifier; defaults to a timestamp")
 
@@ -92,7 +87,6 @@ func init() {
 	flag.StringVar(&cfg.NodePowerCmd, "node-power-cmd", "", "bare metal power command template, e.g. 'ipmitool -H {{.Node}} power {{.Action}}'")
 
 	flag.BoolVar(&cfg.KeepObjects, "keep-objects", false, "do not delete the objects a case created, for triage")
-	flag.BoolVar(&cfg.Verbose, "v-harness", false, "log every harness action")
 
 	flag.StringVar(&cfg.Delegations, "delegations", "auto", "whether delegations are enabled: auto, on, off")
 	flag.StringVar(&cfg.RootSquash, "root-squash", "auto", "what the export is configured to do with root: on, off, or auto to record what it does without asserting it")
