@@ -262,10 +262,13 @@ func (f *Framework) installLockTool(ctx context.Context, pod string) error {
 	if r.Err != nil {
 		return fmt.Errorf("streaming locktool into %s: %w: %s", pod, r.Err, r.Combined())
 	}
-	got, err := f.C.MustSh(ctx, Namespace, pod, "main",
-		fmt.Sprintf("sha256sum %s | cut -d' ' -f1", shellQuote(LockToolPath)))
+	out, err := f.C.MustSh(ctx, Namespace, pod, "main", sumCmd(LockToolPath))
 	if err != nil {
 		return fmt.Errorf("checksumming locktool in %s: %w", pod, err)
+	}
+	got, err := parseSum(out, pod, LockToolPath)
+	if err != nil {
+		return err
 	}
 	if got != want {
 		return fmt.Errorf("locktool arrived in %s as %s, want %s: the exec stream did not deliver "+

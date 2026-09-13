@@ -12,12 +12,55 @@ import (
 // returns its sha256. Deterministic content matters: a checksum mismatch after
 // a failover has to be reproducible to be filed.
 func (f *Framework) WriteFile(ctx context.Context, pod, path string, sizeBytes int, seed string) (string, error) {
+	// sumCmd is appended rather than interpolated: it returns a quoted path,
+	// and a path containing a percent sign inside a format string is a verb.
 	script := fmt.Sprintf(
 		`set -e; mkdir -p "$(dirname %[1]s)"; `+
 			`yes %[3]s | head -c %[2]d > %[1]s; `+
-			`sync; sha256sum %[1]s | cut -d' ' -f1`,
-		shellQuote(path), sizeBytes, shellQuote(seed))
-	return f.C.MustSh(ctx, Namespace, f.Name(pod), "main", script)
+			`sync; `,
+		shellQuote(path), sizeBytes, shellQuote(seed)) + sumCmd(path)
+	out, err := f.C.MustSh(ctx, Namespace, f.Name(pod), "main", script)
+	if err != nil {
+		return "", err
+	}
+	return parseSum(out, f.Name(pod), path)
+}
+
+// sumCmd is the last command of every script in this package that produces a
+// checksum: sha256sum on its own, with nothing downstream of it.
+//
+// Nothing downstream of it is the point. A POSIX pipeline reports the status of
+// its last command, so `sha256sum f | cut -d' ' -f1` exits zero when sha256sum
+// fails, because cut is perfectly happy to read nothing and print nothing.
+// Under `set -e` the script then ends successfully with empty output,
+// sha256sum's complaint goes to a stderr the caller discards on success, and
+// the helper hands a case an empty string where a checksum should be. PROV-07
+// reported `checksum mismatch: got 27b6c4... want ` on a real run and that is
+// what the missing half was; see F-015. The field is split off in Go instead,
+// where failing to find one is an error rather than an empty line.
+func sumCmd(path string) string { return "sha256sum " + shellQuote(path) }
+
+// sha256HexLen is the length of a sha256 digest written in hex.
+const sha256HexLen = 64
+
+// parseSum takes what sumCmd printed and returns the digest.
+//
+// sha256sum prints "<64 hex>  <path>". Anything else -- nothing at all, a
+// truncated stream, an error message that reached stdout -- is refused by name
+// rather than passed on as data, because a case comparing two checksums cannot
+// tell a matching pair of empty strings from a matching pair of files.
+func parseSum(out, pod, path string) (string, error) {
+	sum, _, _ := strings.Cut(strings.TrimSpace(out), " ")
+	bad := len(sum) != sha256HexLen
+	for _, c := range sum {
+		if !strings.ContainsRune("0123456789abcdef", c) {
+			bad = true
+		}
+	}
+	if bad {
+		return "", fmt.Errorf("checksumming %s in %s: sha256sum printed %q, which is not a digest", path, pod, out)
+	}
+	return sum, nil
 }
 
 // WriteBytes writes size bytes at path and reports how many actually landed.
@@ -51,8 +94,11 @@ func writeBytesScript(path string, sizeBytes int64, seed string) string {
 
 // Sha256 returns the checksum of a file as the pod sees it.
 func (f *Framework) Sha256(ctx context.Context, pod, path string) (string, error) {
-	return f.C.MustSh(ctx, Namespace, f.Name(pod), "main",
-		fmt.Sprintf("sha256sum %s | cut -d' ' -f1", shellQuote(path)))
+	out, err := f.C.MustSh(ctx, Namespace, f.Name(pod), "main", sumCmd(path))
+	if err != nil {
+		return "", err
+	}
+	return parseSum(out, f.Name(pod), path)
 }
 
 // FileIdentity returns a file's device and inode as a pod sees them.
@@ -306,13 +352,17 @@ func parseDF(out string) (dfRow, error) {
 // conv=notrunc so that a pod writing a later block does not remove an earlier
 // one written by another pod.
 func (f *Framework) WriteDirect(ctx context.Context, pod, path, seed string, block, offset int) (string, error) {
+	const scratch = "/tmp/nfsv-direct-block"
 	script := fmt.Sprintf(
 		`set -e; mkdir -p "$(dirname %[1]s)"; `+
-			`yes %[2]s | head -c %[3]d > /tmp/nfsv-direct-block; `+
-			`dd if=/tmp/nfsv-direct-block of=%[1]s bs=%[3]d count=1 seek=%[4]d oflag=direct conv=notrunc 2>/dev/null; `+
-			`sha256sum /tmp/nfsv-direct-block | cut -d' ' -f1`,
-		shellQuote(path), shellQuote(seed), block, offset)
-	return f.C.MustSh(ctx, Namespace, f.Name(pod), "main", script)
+			`yes %[2]s | head -c %[3]d > %[5]s; `+
+			`dd if=%[5]s of=%[1]s bs=%[3]d count=1 seek=%[4]d oflag=direct conv=notrunc 2>/dev/null; `,
+		shellQuote(path), shellQuote(seed), block, offset, shellQuote(scratch)) + sumCmd(scratch)
+	out, err := f.C.MustSh(ctx, Namespace, f.Name(pod), "main", script)
+	if err != nil {
+		return "", err
+	}
+	return parseSum(out, f.Name(pod), scratch)
 }
 
 // CountNonZeroBytes reads one block at a block offset and returns how many of
@@ -345,14 +395,19 @@ func (f *Framework) CountNonZeroBytes(ctx context.Context, pod, path string, blo
 // status of its last command, so a failed direct read would be hashed as an
 // empty stream and come back as a valid-looking checksum of nothing. The case
 // would then report a data mismatch where the truth is that the read failed,
-// which is a different defect filed against a different owner.
+// which is a different defect filed against a different owner. The same
+// reasoning is why sha256sum now ends the script rather than feeding cut; see
+// sumCmd and F-015.
 func (f *Framework) ReadDirect(ctx context.Context, pod, path string, block, offset int) (string, error) {
 	const scratch = "/tmp/nfsv-direct-read"
 	script := fmt.Sprintf(
-		`set -e; dd if=%s of=%s bs=%d count=1 skip=%d iflag=direct 2>/dev/null; `+
-			`sha256sum %s | cut -d' ' -f1`,
-		shellQuote(path), shellQuote(scratch), block, offset, shellQuote(scratch))
-	return f.C.MustSh(ctx, Namespace, f.Name(pod), "main", script)
+		`set -e; dd if=%s of=%s bs=%d count=1 skip=%d iflag=direct 2>/dev/null; `,
+		shellQuote(path), shellQuote(scratch), block, offset) + sumCmd(scratch)
+	out, err := f.C.MustSh(ctx, Namespace, f.Name(pod), "main", script)
+	if err != nil {
+		return "", err
+	}
+	return parseSum(out, f.Name(pod), scratch)
 }
 
 // AppendRecords appends count records to path in pod, each carrying name and
