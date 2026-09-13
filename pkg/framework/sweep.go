@@ -187,13 +187,19 @@ func (f *Framework) VerifyRecords(ctx context.Context, pod, dir string, indices 
 	// the failure this has to explain is an exec that succeeded and said
 	// nothing. See F-011 in docs/findings.md.
 	res := f.C.Sh(ctx, Namespace, f.Name(pod), "main", script)
+	// Parsed before the error is looked at, and untrimmed: the parser skips
+	// blank lines by itself, and the text it keeps is only evidence if it is
+	// what the pod actually sent.
+	//
+	// An exec that failed partway still hands back what it managed to print. A
+	// sweep cut off midway through a hung mount is precisely where those lines
+	// say the most, and returning an empty sweep here would have the callers
+	// file an empty record-sweep-raw.txt for it.
+	sweep := ParseRecordSweep(res.Stdout)
 	if res.Err != nil {
-		return RecordSweep{}, fmt.Errorf("sweeping records in %s/%s: %w: %s",
+		return sweep, fmt.Errorf("sweeping records in %s/%s: %w: %s",
 			Namespace, f.Name(pod), res.Err, res.Combined())
 	}
-	// Untrimmed on purpose: the parser skips blank lines by itself, and the raw
-	// text it keeps is only evidence if it is what the pod actually sent.
-	sweep := ParseRecordSweep(res.Stdout)
 	if len(sweep.Results)+len(sweep.Unparsed) != len(indices) {
 		return sweep, shortSweepError(f.Name(pod), dir, indices, sweep, res)
 	}

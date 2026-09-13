@@ -24,6 +24,10 @@ import (
 //  2. Check the counts, the index lists and the first wrong byte.
 //  3. Assert unreadable lines are kept rather than dropped, since a sweep the
 //     harness cannot read must not report no corruption.
+//  4. Assert the text it was parsed from is kept exactly. That field is what
+//     the artifact bundle is written from when a sweep fails, and losing it
+//     would quietly file an empty file for the one failure with no verdict
+//     table to fall back on. See F-011.
 func TestParseRecordSweep(t *testing.T) {
 	const out = `correct 1 4096
 correct 2 4096
@@ -37,6 +41,10 @@ maybe 8 0
 correct nine 4096
 `
 	s := ParseRecordSweep(out)
+	if s.Raw != out {
+		t.Errorf("the sweep did not keep the text it was parsed from, so record-sweep-raw.txt would be "+
+			"written from %q instead of what the pod printed", s.Raw)
+	}
 	if got, want := len(s.Results), 6; got != want {
 		t.Fatalf("parsed %d results, want %d: %+v", got, want, s.Results)
 	}
@@ -181,6 +189,11 @@ func TestVerifyRecordsScriptAnswersForEveryIndex(t *testing.T) {
 			sweep := ParseRecordSweep(string(out))
 			if n := len(sweep.Results) + len(sweep.Unparsed); n != len(indices) {
 				t.Errorf("the sweep accounted for %d of %d indices: %s", n, len(indices), out)
+			}
+			// Checked against real tool output as well as against a fixture:
+			// this is the text the bundle is written from. See F-011.
+			if sweep.Raw != string(out) {
+				t.Errorf("the sweep kept %q, not what the script printed:\n%s", sweep.Raw, out)
 			}
 		})
 	}
