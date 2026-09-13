@@ -1,7 +1,6 @@
 package framework
 
 import (
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -188,36 +187,67 @@ func waitForAnyState(t *testing.T, path string) string {
 
 // TestAppendRecordsScriptKeepsDescriptorAndWritesRecords runs
 // scripts/append-records.sh under a real shell and checks that the records
-// land intact and in order.
+// append to existing content, format with exact newlines, and maintain a single
+// loop redirect.
 //
 // Steps:
-//  1. Run append-records.sh to append 10 records with a given name to a file.
-//  2. Assert stdout reports "done".
-//  3. Read the file back and assert each record was formatted and written in order.
+//  1. Assert the script wraps the whole loop in a group redirect { ... } >> "$path".
+//  2. Seed the target file with an existing record to verify >> appends rather than truncates.
+//  3. Run append-records.sh for worker-1 with 3 records.
+//  4. Run append-records.sh again for worker-2 with 2 records.
+//  5. Assert stdout reports "done" on both runs.
+//  6. Assert the file content exactly matches the expected records byte-for-byte,
+//     verifying newline boundaries without trimming.
 func TestAppendRecordsScriptKeepsDescriptorAndWritesRecords(t *testing.T) {
 	sh := lookOrSkip(t, "sh")
+
+	// 1. Static check: ensure the loop is wrapped in a single group redirect rather
+	// than reopening per iteration.
+	body := scriptBody("append-records.sh")
+	if !strings.Contains(body, "} >> \"$path\"") {
+		t.Errorf("append-records.sh must wrap the entire loop in a single group redirect { ... } >> \"$path\"")
+	}
+
 	target := filepath.Join(t.TempDir(), "appended.log")
 
-	out, err := exec.Command(sh, materializeScript(t, "append-records.sh"), "worker-1", "10", target).CombinedOutput()
-	if err != nil {
-		t.Fatalf("running append-records.sh: %v\n%s", err, out)
-	}
-	if strings.TrimSpace(string(out)) != "done" {
-		t.Errorf("stdout was %q, want \"done\"", string(out))
+	// 2. Seed existing content so a regression to '>' would fail.
+	const seed = "header-entry\n"
+	if err := os.WriteFile(target, []byte(seed), 0o644); err != nil {
+		t.Fatalf("seeding target: %v", err)
 	}
 
+	// 3. First append pass.
+	out1, err := exec.Command(sh, materializeScript(t, "append-records.sh"), "worker-1", "3", target).CombinedOutput()
+	if err != nil {
+		t.Fatalf("running append-records.sh (pass 1): %v\n%s", err, out1)
+	}
+	if strings.TrimSpace(string(out1)) != "done" {
+		t.Errorf("pass 1 stdout was %q, want \"done\"", string(out1))
+	}
+
+	// 4. Second append pass.
+	out2, err := exec.Command(sh, materializeScript(t, "append-records.sh"), "worker-2", "2", target).CombinedOutput()
+	if err != nil {
+		t.Fatalf("running append-records.sh (pass 2): %v\n%s", err, out2)
+	}
+	if strings.TrimSpace(string(out2)) != "done" {
+		t.Errorf("pass 2 stdout was %q, want \"done\"", string(out2))
+	}
+
+	// 5. Exact byte comparison: verifies append order and exact line boundaries.
 	content, err := os.ReadFile(target)
 	if err != nil {
 		t.Fatalf("reading appended file: %v", err)
 	}
-	lines := strings.Split(strings.TrimRight(string(content), "\n"), "\n")
-	if len(lines) != 10 {
-		t.Fatalf("got %d lines, want 10", len(lines))
-	}
-	for i, line := range lines {
-		want := fmt.Sprintf("record-from-worker-1-%04d", i+1)
-		if line != want {
-			t.Errorf("line %d is %q, want %q", i, line, want)
-		}
+
+	want := "header-entry\n" +
+		"record-from-worker-1-0001\n" +
+		"record-from-worker-1-0002\n" +
+		"record-from-worker-1-0003\n" +
+		"record-from-worker-2-0001\n" +
+		"record-from-worker-2-0002\n"
+
+	if string(content) != want {
+		t.Errorf("appended file content mismatch:\ngot:\n%q\nwant:\n%q", string(content), want)
 	}
 }
