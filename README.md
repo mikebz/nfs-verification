@@ -284,37 +284,53 @@ here would silently invalidate every timing assertion.
 The harness compiles, `go vet` is clean, and the unit tests in `pkg/slo` and
 `pkg/framework` pass.
 
-The data path cases were run against a three-worker GKE cluster on 2026-09-11,
-on Kubernetes v1.37 with the in-cluster `nfs-server-provisioner`. DATA-05
-through DATA-09, DATA-11, DATA-12, DATA-13 and CHAOS-06 passed, with the SEC
-cases alongside them. DATA-11's hole-punch half reported blocked, which is the
-documented answer on a busybox image.
+**The whole suite has been run.** On 2026-09-13, `make test-e2e` against a
+three-worker GKE cluster (Kubernetes v1.37, Container-Optimized OS, kernel
+6.12.94+) with the in-cluster `nfs-server-provisioner` and the `default` profile
+(lease 60s, grace 90s): **25 passed, 6 failed, 4 reported blocked**, out of the
+thirty-five cases listed above.
 
-Not everything on that cluster is green, and none of the red is the data path.
-This provisioner never announces grace, so **OBS-03 fails** and **CHAOS-07
-reports blocked**, which is F-008; CHAOS-06's reclaim assertion needs no grace
-window, which is why it passed anyway. **OBS-02 failed** on that run for a
-reason unrelated to grace. A green CHAOS run against this provisioner is not
-evidence that grace behaves.
+None of the six reds is a defect in the storage server, and none of them is new.
+Each one is a finding that already has a number:
 
-OBS-06 and the kubelet stats reader were run against the same cluster on
-2026-09-11. The control plane publishes per-volume usage, it agrees with `df`
-inside the pod exactly, and both move with the write. The case still comes back
-red on its last assertion, because the export has no per-volume quota and both
-sources are therefore reporting the provisioner's backing filesystem rather than
-the 1 GiB claim. That is F-009, and it is a limitation of this deployment rather
-than a defect in the server or the harness.
+| Case | Result | Whose problem |
+|---|---|---|
+| DATA-02 | fail | Four clients appending to one file landed 150 of 200 records and tore none. NFSv4.1 has no append operation, so this is a property of the deployment and goes to the boundary discussion, not to the server owner. F-016 |
+| OBS-03 | fail | This provisioner never announces grace, so there is no signal to observe. F-008 |
+| OBS-06 | fail | The export has no per-volume quota, so both capacity sources describe the backing filesystem rather than the claim. F-009 |
+| PROV-04, PROV-11 | fail | The StorageClass advertises `allowVolumeExpansion` and nothing implements it. F-004 |
+| PROV-07 | fail | A defect in this harness, not in the cluster: a checksum helper returned an empty string as a digest. Fixed; F-015 |
 
-Three gaps in what runs today. **DATA-10 has not been run**, so whether a
-directory-backed export holds 100k entries is still unmeasured. **DATA-14 is
-deferred**, so nothing covers sustained mixed load at scale; that gap belongs to
-SCALE-07, and Section 3.2 of the test plan has the reasoning. And **step 7 is
-two thirds unwritten**: OBS-05, OBS-07 and the configuration half of OBS-01 have
-a design doc and no code
+The four blocked are CHAOS-01, DATA-12 and DATA-13, which need a process name
+this image does not let the harness discover, and CHAOS-07, which needs the
+grace window F-008 says this server never announces. Blocked is not a pass:
+these vectors are unexercised here.
+
+**A green run against this provisioner is not evidence that grace behaves.**
+CHAOS-06's reclaim assertion needs no grace window, which is why it passes while
+CHAOS-07 cannot run at all.
+
+Two things the same run settled that earlier versions of this section listed as
+open. **DATA-10 has now been run** and passes: 100k directory entries listed
+under concurrent deletes, in 238s. **OBS-02 passes**; it had failed on an
+earlier run for a reason unrelated to grace.
+
+Two gaps remain in what runs today. **DATA-14 is deferred**, so nothing covers
+sustained mixed load at scale; that gap belongs to SCALE-07, and Section 3.2 of
+the test plan has the reasoning. And **step 7 is two thirds unwritten**: OBS-05,
+OBS-07 and the configuration half of OBS-01 have a design doc and no code
 ([`docs/06-observability-design.md`](docs/06-observability-design.md)).
 
-An earlier run found two cases reporting more than they had measured; both are
-fixed and the reasoning is F-007.
+Read the failures with the findings log open. Three separate runs have now found
+cases that reported more than they had measured — F-007, F-014 and F-015 — and
+in the case of F-014 the result being over-reported was a green one, for months.
+
+> [!TIP]
+> On macOS, run long suites under `caffeinate -is`. A workstation that sleeps
+> mid-run does not stop the pods, and Go's monotonic clock does not advance
+> while it is asleep, so every duration the suite prints about itself comes back
+> understated while the cluster-side measurements stay correct. F-017 has the
+> run where that happened and what it looked like.
 
 Notable findings from running the suite against real clusters are recorded in
 [`docs/findings.md`](docs/findings.md).
