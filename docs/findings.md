@@ -20,6 +20,7 @@ New entries go at the top, and take the next number.
 | # | Found | What it says | Cited by |
 |---|---|---|---|
 | [F-015](#f-015-a-checksum-that-failed-came-back-as-an-empty-string-and-a-success) | 2026-09-13 | A checksum pipeline ending in `cut` exits zero when `sha256sum` fails, so a helper returned an empty string as a digest | `io.go`'s `sumCmd` and `parseSum`, `io_parse_test.go` |
+| [F-014](#f-014-recovery-was-measured-to-a-write-that-committed-before-the-outage) | 2026-09-12 | Time to first I/O after a fault returned a write from before service was lost, reporting a 1m43s failover as 0s | `load.go`'s stall measurement, `slo.LoadStallFloor`, CHAOS-02/05/06/07 |
 | [F-013](#f-013-a-terminating-server-pod-counted-as-the-server-being-back) | 2026-09-11 | A gracefully deleted pod stays Running and ready, so the wait for a replacement was satisfied by the pod it was waiting past | `server.go`'s readiness check, `server_test.go` |
 | [F-012](#f-012-the-resize-diagnosis-was-unreachable-because-an-unrelated-condition-was-always-there) | 2026-09-11 | Listing every claim condition made the "nothing acted on the request" diagnosis unreachable on any mounted claim | `pvc.go`'s resize description, `pvc_test.go` |
 | [F-011](#f-011-a-record-sweep-came-back-empty-from-an-exec-that-reported-success) | 2026-09-12 | A sweep exec returned success with no output at all, and the old message could not tell that from finding nothing | `sweep.go`'s short-answer error, `sweep_test.go` |
@@ -36,6 +37,7 @@ New entries go at the top, and take the next number.
 
 ---
 
+<<<<<<< HEAD
 ## F-015: A checksum that failed came back as an empty string, and a success
 
 **Found:** 2026-09-13, GKE cluster `gke-w1`, Kubernetes v1.37.0-gke.2941000,
@@ -125,6 +127,119 @@ is producible without anything going wrong at the exec layer at all.
 
 **A pipeline is not a chain of assertions. Only its last command can fail it,
 so nothing that matters may be followed by something that does not care.**
+
+---
+
+## F-014: Recovery was measured to a write that committed before the outage
+
+**Found:** 2026-09-12, GKE cluster `gke-w1`, Kubernetes v1.37.0-gke.2941000,
+three workers on Container-Optimized OS, kernel 6.12.94+, StorageClass `nfs`
+backed by `nfs-server-provisioner` as a single-replica StatefulSet, profile
+`default` (lease 60s, grace 90s). Runs `pr39-chaos-20260912` and
+`pr39v2-chaos-20260912`, `make test-chaos`.
+
+**Severity:** every recovery number the chaos cases have ever reported is
+suspect, and the SLO comparison that uses it could not fail.
+
+### What happened
+
+CHAOS-05 injects the same fault five times. In one passing run it reported:
+
+| cycle | reported |
+|---|---|
+| 1 | 1m43s |
+| 2 | **0s** |
+| 3 | 1m38s |
+| 4 | 1m43s |
+| 5 | **0s** |
+
+A server pod deletion cannot recover in `0s` on a deployment that takes about
+90 seconds to come back, and the same case closed with `longest gap between
+attempts was 1m44s`, so the outage plainly happened in every cycle.
+
+CHAOS-06 and CHAOS-07 printed the contradiction on adjacent lines:
+
+```
+first committed write 0s after the fault (budget 2m0s, profile default)
+longest gap between attempts was 1s
+```
+
+A one-second longest gap does not mean a seamless failover. It means the
+measurement **finished before the outage started**, and the gap statistic was
+then computed from that same premature snapshot of the log.
+
+Both numbers were wrong in the permissive direction: `0s` passes a two-minute
+budget, so the assertion could not fail no matter how bad recovery was.
+
+### Why
+
+Recovery was read as `FirstSuccessAfter(faultAt)`, the first committed write
+timestamped at or after the fault. Three things conspire:
+
+- The workload writes one record per second and stamps it with `date +%s`, so
+  record times have **one-second resolution**.
+- `faultAt` comes from the same clock, read by an exec **before** the `DELETE`
+  is issued.
+- `FirstSuccessAfter` is inclusive, so a write in the same one-second bucket as
+  `faultAt` — possibly committed *before* it — satisfies the wait at once.
+
+So the poll returned on its first iteration, with a write that committed while
+the server was still up, and recovery came out as zero. Whether a given cycle
+reported honestly was a race between the exec round trip and the writer's
+one-second cadence, which is why the same run produced both `1m43s` and `0s`.
+
+**Moving the anchor to after the `DELETE` would not have fixed it.** A deleted
+pod keeps serving through its termination grace, so a write committed in the
+seconds after the call returns is still a pre-outage write. Anchoring is not the
+problem; asking the wrong question is.
+
+### What changed
+
+The outage is now found by its **shape** rather than its timestamps. On a hard
+NFSv4.1 mount a client that loses its server blocks rather than erroring
+([`nfs(5)`](https://man7.org/linux/man-pages/man5/nfs.5.html)), so an outage is a
+silence in a log that is otherwise one line per second, and that silence is the
+only unambiguous evidence of when service was actually lost.
+
+- `LoadReport.StallAfter` returns the first silence longer than a floor whose
+  resuming write lands at or after the fault, and recovery is measured to that
+  write. `LongestGap` was already reporting this honestly from the same log; the
+  recovery path simply was not using it.
+- `slo.LoadStallFloor` is the floor, at 10s: well above the one-to-two second
+  cadence of a healthy stream, well below the 60s smallest recovery bound any
+  profile states, so it separates the two without being near either.
+- Cases now log what was measured, not just the result: `recovered 1m43s after
+  the fault: the client made no progress for 1m41s, from record 12 to record
+  13`. A reader can check the claim against the stream.
+- A workload that never stalls is reported as such rather than scored as an
+  instant recovery, and `LastRecord` separates that from a client still blocked
+  in an outage that never ended. Those are opposite results that previously both
+  arrived as silence.
+- `FirstSuccessAfter` keeps its narrower meaning and now says in its doc comment
+  that it is not the recovery measurement.
+
+The unit test deliberately asserts that the **old** reading still returns the
+pre-outage write, so the difference between the two questions is pinned in code
+rather than argued in a comment.
+
+### What it means for the system under test
+
+Nothing yet, and that is the point. This is a harness defect: no statement about
+this deployment's recovery time should be drawn from any run before this change,
+in either direction. The `1m38s`–`1m44s` readings are consistent with a roughly
+90-second grace period plus client retry backoff and are plausibly real, but
+they were produced by a measurement that demonstrably returns the wrong answer
+under a race, so they are not evidence.
+
+The `0s` readings were never evidence of a fast failover. They were the absence
+of a measurement.
+
+The general rule: **a measurement that can only be wrong in the permissive
+direction will never fail, so nothing about it looks broken.** Every green
+recovery assertion in this suite passed for two weeks while this was live. When
+a measured quantity has an obvious reading and a correct one, the obvious one
+needs a test that pins the difference, and a number printed next to the evidence
+that contradicts it is the cheapest way to notice.
 
 ---
 
