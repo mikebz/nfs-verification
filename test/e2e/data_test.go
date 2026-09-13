@@ -437,6 +437,9 @@ const appendCaveat = "\n\nNote before filing: NFSv4.1 has no append operation. A
 //     A torn record is corruption under any reading of the protocol.
 //  5. Assert the line count is exactly what was written. This is the flagged
 //     assertion, so a mismatch carries the note that routes it.
+//  6. On a mismatch, name the records that are missing, per appender. The file
+//     is deleted at teardown, so the message is the only evidence there will
+//     be of what the loss looked like.
 func TestDataConcurrentAppendToOneFile(t *testing.T) {
 	f := framework.New(t, "DATA-02")
 	ctx, cancel := caseCtx(t, 20*time.Minute)
@@ -534,8 +537,29 @@ func TestDataConcurrentAppendToOneFile(t *testing.T) {
 	// Then the count, which is the part the plan flags.
 	want := appenders * records
 	if len(lines) != want {
+		// Which records went missing, per appender, not just how many. The
+		// shape is the finding: one appender's whole contribution gone means
+		// its writes were overwritten at an offset another client believed was
+		// end of file, while scattered singles across every appender mean
+		// something else entirely. Nobody can go and look afterwards, because
+		// the claim is deleted at teardown and the artifact bundle keeps pod
+		// logs rather than the share. See F-016.
+		var missing []string
+		for _, pod := range pods {
+			var lost []int
+			for n := 1; n <= records; n++ {
+				if valid[fmt.Sprintf("record-from-%s-%04d", pod, n)] == 0 {
+					lost = append(lost, n)
+				}
+			}
+			if len(lost) > 0 {
+				missing = append(missing, fmt.Sprintf("%s lost %d of %d (records %s)",
+					pod, len(lost), records, framework.CompactRanges(lost)))
+			}
+		}
 		t.Errorf("the file holds %d lines, want %d from %d appenders writing %d records each; "+
-			"%d whole, %d torn%s", len(lines), want, appenders, records, len(valid), len(torn), appendCaveat)
+			"%d whole, %d torn. Missing: %s%s", len(lines), want, appenders, records,
+			len(valid), len(torn), strings.Join(missing, "; "), appendCaveat)
 	}
 }
 
