@@ -90,8 +90,9 @@ the same file already carried comments warning about exactly this — *"a POSIX
 pipeline reports its last command's status, so piping a failed read into a
 counter yields a confident zero"* — and both keep their `dd` out of a pipeline
 for that reason. `ReadDirect` then ended its own script with `sha256sum | cut`,
-reintroducing one command downstream the hazard its own comment described one
-command upstream.
+which recreated the very pattern its comment had just described: a command whose
+failure matters, followed by one that does not care, one line below the `dd` the
+comment was protecting.
 
 `CountNonZeroBytes` did not have a checksum pipeline; it ends with
 `tr -d '\000' < block | wc -c`, and `wc` would likewise report a confident zero
