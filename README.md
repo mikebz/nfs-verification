@@ -284,22 +284,28 @@ here would silently invalidate every timing assertion.
 The harness compiles, `go vet` is clean, and the unit tests in `pkg/slo` and
 `pkg/framework` pass.
 
-**The whole suite has been run.** On 2026-09-13, `make test-e2e` against a
-three-worker GKE cluster (Kubernetes v1.37, Container-Optimized OS, kernel
-6.12.94+) with the in-cluster `nfs-server-provisioner` and the `default` profile
-(lease 60s, grace 90s): **25 passed, 6 failed, 4 reported blocked**, out of the
-thirty-five cases listed above.
+**The whole suite has been run.** Twice on 2026-09-13, and the later of the two
+is the one reported here: `make test-e2e` against a three-worker GKE cluster
+(Kubernetes v1.37, Container-Optimized OS, kernel 6.12.94+) with the in-cluster
+`nfs-server-provisioner` and the `default` profile (lease 60s, grace 90s), in
+62 minutes: **26 passed, 5 failed, 4 reported blocked**, out of the thirty-five
+cases listed above.
 
-None of the six reds is a defect in the storage server, and none of them is new.
-Each one is a finding that already has a number:
+None of the five reds is a defect in the storage server, and none of them is
+new. Each one is a finding that already has a number:
 
 | Case | Result | Whose problem |
 |---|---|---|
-| DATA-02 | fail | Four clients appending to one file landed 150 of 200 records and tore none. NFSv4.1 has no append operation, so this is a property of the deployment and goes to the boundary discussion, not to the server owner. F-016 |
+| DATA-02 | fail | Four clients appending to one file landed 150 of 200 records and tore none, with one appender losing its whole contribution and the other three losing none. NFSv4.1 has no append operation, so this is a property of the deployment and goes to the boundary discussion, not to the server owner. It is also intermittent: two runs the same day landed all 200. F-016 |
 | OBS-03 | fail | This provisioner never announces grace, so there is no signal to observe. F-008 |
 | OBS-06 | fail | The export has no per-volume quota, so both capacity sources describe the backing filesystem rather than the claim. F-009 |
 | PROV-04, PROV-11 | fail | The StorageClass advertises `allowVolumeExpansion` and nothing implements it. F-004 |
-| PROV-07 | fail | A defect in this harness, not in the cluster: a checksum helper returned an empty string as a digest. Fixed; F-015 |
+
+The earlier sweep of the same day had a sixth red, PROV-07, which was a defect
+in this harness rather than in the cluster: a checksum helper returned an empty
+string as a digest (F-015). It is fixed, and PROV-07 passes in the run above —
+in the same position of the same suite where it failed, which is the comparison
+worth having.
 
 The four blocked are CHAOS-01, DATA-12 and DATA-13, which need a process name
 this image does not let the harness discover, and CHAOS-07, which needs the
