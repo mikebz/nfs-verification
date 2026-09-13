@@ -2,15 +2,14 @@
 
 Author: mikebz@
 Created: 2026-09-10
-Updated: 2026-09-12
+Updated: 2026-09-13
 
 End-to-end verification of NFS RWX persistent volumes on Kubernetes.
 
 This repository holds the harness, preflight, the fault injection package, grace
-observability, `locktool`, the kubelet stats reader, and the thirty-five cases
-listed below: all of PROV, all of DATA except the deferred soak, both SEC cases
-that predate step 8, five CHAOS cases and four OBS cases. The rest land in the
-steps listed in [`plan.md`](plan.md).
+observability, `locktool`, the kubelet stats reader, and thirty-five verification
+cases. What is shipped, what is in progress, and the delivery order are tracked
+in [`plan.md`](plan.md).
 
 ## Documentation
 
@@ -21,7 +20,7 @@ docs are reference material, not prerequisites.
 | Document | What it answers |
 |---|---|
 | [`docs/01-test-plan.md`](docs/01-test-plan.md) | What gets verified and why: the architecture under test, every case ID, the SLO table |
-| [`plan.md`](plan.md) | In what order it gets built, and what is done. A working document in the root, not part of the record in `docs/` |
+| [`plan.md`](plan.md) | In what order it gets built, what is shipped, and what is left to do. A working document in the root, not part of the record in `docs/` |
 | [`docs/findings.md`](docs/findings.md) | What running against a real cluster taught, `F-001` upward. **Read it before touching teardown, deletion, or anything that unmounts** |
 | [`AGENTS.md`](AGENTS.md) | How to work here: change size, case conventions, the sources every assertion cites, what to claim when you are done |
 
@@ -181,81 +180,6 @@ cannot spend the whole budget there and leave nothing for cleanup.
 Cleanup budgets nest rather than share, and a case's own budget comes from
 `caseCtx`. Before adding a wait, add up the worst case: a five minute cleanup
 charged to every case eats the `go test -timeout` budget for the package.
-
-## Cases in this repository so far
-
-| ID | Case | Category |
-|---|---|---|
-| PROV-01 | Dynamic provision, bind, mount, write, delete, backing volume reclaimed | PROV |
-| PROV-02 | Provision 20 RWX PVCs concurrently; no duplicate export IDs or paths | PROV |
-| PROV-03 | Delete a claim a pod still mounts; it stays Terminating until the mount is gone | PROV |
-| PROV-04 | Volume expansion, or a clean rejection when the class does not advertise it | PROV |
-| PROV-05 | Snapshot and restore verified from two nodes, or clean rejection where no snapshot class names the driver | PROV |
-| PROV-06 | Reclaim policy Retain: PV persists and rebinds with data intact | PROV |
-| PROV-07 | Provision while server pod is down; recovers cleanly once server returns | PROV |
-| PROV-08 | Delete claim while server pod is down; completes deletion once server returns | PROV |
-| PROV-09 | Rapid create/delete churn (100 cycles); no export ID or fd exhaustion | PROV |
-| PROV-10 | Volume name edge cases: invalid names rejected at admission, and a 253-character name binds, mounts and exports correctly | PROV |
-| PROV-11 | Two-stage volume expansion under active I/O; zero I/O errors | PROV |
-| DATA-01 | Four pods writing at once, four files, cross-verified checksums | DATA |
-| DATA-02 | Four pods appending to one file through a held-open descriptor | DATA |
-| DATA-03 | Close-to-open across two nodes | DATA |
-| DATA-04 | The negative of DATA-03: what a reader may see before the writer closes | DATA |
-| DATA-05 | flock and byte-range mutual exclusion across two nodes | DATA |
-| DATA-06 | A byte-range lock held by a force-deleted pod, released inside one lease | DATA |
-| DATA-07 | One file written and read O_DIRECT by two pods on two nodes | DATA |
-| DATA-08 | The same export mounted twice, once with noac: visibility without a close | DATA |
-| DATA-09 | Silly rename, cross-node unlink and rename under a held descriptor | DATA |
-| DATA-10 | A 100k-entry directory listed while another pod deletes from it | DATA |
-| DATA-11 | Sparse write and read back; the hole punch recorded, not asserted, on 4.1 | DATA |
-| DATA-12 | fsync durability: every committed record intact after a server kill | DATA |
-| DATA-13 | Negative durability: un-fsynced records may be absent, never wrong | DATA |
-| SEC-01 | uid and gid preservation across pods on two nodes | SEC |
-| SEC-02 | What the export does to a root-owned write, and whether it does it coherently | SEC |
-| OBS-02 | A failover reaches the operator with a timestamp and a measurable duration | OBS |
-| OBS-03 | Grace entry and exit are both observable, and the window is measurable | OBS |
-| OBS-04 | A mount that cannot succeed reaches the operator as a Kubernetes Event | OBS |
-| OBS-06 | The control plane reports this volume's usage, it agrees with `df` in the pod, and both move with the workload | OBS |
-| CHAOS-01 | SIGKILL the server process during an active write | CHAOS |
-| CHAOS-02 | Delete the server pod during an active write, with a lock held across it | CHAOS |
-| CHAOS-05 | Five failovers in a row, each recovering on its own and entering grace once | CHAOS |
-| CHAOS-06 | Whole-file and disjoint byte-range locks across a failover, read from both ends | CHAOS |
-| CHAOS-07 | A second client attempting a new lock while the server is in grace | CHAOS |
-
-Several are deliberately careful about what they blame. SEC-01 reports
-**blocked**, with the export's own error in the message, when an ordinary uid
-has nowhere to write on the share: that is deployment configuration, and filing
-it against the storage system wastes a week. PROV-04 records what `df` reports
-rather than asserting on it, because an export with no per-volume quota shows
-every client the whole backing filesystem and cannot show a capacity change at
-all; it still asserts that the control plane grew, that the data survived, and
-that the client never restarted. SEC-02 records what the export does to root
-unless `-root-squash` says what it was configured to do, and asserts coherence
-between clients either way. DATA-02 asserts record integrity outright but
-carries a caveat on the record count, because NFSv4.1 has no append operation
-and an exact count under concurrent appends is an implementation property; the
-failure message routes it to the boundary discussion rather than to the server
-owner.
-
-CHAOS-05 records the wall clock over its five cycles and does not assert on it:
-on the default profile grace alone is ninety seconds, so five lawful recoveries
-do not fit inside the ten minutes the plan names, and a case that asserted it
-would fail with no defect present. Each cycle is asserted against the restart
-SLO instead. CHAOS-06 takes locks in both shapes: whole-file, which a Linux
-NFSv4 client sends to the server as a lock over the whole byte range, and
-disjoint sub-file ranges from two clients on one file, which is the only thing a
-byte range adds. It reads both ends of every lock afterwards, the server through
-`F_GETLK` and the client through `/proc/locks`, because a client that believes
-it holds a range the server has forgotten is visible only as the disagreement
-between them. CHAOS-07 reports **blocked** when the server does not make grace
-observable, because there is then no window to place a lock grant inside or
-outside of, and OBS-03 is the case that fails for that missing signal.
-
-The chaos cases report **blocked** when the cluster gives them nothing to
-injure: no server pods discovered, a server whose process name lives in an image
-entrypoint, or a server pod no controller owns, which would not come back. A
-case that measures a recovery from a fault that was never injected passes for
-the wrong reason, which is worse than a case that does not run.
 
 ## How a failover is measured
 
