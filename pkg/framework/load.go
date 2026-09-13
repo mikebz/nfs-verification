@@ -234,8 +234,9 @@ type Stall struct {
 // Duration is how long the client made no progress at all.
 func (s Stall) Duration() time.Duration { return s.Resumed.At.Sub(s.Last.At) }
 
-// StallAfter returns the first interruption longer than floor whose resuming
-// write lands at or after t, which is the outage a fault injected at t caused.
+// StallAfter returns the first interruption in the record stream that left the
+// client with no progress for longer than floor at some point after t, which is
+// the outage a fault injected at t caused.
 //
 // This is the measurement behind every recovery SLO in the plan. It reads the
 // outage off the shape of the stream rather than off the timestamps alone,
@@ -246,6 +247,17 @@ func (s Stall) Duration() time.Duration { return s.Resumed.At.Sub(s.Last.At) }
 // whenever a write lands in the same second as the fault or during the server's
 // termination grace, which is what F-014 records happening on real runs.
 //
+// Only the part of a silence that falls after t counts towards floor. A gap
+// that was already ending when the fault landed belongs to whatever happened
+// before it: in the repeated-failover case the previous cycle's outage sits in
+// the same log, and stamps are whole seconds, so a new fault read in the same
+// second as the previous cycle's resuming write would otherwise match that gap
+// and report recovery before the new fault had done anything. Clamping the
+// start of the measured silence to t rather than requiring the whole gap to
+// follow t keeps a client that blocks at the instant of the fault -- with its
+// last write stamped in the second before it -- from being missed, which is the
+// same off-by-one-second that F-014 is about.
+//
 // Not found means no such interruption is in the log yet. That is genuinely
 // ambiguous on its own -- the client may still be blocked, or it may never have
 // lost service at all -- so a caller that needs to tell those apart asks
@@ -253,10 +265,14 @@ func (s Stall) Duration() time.Duration { return s.Resumed.At.Sub(s.Last.At) }
 func (r LoadReport) StallAfter(t time.Time, floor time.Duration) (Stall, bool) {
 	for i := 1; i < len(r.Records); i++ {
 		prev, cur := r.Records[i-1], r.Records[i]
-		if !cur.OK || cur.At.Before(t) {
+		if !cur.OK {
 			continue
 		}
-		if cur.At.Sub(prev.At) > floor {
+		from := prev.At
+		if from.Before(t) {
+			from = t
+		}
+		if cur.At.Sub(from) > floor {
 			return Stall{Last: prev, Resumed: cur}, true
 		}
 	}

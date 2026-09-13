@@ -294,6 +294,10 @@ func intsAsArgs(indices []int) []string {
 //  4. Assert the one-second cadence of a healthy stream is never an outage.
 //  5. Assert a silence that ended before the fault is not credited to it.
 //  6. Assert a failed attempt does not end an outage.
+//  7. Assert a silence that ended in the same second as the fault is not
+//     credited to it either, and that the outage after it is the answer.
+//  8. Assert an outage that began in the second before the fault is still
+//     found, since that is what an immediate block looks like.
 func TestStallAfterMeasuresTheOutage(t *testing.T) {
 	// Records 1-3 are the steady cadence, then the client blocks for 103
 	// seconds, then it resumes. The fault is stamped in the same second as
@@ -360,6 +364,44 @@ ERR 2 1700000105
 `)
 	if s, ok := errEnded.StallAfter(at(1700000000), slo.LoadStallFloor); ok {
 		t.Errorf("a failed attempt ended the outage (records %d to %d)", s.Last.Index, s.Resumed.Index)
+	}
+
+	// CHAOS-05 injects fault after fault into one log, so the previous cycle's
+	// outage is still in it. Stamps are whole seconds and the fault clock is
+	// read by exec, so the new fault can land in the same second as the
+	// previous cycle's resuming write. Accepting that gap would report this
+	// cycle recovered before its fault had done anything, which is F-014 again
+	// one cycle later. Record 2 ends the previous outage at the fault second;
+	// the answer is the outage that follows, records 3 to 4.
+	overlap := parseLoadLog(`OK 1 1700000000
+OK 2 1700000100
+OK 3 1700000101
+OK 4 1700000205
+`)
+	s, ok := overlap.StallAfter(at(1700000100), slo.LoadStallFloor)
+	if !ok {
+		t.Fatal("no stall found after a fault that followed an earlier outage")
+	}
+	if s.Last.Index != 3 || s.Resumed.Index != 4 {
+		t.Errorf("stall runs from record %d to record %d, want 3 to 4: the previous cycle's "+
+			"outage was credited to this cycle's fault", s.Last.Index, s.Resumed.Index)
+	}
+
+	// The other side of the same boundary. A client that blocks at the instant
+	// of the fault has its last write stamped in the second before it, so the
+	// silence starts fractionally before the fault clock was read. Requiring
+	// the whole gap to follow the fault would miss this outage entirely and
+	// hang the case until its deadline.
+	immediate := parseLoadLog(`OK 1 1700000000
+OK 2 1700000001
+OK 3 1700000105
+`)
+	s, ok = immediate.StallAfter(at(1700000002), slo.LoadStallFloor)
+	if !ok {
+		t.Fatal("an outage that began in the second before the fault was not found")
+	}
+	if s.Last.Index != 2 || s.Resumed.Index != 3 {
+		t.Errorf("stall runs from record %d to record %d, want 2 to 3", s.Last.Index, s.Resumed.Index)
 	}
 }
 
