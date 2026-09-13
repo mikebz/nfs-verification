@@ -167,6 +167,7 @@ func TestFirstInjurableSkipsTerminating(t *testing.T) {
 	healthy := func(name string) corev1.Pod { return pod(name, corev1.PodRunning, false) }
 	dying := func(name string) corev1.Pod { return pod(name, corev1.PodRunning, true) }
 	starting := func(name string) corev1.Pod { return pod(name, corev1.PodPending, false) }
+	dead := func(name string) corev1.Pod { return pod(name, corev1.PodFailed, false) }
 
 	if _, err := firstInjurable(nil); err == nil {
 		t.Error("selecting from no pods returned a target")
@@ -183,6 +184,10 @@ func TestFirstInjurableSkipsTerminating(t *testing.T) {
 		{"the only pod, healthy", []corev1.Pod{healthy("nfs-server-9")}},
 		{"past a terminating pod", []corev1.Pod{dying("nfs-server-0"), healthy("nfs-server-9")}},
 		{"past a pending pod", []corev1.Pod{starting("nfs-server-0"), healthy("nfs-server-9")}},
+		// The rule is "not Running", not "not Pending". Discovery cannot
+		// currently hand this one over, and the guard does not depend on that
+		// staying true.
+		{"past a failed pod", []corev1.Pod{dead("nfs-server-0"), healthy("nfs-server-9")}},
 		{"past both", []corev1.Pod{dying("nfs-server-0"), starting("nfs-server-1"), healthy("nfs-server-9")}},
 	}
 	for _, tc := range picks {

@@ -97,9 +97,9 @@ func firstInjurable(pods []corev1.Pod) (*corev1.Pod, error) {
 	for i := range pods {
 		why = append(why, pods[i].Name+" "+unfitToInjure(&pods[i]))
 	}
-	return nil, fmt.Errorf("no NFS server pod found can be injured (%s), so a fault aimed at one would "+
-		"measure something this case did not cause. Either something outside the suite is removing them, "+
-		"or a previous fault has not finished", strings.Join(why, ", "))
+	return nil, fmt.Errorf("no NFS server pod found that can be injured (%s), so a fault aimed at one "+
+		"would measure something this case did not cause. Either something outside the suite is removing "+
+		"them, or a previous fault has not finished", strings.Join(why, ", "))
 }
 
 // unfitToInjure says why a fault must not be aimed at this pod, or "" if one
@@ -111,11 +111,17 @@ func firstInjurable(pods []corev1.Pod) (*corev1.Pod, error) {
 //   - Being deleted. A gracefully deleted pod keeps phase Running for its whole
 //     grace period, so the phase check below does not catch it. Injuring one
 //     measures the tail of a deletion somebody else started.
-//   - Pending. There is no running container, so there is no process to signal,
-//     and deleting it removes a replica that was not serving while the pod that
-//     is serving carries on untouched. Discovery keeps Pending pods on purpose,
-//     because a server that cannot start is worth reporting; it is still not a
-//     thing a fault can be aimed at.
+//   - Any phase other than Running. Such a pod has no running container, so
+//     there is no process to signal, and deleting it removes a replica that was
+//     not serving while the pod that is serving carries on untouched.
+//
+// In practice the second means Pending, because discovery only ever returns
+// Running and Pending. It is written as the general rule anyway: the cost of
+// refusing a Succeeded or Failed pod is nothing, and a phase filter that has to
+// agree with another package's filter to stay correct is one edit away from not
+// being correct. Discovery keeps those pods on purpose, because a server that
+// cannot start is worth reporting; that is still not a thing a fault can be
+// aimed at.
 //
 // Readiness is deliberately not required, which is the narrower rule than it
 // may look. A Running server that has gone not-ready is still serving, still
