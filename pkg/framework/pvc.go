@@ -24,9 +24,25 @@ type PVCSpec struct {
 	DataSource   *corev1.TypedLocalObjectReference
 }
 
-// CreatePVC creates a claim in the framework namespace. Defaults are RWX at the
-// configured size on the discovered RWX StorageClass.
-func (f *Framework) CreatePVC(ctx context.Context, spec PVCSpec) (*corev1.PersistentVolumeClaim, error) {
+// pvcTemplateData is what manifests/pvc.yaml is rendered against.
+type pvcTemplateData struct {
+	Name         string
+	Namespace    string
+	Labels       map[string]string
+	AccessMode   string
+	StorageClass string
+	Size         string
+	DataSource   *pvcDataSourceData
+}
+
+type pvcDataSourceData struct {
+	APIGroup string
+	Kind     string
+	Name     string
+}
+
+// PVCBuilder renders manifests/pvc.yaml into a claim object.
+func (f *Framework) PVCBuilder(spec PVCSpec) (*corev1.PersistentVolumeClaim, error) {
 	if spec.Size == "" {
 		spec.Size = Cfg().PVCSize
 	}
@@ -36,26 +52,45 @@ func (f *Framework) CreatePVC(ctx context.Context, spec PVCSpec) (*corev1.Persis
 	if spec.AccessMode == "" {
 		spec.AccessMode = corev1.ReadWriteMany
 	}
-	qty, err := resource.ParseQuantity(spec.Size)
-	if err != nil {
+	if _, err := resource.ParseQuantity(spec.Size); err != nil {
 		return nil, fmt.Errorf("parsing size %q: %w", spec.Size, err)
 	}
-	sc := spec.StorageClass
-	if err := CheckObjectName("claim", f.Name(spec.Name)); err != nil {
+	name := f.Name(spec.Name)
+	if err := CheckObjectName("claim", name); err != nil {
 		return nil, err
 	}
-	pvc := &corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{Name: f.Name(spec.Name), Namespace: Namespace, Labels: f.Labels()},
-		Spec: corev1.PersistentVolumeClaimSpec{
-			AccessModes:      []corev1.PersistentVolumeAccessMode{spec.AccessMode},
-			StorageClassName: &sc,
-			Resources: corev1.VolumeResourceRequirements{
-				Requests: corev1.ResourceList{corev1.ResourceStorage: qty},
-			},
-			DataSource: spec.DataSource,
-		},
+	data := pvcTemplateData{
+		Name:         name,
+		Namespace:    Namespace,
+		Labels:       f.Labels(),
+		AccessMode:   string(spec.AccessMode),
+		StorageClass: spec.StorageClass,
+		Size:         spec.Size,
 	}
-	return f.C.Kube.CoreV1().PersistentVolumeClaims(Namespace).Create(ctx, pvc, metav1.CreateOptions{})
+	if spec.DataSource != nil {
+		data.DataSource = &pvcDataSourceData{
+			Kind: spec.DataSource.Kind,
+			Name: spec.DataSource.Name,
+		}
+		if spec.DataSource.APIGroup != nil {
+			data.DataSource.APIGroup = *spec.DataSource.APIGroup
+		}
+	}
+	var pvc corev1.PersistentVolumeClaim
+	if err := render("pvc.yaml", data, &pvc); err != nil {
+		return nil, err
+	}
+	return &pvc, nil
+}
+
+// CreatePVC creates a claim in the framework namespace. Defaults are RWX at the
+// configured size on the discovered RWX StorageClass.
+func (f *Framework) CreatePVC(ctx context.Context, spec PVCSpec) (*corev1.PersistentVolumeClaim, error) {
+	obj, err := f.PVCBuilder(spec)
+	if err != nil {
+		return nil, err
+	}
+	return f.C.Kube.CoreV1().PersistentVolumeClaims(Namespace).Create(ctx, obj, metav1.CreateOptions{})
 }
 
 // WaitPVCBound waits for a claim to reach Bound.

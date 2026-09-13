@@ -312,3 +312,77 @@ func TestBrokenNFSVolumeManifestRenders(t *testing.T) {
 		t.Errorf("capacity is %s, want 1Gi", q.String())
 	}
 }
+
+// TestPVCManifestRenders covers the PVC template: naming, namespace, labels,
+// storage class, access modes and requested capacity.
+//
+// Steps:
+//  1. Render a PVC with PVCBuilder.
+//  2. Assert name, namespace and labels match the framework conventions.
+//  3. Assert storage class, access mode and requested storage survived decoding.
+func TestPVCManifestRenders(t *testing.T) {
+	f := &Framework{CaseID: "PROV-01"}
+	pvc, err := f.PVCBuilder(PVCSpec{
+		Name:         "claim-1",
+		Size:         "2Gi",
+		StorageClass: "standard-rwx",
+		AccessMode:   corev1.ReadWriteMany,
+	})
+	if err != nil {
+		t.Fatalf("rendering the PVC: %v", err)
+	}
+	if !strings.HasPrefix(pvc.Name, "nfsv-prov-01-") || !strings.HasSuffix(pvc.Name, "-claim-1") {
+		t.Errorf("claim name %q does not carry case prefix", pvc.Name)
+	}
+	if pvc.Namespace != Namespace {
+		t.Errorf("namespace %q, want %q", pvc.Namespace, Namespace)
+	}
+	if pvc.Labels["nfs-verification/case"] != "prov-01" {
+		t.Errorf("unexpected labels: %v", pvc.Labels)
+	}
+	if pvc.Spec.StorageClassName == nil || *pvc.Spec.StorageClassName != "standard-rwx" {
+		t.Errorf("storageClassName is %v, want standard-rwx", pvc.Spec.StorageClassName)
+	}
+	if len(pvc.Spec.AccessModes) != 1 || pvc.Spec.AccessModes[0] != corev1.ReadWriteMany {
+		t.Errorf("accessModes is %v, want [ReadWriteMany]", pvc.Spec.AccessModes)
+	}
+	if req := pvc.Spec.Resources.Requests[corev1.ResourceStorage]; req.String() != "2Gi" {
+		t.Errorf("requested storage is %s, want 2Gi", req.String())
+	}
+}
+
+// TestPVCManifestWithDataSource covers rendering claims that restore from
+// a VolumeSnapshot data source.
+//
+// Steps:
+//  1. Render a PVC with a VolumeSnapshot DataSource.
+//  2. Assert the dataSource apiGroup, kind, and name survived decoding.
+func TestPVCManifestWithDataSource(t *testing.T) {
+	f := &Framework{CaseID: "PROV-05"}
+	group := "snapshot.storage.k8s.io"
+	pvc, err := f.PVCBuilder(PVCSpec{
+		Name:         "restore-claim",
+		Size:         "5Gi",
+		StorageClass: "nfs-csi",
+		DataSource: &corev1.TypedLocalObjectReference{
+			APIGroup: &group,
+			Kind:     "VolumeSnapshot",
+			Name:     "source-snap",
+		},
+	})
+	if err != nil {
+		t.Fatalf("rendering the PVC with DataSource: %v", err)
+	}
+	if pvc.Spec.DataSource == nil {
+		t.Fatal("dataSource is nil")
+	}
+	if pvc.Spec.DataSource.APIGroup == nil || *pvc.Spec.DataSource.APIGroup != group {
+		t.Errorf("apiGroup is %v, want %s", pvc.Spec.DataSource.APIGroup, group)
+	}
+	if pvc.Spec.DataSource.Kind != "VolumeSnapshot" {
+		t.Errorf("kind is %s, want VolumeSnapshot", pvc.Spec.DataSource.Kind)
+	}
+	if pvc.Spec.DataSource.Name != "source-snap" {
+		t.Errorf("name is %s, want source-snap", pvc.Spec.DataSource.Name)
+	}
+}

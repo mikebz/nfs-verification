@@ -1,0 +1,28 @@
+# A PersistentVolumeClaim created by the harness. Defaults are RWX at the
+# configured size on the discovered RWX StorageClass.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Name | q }}
+  namespace: {{ .Namespace | q }}
+  labels:
+    {{- range $key, $value := .Labels }}
+    {{ $key | q }}: {{ $value | q }}
+    {{- end }}
+spec:
+  accessModes:
+    - {{ .AccessMode | q }}
+  {{- if .StorageClass }}
+  storageClassName: {{ .StorageClass | q }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Size | q }}
+  {{- if .DataSource }}
+  dataSource:
+    {{- if .DataSource.APIGroup }}
+    apiGroup: {{ .DataSource.APIGroup | q }}
+    {{- end }}
+    kind: {{ .DataSource.Kind | q }}
+    name: {{ .DataSource.Name | q }}
+  {{- end }}
