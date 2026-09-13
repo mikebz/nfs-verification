@@ -1,6 +1,8 @@
 package framework
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -256,6 +258,73 @@ func waitForState(t *testing.T, path, want string) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	t.Fatalf("the state file says %q after 30s, want %q", last, want)
+}
+
+// TestSumReportsAFailedChecksum covers the shell that produces every checksum
+// in this package, and the parser that turns it into one.
+//
+// This test exists because of the failure it would have caught. The command
+// used to be `sha256sum f | cut -d' ' -f1`, and a POSIX pipeline reports the
+// status of its last command: when sha256sum failed, cut read nothing, printed
+// nothing and exited zero, so `set -e` never fired, the exec was a success, and
+// the helper returned an empty string as a checksum. PROV-07 printed
+// `checksum mismatch: got 27b6c4... want ` on a real run and the missing half
+// was a write whose checksum never happened. There is no symptom to notice
+// until two empty strings compare equal and a case passes having verified
+// nothing. See F-015.
+//
+// Steps:
+//  1. Checksum a real file with the real tool, and assert the parser agrees
+//     with crypto/sha256 on the answer.
+//  2. Run the same generated command under a real shell against a file that is
+//     not there, and assert the shell exits non-zero. This is the regression:
+//     with cut downstream it exited zero.
+//  3. Assert the parser refuses the shapes a healthy system does not produce --
+//     nothing at all, an error message, a truncated digest -- rather than
+//     passing them on as data.
+func TestSumReportsAFailedChecksum(t *testing.T) {
+	sh := lookOrSkip(t, "sh", "sha256sum")
+	dir := t.TempDir()
+	file := filepath.Join(dir, "payload.dat")
+	body := []byte("the quick brown fox\n")
+	if err := os.WriteFile(file, body, 0o600); err != nil {
+		t.Fatalf("writing the file to be checksummed: %v", err)
+	}
+
+	out, err := exec.Command(sh, "-c", "set -e; "+sumCmd(file)).Output()
+	if err != nil {
+		t.Fatalf("checksumming a file that is there: %v", err)
+	}
+	got, err := parseSum(string(out), "workstation", file)
+	if err != nil {
+		t.Fatalf("parsing real sha256sum output %q: %v", out, err)
+	}
+	want := sha256.Sum256(body)
+	if got != hex.EncodeToString(want[:]) {
+		t.Errorf("parsed %s from %q, want %s", got, out, hex.EncodeToString(want[:]))
+	}
+
+	// The regression. A checksum of a file that is not there must fail the
+	// script, not return an empty success.
+	missing := filepath.Join(dir, "not-here.dat")
+	cmd := exec.Command(sh, "-c", "set -e; "+sumCmd(missing))
+	quiet, err := cmd.Output()
+	if err == nil {
+		t.Errorf("checksumming a file that does not exist exited 0 and printed %q, so a caller would "+
+			"read that as a successful checksum", quiet)
+	}
+
+	for _, bad := range []struct{ name, out string }{
+		{"nothing at all", ""},
+		{"only a newline", "\n"},
+		{"an error message", "sha256sum: can't open '/mnt/share/f': No such file or directory"},
+		{"a truncated digest", "27b6c42aeab70116  /mnt/share/f"},
+		{"something that is not hex", strings.Repeat("z", 64) + "  /mnt/share/f"},
+	} {
+		if sum, err := parseSum(bad.out, "pod-a", "/mnt/share/f"); err == nil {
+			t.Errorf("parseSum accepted %s and returned %q as a checksum", bad.name, sum)
+		}
+	}
 }
 
 // lookOrSkip skips the test unless every named tool is on this machine, and
