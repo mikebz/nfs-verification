@@ -201,10 +201,21 @@ NFSv4.1 mount a client that loses its server blocks rather than erroring
 silence in a log that is otherwise one line per second, and that silence is the
 only unambiguous evidence of when service was actually lost.
 
-- `LoadReport.StallAfter` returns the first silence longer than a floor whose
-  resuming write lands at or after the fault, and recovery is measured to that
-  write. `LongestGap` was already reporting this honestly from the same log; the
-  recovery path simply was not using it.
+- `LoadReport.StallAfter` returns the first silence that left the client with no
+  progress for longer than a floor at some point **after** the fault, and
+  recovery is measured to the write that ended it. `LongestGap` was already
+  reporting this honestly from the same log; the recovery path simply was not
+  using it.
+- Only the part of a silence that falls after the fault counts towards the
+  floor. The first version of this fix took any gap over the floor whose
+  resuming write landed at or after the fault, which walks straight back into
+  the same one-second hole in CHAOS-05: the previous cycle's outage is still in
+  the log, and a fault read in the same second as its resuming write would match
+  that gap and report the new cycle recovered before the fault had done
+  anything. Clamping the start of the measured silence to the fault, rather than
+  demanding the whole gap follow it, also keeps a client that blocks at the
+  instant of the fault — last write stamped in the second before it — from being
+  missed.
 - `slo.LoadStallFloor` is the floor, at 10s: well above the one-to-two second
   cadence of a healthy stream, well below the 60s smallest recovery bound any
   profile states, so it separates the two without being near either.
