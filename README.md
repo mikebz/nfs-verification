@@ -9,18 +9,17 @@ End-to-end verification of NFS RWX persistent volumes on Kubernetes.
 This repository holds the harness, preflight, the fault injection package, grace
 observability, `locktool`, the kubelet stats reader, and thirty-five verification
 cases. What is shipped, what is in progress, and the delivery order are tracked
-in [`plan.md`](plan.md).
+in the test plan ([`docs/01-test-plan.md`](docs/01-test-plan.md)).
 
 ## Documentation
 
-Read this file first, then the test plan, then the delivery order. Thirty
-minutes on those two is enough to read any case in the repository; the design
-docs are reference material, not prerequisites.
+Read this file first, then the test plan. Thirty minutes on those two is enough
+to read any case in the repository; the design docs are reference material, not
+prerequisites.
 
 | Document | What it answers |
 |---|---|
-| [`docs/01-test-plan.md`](docs/01-test-plan.md) | What gets verified and why: the architecture under test, every case ID, the SLO table |
-| [`plan.md`](plan.md) | In what order it gets built, what is shipped, and what is left to do. A working document in the root, not part of the record in `docs/` |
+| [`docs/01-test-plan.md`](docs/01-test-plan.md) | What gets verified and why: the architecture under test, every case ID, the SLO table, and delivery order with shipped/remaining progress |
 | [`docs/findings.md`](docs/findings.md) | What running against a real cluster taught, `F-001` upward. **Read it before touching teardown, deletion, or anything that unmounts** |
 | [`AGENTS.md`](AGENTS.md) | How to work here: change size, case conventions, the sources every assertion cites, what to claim when you are done |
 

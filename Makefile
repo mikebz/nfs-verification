@@ -1,5 +1,5 @@
 # Targets for the NFS RWX verification suite. Budgets follow Section 4.2 of
-# docs/01-test-plan.md; see plan.md for the delivery order.
+# docs/01-test-plan.md; delivery order and progress are in Section 5.
 #
 # Every target takes FLAGS for cluster-specific values, for example:
 #
