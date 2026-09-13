@@ -222,17 +222,62 @@ The unit test deliberately asserts that the **old** reading still returns the
 pre-outage write, so the difference between the two questions is pinned in code
 rather than argued in a comment.
 
+**Verified on the cluster**, run `d3-stall-20260912`, `make test-chaos` against
+the same cluster and profile. Every recovery the suite measured is now an honest
+number, and the zeros are gone:
+
+| case | before | after |
+|---|---|---|
+| CHAOS-02 | 1m42s | 1m46s |
+| CHAOS-05 cycle 1 | 1m43s | 1m43s |
+| CHAOS-05 cycle 2 | **0s** | 1m44s |
+| CHAOS-05 cycle 3 | 1m38s | 1m45s |
+| CHAOS-05 cycle 4 | 1m43s | 1m43s |
+| CHAOS-05 cycle 5 | **0s** | 1m43s |
+| CHAOS-06 | **0s** | 1m44s |
+| CHAOS-07 | **0s** | 1m43s |
+
+Eight measurements spanning 1m43s to 1m46s, where before they were bimodal
+between a plausible number and zero. Each now states its own evidence, so the
+claim can be checked against the stream rather than taken on trust:
+
+```
+recovered 1m44s after the fault: the client made no progress for 1m44s,
+from record 7 to record 8 (budget 2m0s, profile default)
+```
+
+The stall duration agrees with the independently computed `longest gap between
+attempts` in every case, which is the cross-check that was contradicting the old
+measurement.
+
+One consequence worth expecting: **CHAOS-05 got slower, from 443s to 547s.** The
+old code was quick because on two cycles it returned without waiting for
+anything. Those cycles now wait out the real outage. A case that speeds up when
+a measurement is broken is a shape to watch for.
+
 ### What it means for the system under test
 
-Nothing yet, and that is the point. This is a harness defect: no statement about
-this deployment's recovery time should be drawn from any run before this change,
-in either direction. The `1m38s`–`1m44s` readings are consistent with a roughly
-90-second grace period plus client retry backoff and are plausibly real, but
-they were produced by a measurement that demonstrably returns the wrong answer
-under a race, so they are not evidence.
+This is a harness defect, so the first thing it means is that **no recovery
+figure from a run before `d3-stall-20260912` is evidence of anything**, in
+either direction. The older `1m38s`–`1m44s` readings look right in hindsight,
+but they came from a measurement that demonstrably returns the wrong answer
+under a race, and a number that is right by luck is not a measurement. The `0s`
+readings were never evidence of a fast failover; they were the absence of one.
 
-The `0s` readings were never evidence of a fast failover. They were the absence
-of a measurement.
+What the verification run does give is the first trustworthy statement about
+this deployment: **a delete of the single-replica server pod costs the client
+1m43s to 1m46s of blocked I/O**, tightly clustered across eight faults, against
+a 2m0s budget on the `default` profile. No committed write was lost in any of
+them, and no I/O error was returned, which is what a `hard` mount is supposed to
+do. So the deployment is inside its budget, with about 15 seconds of headroom.
+
+That headroom is the part worth watching rather than celebrating. The budget on
+this profile is grace + 30s, and the measured recovery sits just under it
+because the outage is dominated by the 90-second grace period this server never
+announces (F-008). A deployment tuned to the `tuned` profile would be asserting
+against a 60s target that these numbers would not meet, so the pass here is a
+statement about the `default` profile and not about the storage system in
+general.
 
 The general rule: **a measurement that can only be wrong in the permissive
 direction will never fail, so nothing about it looks broken.** Every green
