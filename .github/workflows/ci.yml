@@ -34,3 +34,15 @@ jobs:
 
       - name: Build all packages
         run: make build
+
+      # Not covered by the step above. "go build ./..." builds for the runner,
+      # linux/amd64, while the cases ship a static linux/amd64 and linux/arm64
+      # locktool into pods. The binary calls fcntl(2) through syscall, so the
+      # cross-compile is where a portability mistake shows up, and without this
+      # the first thing to notice one is a cluster run on an arm64 node.
+      #
+      # This is the last step of "make all" that CI was not running. AGENTS.md
+      # makes the make targets the interface a reviewer checks a claim with, so
+      # CI has to run the same gate a contributor is told to run.
+      - name: Cross-compile locktool
+        run: make locktool
