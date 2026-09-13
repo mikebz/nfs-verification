@@ -129,7 +129,7 @@ func TestProcessPatternValidatesTheFlag(t *testing.T) {
 	}
 }
 
-// TestFirstInjurableSkipsTerminating covers which pod a fault gets aimed at
+// TestFirstInjurableSkipsUnfitPods covers which pod a fault gets aimed at
 // when the candidates sorted ahead of the healthy one cannot be injured.
 //
 // Discovery sorts by name and deliberately keeps both terminating and Pending
@@ -154,7 +154,7 @@ func TestProcessPatternValidatesTheFlag(t *testing.T) {
 //  6. Assert the healthy pod is chosen whenever one exists, that a not-ready
 //     Running pod still counts as one, and that the two empty-handed answers
 //     are distinguishable from each other.
-func TestFirstInjurableSkipsTerminating(t *testing.T) {
+func TestFirstInjurableSkipsUnfitPods(t *testing.T) {
 	now := metav1.Now()
 	pod := func(name string, phase corev1.PodPhase, terminating bool) corev1.Pod {
 		p := corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name}}
