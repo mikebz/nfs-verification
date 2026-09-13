@@ -354,3 +354,16 @@ func (f *Framework) ReadDirect(ctx context.Context, pod, path string, block, off
 		shellQuote(path), shellQuote(scratch), block, offset, shellQuote(scratch))
 	return f.C.MustSh(ctx, Namespace, f.Name(pod), "main", script)
 }
+
+// AppendRecords appends count records to path in pod, each carrying name and
+// index. The append loop holds one descriptor open across all writes.
+//
+// The script itself is scripts/append-records.sh.
+func (f *Framework) AppendRecords(ctx context.Context, pod, name string, count int, path, id string) error {
+	script, err := RunScript("append-records.sh", id, name, strconv.Itoa(count), path)
+	if err != nil {
+		return err
+	}
+	_, err = f.C.MustSh(ctx, Namespace, f.Name(pod), "main", script)
+	return err
+}
