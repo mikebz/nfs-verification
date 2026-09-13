@@ -26,6 +26,12 @@ spec:
     {{- if .Security.SetGroup }}
     runAsGroup: {{ .Security.Group }}
     {{- end }}
+    {{- if .Security.SetFSGroup }}
+    # Opt-in, and left unset everywhere else. On a volume plugin that manages
+    # ownership this makes kubelet chown the whole volume on mount, which would
+    # erase what the other identity cases assert on.
+    fsGroup: {{ .Security.FSGroup }}
+    {{- end }}
   {{- end }}
   {{- if .Node }}
   # Cross-node cases pin explicitly rather than hoping the scheduler spreads

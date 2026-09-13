@@ -19,6 +19,11 @@ New entries go at the top, and take the next number.
 
 | # | Found | What it says | Cited by |
 |---|---|---|---|
+| [F-022](#f-022-the-servers-grace-announcements-were-in-a-log-file-not-in-the-container-log-stream) | 2026-09-13 | The grace lines F-008 said do not exist do exist, in the NFS daemon's own log file inside the export volume; `kubectl logs` carries only the Go provisioner's output | F-008, doc 07 |
+| [F-021](#f-021-a-root-owned-file-reads-back-as-nobody-for-a-reason-that-is-not-squash) | 2026-09-13 | The server returns named owners as names, and the client's idmapper maps `root` to nobody while an unnamed uid survives numerically, so SEC-02 reads a client-side mapping as the export squashing root | SEC-02's open item, doc 07 |
+| [F-020](#f-020-fsgroup-does-nothing-to-an-nfs-volume-here-in-either-direction) | 2026-09-13 | `fsGroup` reaches the pod's supplementary groups and nothing else: no chown storm, no ownership change, and the write that succeeds does so on the export's 0777 setgid root | SEC-03's record, `slo.FSGroupStartOverhead` |
+| [F-019](#f-019-the-client-an-nfs-server-can-name-is-the-node-and-it-arrives-ipv4-mapped) | 2026-09-13 | The server sees node addresses, never pod addresses, and an IPv4 client on its IPv6 listener appears as `::ffff:a.b.c.d`, so `/proc/net/tcp` alone shows no NFS connections at all | `peers.go`, SEC-06, SEC-08 |
+| [F-018](#f-018-the-export-admits-any-client-that-can-reach-it-so-a-claims-access-control-ends-at-the-mount) | 2026-09-13 | A node with no claim mounted another claim's export and read its bytes; the exports carry no client rules and nothing in the network path restricts who may try | SEC-05's failure, SEC-08's record, doc 07 |
 | [F-017](#f-017-a-sleeping-workstation-understates-every-duration-the-suite-measures-about-itself) | 2026-09-13 | A Mac asleep mid-run freezes Go's monotonic clock but not the pods, so the suite under-reports its own durations while cluster-side measurements stay right | the README's note on long runs |
 | [F-016](#f-016-concurrent-o_append-from-four-clients-loses-a-quarter-of-the-records-and-tears-none) | 2026-09-13 | Four clients appending to one file landed 150 of 200, none torn, on three whole-suite runs: one appender loses its whole contribution while the rest lose none. Two data-only runs lost nothing, so it is intermittent | DATA-02's failure message, `CompactRanges` |
 | [F-015](#f-015-a-checksum-that-failed-came-back-as-an-empty-string-and-a-success) | 2026-09-13 | A checksum pipeline ending in `cut` exits zero when `sha256sum` fails, so a helper returned an empty string as a digest | `io.go`'s `sumCmd` and `parseSum`, `io_parse_test.go` |
@@ -36,6 +41,269 @@ New entries go at the top, and take the next number.
 | [F-003](#f-003-a-broken-umountnfs-wrapper-on-gke-wedges-every-terminating-pod) | 2026-09-10 | A broken `umount.nfs` wrapper wedges every terminating pod | teardown's terminate bound |
 | [F-002](#f-002-2gb-worker-nodes-cannot-host-the-suite) | 2026-09-10 | 2GB worker nodes cannot host the suite | the node shape a run reports |
 | [F-001](#f-001-force-deleting-a-mounted-pod-can-take-a-node-out-of-service) | 2026-09-10 | Force-deleting a mounted pod, then its claim, takes a node out of service | teardown, the force-delete helper, PROV-03, doc 05 |
+
+---
+
+## F-022: The server's grace announcements were in a log file, not in the container log stream
+
+**Found:** 2026-09-13, hand probes against GKE cluster `gke-w1` while designing
+the security cases, `nfs-server-provisioner` v4.0.8 in namespace
+`nfs-provisioner`.
+
+**Severity:** F-008 concluded from an absence, and the absence was in the wrong
+place. Two cases are blocked on a signal that exists.
+
+### What happened
+
+F-008 records that this provisioner never announces grace, on the evidence that
+nothing in `kubectl logs` for the server pod ever says so. Reading the container
+from the inside rather than through the log stream shows otherwise: the NFS
+daemon's own log file, `/export/ganesha.log` on this deployment, carries the
+ordinary `NFS Server Now NOT IN GRACE` lines.
+
+### Why
+
+The pod runs two things, and only one of them logs to stdout. The Go provisioner
+writes klog to stdout, and that is what `kubectl logs` carries. The NFS daemon it
+supervises is configured to log to a file, and on this deployment that file lives
+on the export PVC rather than on `/dev/stdout`.
+
+Nothing about this is specific to one NFS implementation: any server run under a
+supervisor that owns stdout can put its own log somewhere else, and a case that
+concludes from `kubectl logs` alone will read that as silence.
+
+### What changed
+
+Nothing yet, deliberately: reading it needs a case that execs into the server and
+parses a log format nobody has pinned, and that is a phase of its own rather than
+a line in the security work. F-008 stays true as written — *the container's log
+stream* announces nothing — and this entry names where the signal actually was.
+
+Worth stating, because the question comes up on reading this entry: nothing in
+the harness parses that log, and no case or plan requirement is written against a
+particular NFS implementation. The one place a vendor name appears in non-test
+code is the server discovery heuristic
+([`server.go`](../pkg/framework/server.go)), where `ganesha` is one alternative
+in a regex beside `nfs` and `nfsd`, matched against image and pod names. Timing
+discovery matches generic `lease`/`grace` key spellings rather than any one
+config format. The target is a Kubernetes-native NFS server, whichever one it is.
+
+### What it means for the system under test
+
+OBS-03 and CHAOS-07 are blocked by a logging configuration, not by a server that
+keeps its grace period secret. An operator who wants grace visible can point the
+daemon's log at stdout; nothing about the server itself has to change.
+
+---
+
+## F-021: A root-owned file reads back as nobody for a reason that is not squash
+
+**Found:** 2026-09-13, hand probes against GKE cluster `gke-w1`, confirmed by
+`make test-sec` run `20260913-171950`.
+
+**Severity:** SEC-02 passes, and the sentence it prints about this deployment is
+wrong in a way that would send somebody to the export configuration.
+
+### What happened
+
+A file written as root through the mount is uid 0 on the server's own
+filesystem, read directly inside the server pod. The same file read from any
+client reports 65534:65534. A file written as uid 1234 reports 1234 on both
+sides.
+
+### What root squash is, and why an export would want it
+
+Root squash is a server-side rule: a request arriving as uid 0 is rewritten to an
+unprivileged identity, conventionally `nobody` (65534), before the server acts on
+it. It exists because NFS trusts the client to state who the user is. `AUTH_SYS`,
+the `sec=sys` this deployment uses, puts the uid in the request and the server
+believes it. So anyone with root on any machine that can reach the export can
+claim to be root on the server's files, and squashing is the server declining to
+extend its own root to a client's root. It is the default on almost every NFS
+server for that reason, and it is turned off — `no_root_squash` — when a
+workload genuinely needs to own files as root, which on a shared RWX volume means
+accepting that every node that can mount it can do the same.
+
+### Why this is not that
+
+NFSv4 carries owners as strings, not as integers. This server answers with a name
+where one exists in its passwd database and with a numeric string where none
+does. So `root` goes out as `root@domain`, the client's idmapper has no mapping
+for that domain and substitutes nobody; `1234` goes out as `1234`, which the
+client parses as a number and keeps.
+
+The visible result — root's writes appearing as nobody — is exactly what root
+squash looks like from a client, and it is not root squash: the rewriting is the
+*client's* idmapper failing to resolve a name, after the server has already
+stored the file as uid 0. The export block says `Squash = no_root_squash`, and
+the server's own filesystem agrees with it.
+
+### What changed
+
+Nothing in this phase. It is recorded as an open item in doc 07, because the
+correct fix changes what SEC-02 asserts rather than how it reads something, and
+that belongs in a change of its own: the case has to separate the server's view
+of an owner from the client's before it can name either one.
+
+### What it means for the system under test
+
+The deployment does not squash root, and a suite that says it does is reporting
+a client-side identity mapping as a server-side policy. **Any claim about squash
+needs both ends: what the server stored, and what a client makes of it.**
+
+---
+
+## F-020: fsGroup does nothing to an NFS volume here, in either direction
+
+**Found:** 2026-09-13, `make test-sec` run `20260913-171950`, SEC-03, GKE cluster
+`gke-w1`, Kubernetes v1.37.0-gke.2941000, StorageClass `nfs`.
+
+**Severity:** none to the cluster. It decides what SEC-03 may assert, and it is
+the answer to a question every restricted-Pod-Security workload asks.
+
+### What happened
+
+Over a directory of 2000 files, a pod declaring `runAsUser: 1234, fsGroup: 5678`
+started in the same 1s as an identical pod without `fsGroup`, and the ownership
+of all 2000 entries was byte-for-byte unchanged. Inside the pod, `id` reports
+`uid=1234 gid=1234 groups=1234,5678`. The file it wrote landed `1234:65534`.
+
+### Why
+
+`fsGroup`'s volume half is conditional on the volume plugin supporting ownership
+management, and this one does not: kubelet applies the supplementary group and
+leaves the volume alone. The write succeeded anyway because the export's root is
+`drwxrwsrwx 65534 65534` — 0777 with the setgid bit — so any uid may write, and
+a new file takes its group from the directory rather than from the pod.
+
+### What changed
+
+SEC-03 asserts both halves and records which one it got, rather than assuming
+the storm it was written to catch. `slo.FSGroupStartOverhead` and
+`slo.FSGroupPopulatedEntries` are the bound and the population it measures
+against.
+
+### What it means for the system under test
+
+**A workload that relies on `fsGroup` for access to an RWX NFS claim here is
+relying on the export being world-writable, not on the gid it declared.** That
+is a different guarantee, it is invisible in the pod spec, and it changes if
+anybody tightens the export's mode. The good news is the other half: no
+recursive chown runs on mount, so a large shared volume does not pay for a pod
+that declares a group, and one workload's `fsGroup` cannot rewrite another's
+ownership.
+
+---
+
+## F-019: The client an NFS server can name is the node, and it arrives IPv4-mapped
+
+**Found:** 2026-09-13, hand probes against GKE cluster `gke-w1` while designing
+the security cases, single-stack IPv4, and confirmed by the first `make test-sec`
+run.
+
+**Severity:** it decides what a per-client export rule can say, and it is a trap
+for anything that reads the server's socket table.
+
+### What happened
+
+With two pods on two nodes mounting one claim, the server's socket table shows
+the two **node** addresses, 10.138.15.232 and 10.138.0.17, and neither pod
+address (10.28.3.91, 10.28.0.206). The connections appear in `/proc/net/tcp6` as
+`::ffff:10.138.15.232`, with a reserved source port. `/proc/net/tcp` on its own
+shows no NFS connections at all.
+
+### Why
+
+The mount is made by the node's kernel in the host network namespace, not by the
+pod, so the pod's address is never on the wire; the reserved source port is the
+kernel's. The server binds `:::2049`, and a socket bound to the IPv6 wildcard
+accepts IPv4 clients and reports them in the IPv4-mapped form, in the tcp6 table.
+
+### What changed
+
+`ServerConns` reads both `/proc/net/tcp` and `/proc/net/tcp6` and fails if it
+cannot read the pair; `PeersOn` compares unmapped addresses. A reader of only the
+first file would have reported a busy server as one nobody is talking to, and the
+cases that read the table would have failed a healthy deployment.
+
+SEC-04 was one of those cases when this was written and is no longer: review
+replaced it with a behavioral case that reads nothing from the server, on the
+grounds that the address is a precondition and not an observable consequence.
+SEC-06 and SEC-08 still read the table, and this entry is why they read both
+files.
+
+### What it means for the system under test
+
+**The finest client an export rule can name is a node, and it covers every
+workload scheduled there.** Two clients are distinguishable, which is better than
+the proxy degradation the security phase was written to look for — kube-proxy
+does not rewrite the source address here — but no rule can separate two pods, and
+on this deployment there are no rules at all (F-018).
+
+---
+
+## F-018: The export admits any client that can reach it, so a claim's access control ends at the mount
+
+**Found:** 2026-09-13, `make test-sec` run `20260913-171950`, SEC-05, GKE cluster
+`gke-w1`, Kubernetes v1.37.0-gke.2941000, three workers on Container-Optimized
+OS, kernel 6.12.94+, StorageClass `nfs` backed by `nfs-server-provisioner`
+v4.0.8, profile `default` (lease 60s, grace 90s).
+
+**Severity:** every other security case in the suite describes what a client the
+export admits may do. This one says the export admits everything.
+
+### What happened
+
+A pod on node A owns a claim and wrote a file with checksum `ff11c8352bc5…`. The
+node agent's container on node B — a node this export was never provisioned for,
+with no claim on it and no pod mounting it — ran
+
+```
+mount -t nfs4 -o vers=4.1,soft,timeo=50,retrans=1 34.118.226.20:/export/pvc-709039f8… /tmp/…
+```
+
+which was granted, and read the owner's file back with the same checksum. A
+control mount from the same container of an export node B *is* a client of was
+granted too, so the instrument was proven before the result was reported.
+
+SEC-08 records the rest of the picture from the same run: no NetworkPolicy in
+the server's namespace, and a pod with no claim at all opening a TCP connection
+to `34.118.226.20:2049`. The server also listens on 111, 662, 875, 20048 and
+32803, the NFSv3 ancillary services, alongside 2049.
+
+### Why
+
+The provisioner writes one export block per claim, and it carries no per-client
+rule at all:
+
+```
+Access_Type = RW; Squash = no_root_squash; SecType = sys;
+```
+
+There is nothing to match a client against, so the global access type applies to
+whoever connects. AUTH_SYS then takes the uid on the wire on trust, and
+`no_root_squash` means a client asserting uid 0 is root on the export.
+
+### What changed
+
+SEC-05 exists and is red. The probe it uses runs in the node agent's own
+container rather than the host mount namespace (F-003, F-005), is `soft` where
+every other mount in the suite is `hard`, and always unmounts; the control probe
+is what separates a server's refusal from a container that cannot mount.
+
+### What it means for the system under test
+
+**The access control around a PersistentVolumeClaim is a Kubernetes-side
+convention that ends at the mount.** Anything in the cluster that can route to
+the server — any pod, on any node, in any namespace, with no claim and no RBAC
+on one — can mount any claim's export and read and write it as root. The
+Kubernetes objects say who may *ask kubelet* to mount; they are not what the
+server enforces, because the server was given nothing to enforce.
+
+Three things would each narrow it, and none of them is a harness change: a
+`CLIENT` block per export naming the nodes the volume is scheduled on, a
+NetworkPolicy in front of 2049, and `root_squash`. On a stock installation of
+this chart, none is present.
 
 ---
 
