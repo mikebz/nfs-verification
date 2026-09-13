@@ -155,8 +155,21 @@ func assertRecovered(ctx context.Context, t *testing.T, s chaosSetup, faultAt ti
 // silence to find. That is the storage system doing better than the SLO asks,
 // so the case passes and says so, rather than waiting out the budget and
 // failing a deployment for recovering too fast to observe. It is only credible
-// once the workload has written its way past the whole budget without a stall,
-// which is what separates it from a client that is still blocked.
+// once the workload has committed writes past the whole budget without a
+// stall, which is what separates it from a client that is still blocked -- and
+// from one that has an errored mount and is failing once a second, which keeps
+// the record stream moving without ever regaining service.
+//
+// A workload started with framework.WriteLoadSpec.NoFsync is the case this
+// cannot cover, and DATA-13 is the only one that starts one. Without the fsync
+// a logged success means the client accepted the write, not that the server
+// took it, so that log holds no evidence of service at all and no reading of
+// it -- attempts or commits -- can show an export coming back. What DATA-13
+// needs is confirmation from outside the writer's pod. Until it has one this
+// shortcut can fire while the export is still down, and the cost is bounded
+// rather than silent: the sweep that follows reads the share from a second
+// pod, so an export that is still gone blocks that sweep and fails the case
+// there, instead of turning into a durability verdict nobody can trust.
 func waitRecovered(ctx context.Context, t *testing.T, s chaosSetup, faultAt time.Time) time.Duration {
 	t.Helper()
 	// Waited out well past the budget on purpose: a case that gives up at the
@@ -175,7 +188,13 @@ func waitRecovered(ctx context.Context, t *testing.T, s chaosSetup, faultAt time
 			stall, measured = st, true
 			return true, nil
 		}
-		last, ok := rep.LastRecord()
+		// Committed writes, not attempts. A client that has lost its export
+		// and is failing once a second keeps the record stream moving, and
+		// reading that as "the workload wrote past the budget" would report a
+		// total outage as a clean run with recovery 0. Errors are still
+		// asserted separately, but by then this function has already returned
+		// a number, and a wrong measurement is worse than a missing one.
+		last, ok := rep.LastCommitted()
 		if ok && last.At.Sub(faultAt) > s.budget {
 			uninterrupted = last
 			return true, nil
@@ -234,6 +253,21 @@ func describeQuiet(ctx context.Context, t *testing.T, s chaosSetup) string {
 	if quiet := now.Sub(last.At); quiet > slo.LoadStallFloor {
 		return fmt.Sprintf("%s is still blocked: its last attempt was record %d, %s ago, so the outage "+
 			"never ended", s.writer, last.Index, quiet.Round(time.Second))
+	}
+	// Attempts without progress. On a hard mount the expected shape of an
+	// outage is silence, so a stream that is moving while nothing commits is
+	// the other kind of broken: the client has enough of a mount to fail fast.
+	// It has to be said separately, because it reaches here looking exactly
+	// like a healthy stream to anything that counts records.
+	if lastOK, ok := rep.LastCommitted(); !ok {
+		return fmt.Sprintf("%s is logging attempts, up to record %d, and not one of them has ever "+
+			"succeeded: the writer has a mount it can fail on rather than a server it can reach",
+			s.writer, last.Index)
+	} else if stale := now.Sub(lastOK.At); stale > slo.LoadStallFloor {
+		return fmt.Sprintf("%s is logging attempts, up to record %d, but nothing has committed for %s: "+
+			"its last successful write was record %d. The client is failing fast rather than blocking, so "+
+			"this is an errored mount and not a hard-mount retry loop", s.writer, last.Index,
+			stale.Round(time.Second), lastOK.Index)
 	}
 	return fmt.Sprintf("%s is writing again, up to record %d, but its records never reached %s past the "+
 		"fault, which a stream that keeps moving should have done long ago: suspect the record stamps "+

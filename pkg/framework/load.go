@@ -312,6 +312,29 @@ func (r LoadReport) LastRecord() (LoadRecord, bool) {
 	return last, true
 }
 
+// LastCommitted returns the most recent write the server acknowledged.
+//
+// This is the one to ask when the question is whether the client still has
+// service, because LastRecord counts attempts and a failed attempt is not
+// service. A client that has lost its export and is erroring once a second
+// keeps LastRecord moving indefinitely, so a caller reading "the stream got
+// past the budget" off LastRecord would call a total outage a clean run. Both
+// exist because the opposite question -- is the workload logging anything at
+// all -- is what tells a blocked client from a dead one.
+func (r LoadReport) LastCommitted() (LoadRecord, bool) {
+	last := LoadRecord{}
+	found := false
+	for _, rec := range r.Records {
+		if !rec.OK {
+			continue
+		}
+		if !found || rec.At.After(last.At) {
+			last, found = rec, true
+		}
+	}
+	return last, found
+}
+
 // LongestGap returns the largest interval between consecutive attempts, which
 // is what a blocked client looks like from outside: no errors, no progress.
 func (r LoadReport) LongestGap() time.Duration {
