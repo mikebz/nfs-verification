@@ -68,18 +68,36 @@ func (f *Framework) dumpPods(ctx context.Context, dir, ns, selector, kind string
 	if err := os.MkdirAll(sub, 0o755); err != nil {
 		return err
 	}
+	var errs []string
 	for i := range pods.Items {
 		p := &pods.Items[i]
 		if b, err := json.MarshalIndent(p, "", "  "); err == nil {
-			_ = os.WriteFile(filepath.Join(sub, p.Name+".json"), b, 0o644)
+			if err := os.WriteFile(filepath.Join(sub, p.Name+".json"), b, 0o644); err != nil {
+				errs = append(errs, fmt.Sprintf("pod %s json: %v", p.Name, err))
+			}
 		}
 		for _, c := range p.Spec.Containers {
-			_ = f.writeLogs(ctx, sub, ns, p.Name, c.Name, false)
+			if err := f.writeLogs(ctx, sub, ns, p.Name, c.Name, false); err != nil {
+				errs = append(errs, fmt.Sprintf("pod %s container %s log: %v", p.Name, c.Name, err))
+			}
 			// Previous-container logs are where a crash actually shows up.
-			_ = f.writeLogs(ctx, sub, ns, p.Name, c.Name, true)
+			if err := f.writeLogs(ctx, sub, ns, p.Name, c.Name, true); err != nil && !isNoPreviousLogErr(err) {
+				errs = append(errs, fmt.Sprintf("pod %s container %s previous log: %v", p.Name, c.Name, err))
+			}
 		}
 	}
+	if len(errs) > 0 {
+		return fmt.Errorf("dumping pods in %s: %s", ns, strings.Join(errs, "; "))
+	}
 	return nil
+}
+
+func isNoPreviousLogErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "previous terminated container") || strings.Contains(msg, "not found")
 }
 
 func (f *Framework) writeLogs(ctx context.Context, dir, ns, pod, container string, previous bool) error {
