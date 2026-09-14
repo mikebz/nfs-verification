@@ -95,31 +95,88 @@ func ServerConns(ctx context.Context, c *Client, pod *corev1.Pod) ([]Conn, error
 	if len(pod.Spec.Containers) > 0 {
 		container = pod.Spec.Containers[0].Name
 	}
-	// Missing files are tolerated, an unreadable pair is not: a kernel without
+	// Missing files are tolerated, an unreadable one is not: a kernel without
 	// IPv6 has no tcp6 file, and that is not the same as a container the suite
-	// cannot look inside.
-	r := c.Sh(ctx, pod.Namespace, pod.Name, container,
-		"cat /proc/net/tcp 2>/dev/null; echo '--'; cat /proc/net/tcp6 2>/dev/null")
+	// cannot look inside. The script reports the two families separately
+	// because one exit status cannot say which of them it belongs to.
+	script, err := RunScript("socket-table.sh", "peers-"+strings.ToLower(Cfg().RunID))
+	if err != nil {
+		return nil, err
+	}
+	r := c.Sh(ctx, pod.Namespace, pod.Name, container, script)
 	if r.Err != nil {
 		return nil, Blockedf("reading the socket table of server pod %s/%s: %v: %s. "+
 			"This needs exec into the server's namespace; a kubeconfig without it, or an image with no "+
 			"cat, cannot answer who the server thinks its clients are",
 			pod.Namespace, pod.Name, r.Err, strings.TrimSpace(r.Combined()))
 	}
-	v4, v6, found := strings.Cut(r.Stdout, "--")
-	if !found {
-		return nil, fmt.Errorf("socket table of %s/%s came back without its separator, so it cannot be "+
-			"split by family: %q", pod.Namespace, pod.Name, truncate(r.Stdout, 200))
+	return parseSocketTables(r.Stdout, pod.Namespace, pod.Name)
+}
+
+// parseSocketTables reads what scripts/socket-table.sh prints: a status line per
+// address family, and the family's table when it could be read.
+//
+// A family whose file does not exist contributes nothing and is not an error. A
+// family that exists and could not be read is an error, because the connections
+// it would have held are the ones a caller is about to conclude are absent.
+func parseSocketTables(out, namespace, pod string) ([]Conn, error) {
+	var conns []Conn
+	var family, body string
+	var seen int
+
+	flush := func() error {
+		if family == "" {
+			return nil
+		}
+		status, table, _ := strings.Cut(body, "\n")
+		status = strings.TrimSpace(status)
+		switch {
+		case status == "absent":
+			return nil
+		case strings.HasPrefix(status, "error"):
+			return fmt.Errorf("the socket table %s of %s/%s exists and could not be read: %s. "+
+				"The connections it holds would otherwise be reported as absent",
+				family, namespace, pod, strings.TrimSpace(strings.TrimPrefix(status, "error")))
+		case status != "ok":
+			return fmt.Errorf("the socket table reader gave no status for %s of %s/%s, so it cannot be "+
+				"told apart from a read that never happened: %q", family, namespace, pod, truncate(out, 200))
+		}
+		parsed, err := ParseProcNetTCP(table)
+		if err != nil {
+			return err
+		}
+		conns = append(conns, parsed...)
+		seen++
+		return nil
 	}
-	conns, err := ParseProcNetTCP(v4)
-	if err != nil {
+
+	for _, line := range strings.Split(out, "\n") {
+		if rest, ok := strings.CutPrefix(strings.TrimSpace(line), "==FAMILY "); ok {
+			if err := flush(); err != nil {
+				return nil, err
+			}
+			family, body = strings.TrimSpace(rest), ""
+			continue
+		}
+		if rest, ok := strings.CutPrefix(strings.TrimSpace(line), "==STATUS "); ok {
+			body = strings.TrimSpace(rest) + "\n"
+			continue
+		}
+		if family != "" {
+			body += line + "\n"
+		}
+	}
+	if err := flush(); err != nil {
 		return nil, err
 	}
-	six, err := ParseProcNetTCP(v6)
-	if err != nil {
-		return nil, err
+	if seen == 0 {
+		// Not a pedantic check. F-011 is an exec that reported success with an
+		// empty stdout, and every caller here reads an empty result as "the
+		// server has no clients", which is a claim about the deployment.
+		return nil, fmt.Errorf("no socket table of %s/%s could be read, so a caller would take the "+
+			"server to have no connections at all: %q", namespace, pod, truncate(out, 200))
 	}
-	return append(conns, six...), nil
+	return conns, nil
 }
 
 // ParseProcNetTCP parses the contents of /proc/net/tcp or /proc/net/tcp6.

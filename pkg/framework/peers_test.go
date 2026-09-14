@@ -285,15 +285,23 @@ func TestOwnerCensusRejectsSilence(t *testing.T) {
 // TestOwnerCensusComparesOwnershipNotSize checks the comparison SEC-03 makes:
 // files added between two readings are not a chown, and a changed owner is.
 //
+// It also pins the boundary between those and a third thing that looks like
+// both: a census whose per-owner lines do not add up to its total. That is not
+// an added file, it is a walk that could not read part of the tree, and the
+// part it could not read is where a chown storm would be.
+//
 // Steps:
 //  1. Compare two censuses differing only in how many entries there are.
 //  2. Compare two differing in who owns them.
+//  3. Reject a census whose lines and total disagree.
 func TestOwnerCensusComparesOwnershipNotSize(t *testing.T) {
 	before, err := ParseOwnerCensus("   3 0:0\nTOTAL 3\n")
 	if err != nil {
 		t.Fatalf("parsing: %v", err)
 	}
-	same, err := ParseOwnerCensus("   3 0:0\nTOTAL 4\n")
+	// A file added between the readings shows up in both the owner line and
+	// the total, because the walk and the count see the same tree.
+	same, err := ParseOwnerCensus("   4 0:0\nTOTAL 4\n")
 	if err != nil {
 		t.Fatalf("parsing: %v", err)
 	}
@@ -306,6 +314,10 @@ func TestOwnerCensusComparesOwnershipNotSize(t *testing.T) {
 	}
 	if before.SameOwnership(chowned) {
 		t.Errorf("a census whose gid changed was read as unchanged")
+	}
+	if census, err := ParseOwnerCensus("   3 0:0\nTOTAL 4\n"); err == nil {
+		t.Errorf("a census that read 3 of 4 entries was accepted as %s; the entry it missed would be "+
+			"reported as unchanged", census)
 	}
 }
 
@@ -347,10 +359,15 @@ func TestMountProbeParsing(t *testing.T) {
 	}
 }
 
-// TestProbeMountOptionsAreSoft is a one-line test guarding a rule that is
-// invisible in review: every other mount in this suite is hard, and preflight
-// rejects soft ones. The probe is the exception, and a probe that lost it would
-// hang a node agent against an export that is about to be deleted.
+// TestProbeMountOptionsAreSoft guards a rule that is invisible in review: every
+// other mount in this suite is hard, and preflight rejects soft ones. The probe
+// is the deliberate exception, and a probe that lost it would hang a node agent
+// against an export the case is about to delete, which is F-001's shape in the
+// one container the suite mounts NFS in by hand.
+//
+// Steps:
+//  1. Assert the options carry soft, the pinned version, and a single retry.
+//  2. Assert they do not carry hard, whatever else changes around them.
 func TestProbeMountOptionsAreSoft(t *testing.T) {
 	for _, want := range []string{"soft", "vers=4.1", "retrans=1"} {
 		if !strings.Contains(probeMountOptions, want) {
@@ -397,5 +414,61 @@ func TestProbeMountScriptUnderARealShell(t *testing.T) {
 	}
 	if probe.Sum != "" {
 		t.Errorf("a probe that never mounted produced a checksum: %q", probe.Sum)
+	}
+}
+
+// TestCheckProbePathRejectsEscapes guards the one argument of the probe mount
+// that is not an identifier. It is joined under the mountpoint and read by a
+// privileged container, so quoting is not the defence: a quoted "../../etc" is
+// still "../../etc". Getting this wrong turns SEC-05's evidence step into an
+// arbitrary read of the node agent's filesystem.
+//
+// Steps:
+//  1. Accept the ordinary relative names a case passes, and the "-" that means
+//     mount without reading.
+//  2. Reject absolute paths and every spelling of a climb out of the mount.
+func TestCheckProbePathRejectsEscapes(t *testing.T) {
+	for _, ok := range []string{"-", "owner.dat", "sub/dir/owner.dat", "..dotted", "a..b"} {
+		if err := checkProbePath(ok); err != nil {
+			t.Errorf("checkProbePath(%q) rejected a path a case legitimately passes: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"", "/etc/passwd", "/", "../etc/passwd", "a/../../etc/passwd", ".."} {
+		if err := checkProbePath(bad); err == nil {
+			t.Errorf("checkProbePath(%q) allowed a read outside the export", bad)
+		}
+	}
+}
+
+// TestParseSocketTablesPerFamily covers the distinction one exit status cannot
+// make: a kernel with no IPv6 has no tcp6 file and that is ordinary, while a
+// file that exists and cannot be read means the connections a caller is about
+// to call absent were never looked at.
+//
+// Steps:
+//  1. A missing tcp6 alongside a readable tcp parses, and yields tcp's rows.
+//  2. A tcp that could not be read is an error even though tcp6 succeeded.
+//  3. Output with no readable family at all is an error, not an empty list.
+func TestParseSocketTablesPerFamily(t *testing.T) {
+	const header = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n"
+	const row = "   0: 0100007F:0801 0200007F:CF08 01 00000000:00000000 00:00000000 00000000     0        0 1\n"
+
+	conns, err := parseSocketTables("==FAMILY /proc/net/tcp\n==STATUS ok\n"+header+row+
+		"==FAMILY /proc/net/tcp6\n==STATUS absent\n", "ns", "pod")
+	if err != nil {
+		t.Fatalf("a kernel without IPv6 was treated as unreadable: %v", err)
+	}
+	if len(conns) != 1 {
+		t.Errorf("got %d connections from a readable tcp table, want 1: %+v", len(conns), conns)
+	}
+
+	if _, err := parseSocketTables("==FAMILY /proc/net/tcp\n==STATUS error cat: permission denied\n"+
+		"==FAMILY /proc/net/tcp6\n==STATUS ok\n"+header+row, "ns", "pod"); err == nil {
+		t.Error("a tcp table that could not be read was masked by tcp6 succeeding")
+	}
+
+	if _, err := parseSocketTables("==FAMILY /proc/net/tcp\n==STATUS absent\n"+
+		"==FAMILY /proc/net/tcp6\n==STATUS absent\n", "ns", "pod"); err == nil {
+		t.Error("a pod where neither family could be read reported no connections instead of an error")
 	}
 }

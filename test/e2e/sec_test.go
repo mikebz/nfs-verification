@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/netip"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -362,7 +363,13 @@ const testFSGroup = 5678
 //     the same interval.
 //  5. Count the ownership again: anything rewritten is the storm.
 //  6. Assert the startup difference is within the bound in pkg/slo.
-//  7. Write from the fsGroup pod, and record which mechanism allowed it.
+//  7. Make a second directory owned by the fsGroup gid with mode 0770, so that
+//     reaching it requires the group rather than world permission.
+//  8. The control pod must be refused there. Without that, the gate is not a
+//     gate and step 9 would pass on ordinary permissions.
+//  9. The fsGroup pod must carry the gid, and must be able to write there.
+//  10. Record which gid the new file landed with, which is the deployment's
+//     choice rather than a promise.
 func TestSecFSGroupOnAnNFSVolume(t *testing.T) {
 	f := framework.New(t, "SEC-03")
 	ctx, cancel := caseCtx(t, 25*time.Minute)
@@ -452,16 +459,69 @@ func TestSecFSGroupOnAnNFSVolume(t *testing.T) {
 	// The promise itself: a pod that declared a gid must be able to use the
 	// volume. Everything above is about what it cost; this is about whether it
 	// worked.
+	//
+	// It cannot be asked in the populated directory above, which is 0777 so
+	// that the storm has something to walk. A write there succeeds on world
+	// permission and says nothing about the group: a pod that never received
+	// fsGroup at all would pass it. So the question is asked behind a directory
+	// that only the group can enter.
+	gated := fileIn("sec03-gated")
+	// 0770 and not 2770, deliberately. The share's root is setgid (F-020), and
+	// a directory created under it inherits that bit, which would give every
+	// file written here the directory's gid whatever fsGroup did. The recording
+	// at the end of this case reads the new file's gid to say whether the
+	// plugin manages ownership, and a setgid directory would answer that
+	// question for it. Clearing the bit keeps the access test and the ownership
+	// record independent.
+	if r := f.Sh(ctx, "populator", fmt.Sprintf("mkdir -p %s && chgrp %d %s && chmod 0770 %s",
+		framework.Quote(gated), testFSGroup, framework.Quote(gated), framework.Quote(gated))); r.Err != nil {
+		blocked(t, "cannot create a directory on the share that only gid %d may write (%s), so there is "+
+			"nothing that would tell a pod holding that group from one that does not, and the write "+
+			"below would prove nothing", testFSGroup, r.Combined())
+	}
+	gatedOwner, err := f.StatOwner(ctx, "populator", gated)
+	if err != nil {
+		blocked(t, "reading back the ownership of the directory the group test depends on: %v", err)
+	}
+	if gatedOwner.GID != testFSGroup {
+		blocked(t, "the directory meant to admit only gid %d is owned %s, so this export did not accept "+
+			"the group that makes it a gate; without it the write below would succeed on ordinary "+
+			"permissions and say nothing about fsGroup", testFSGroup, gatedOwner)
+	}
+
+	// The control, and it is the half that makes the assertion mean anything.
+	// The same uid and gid, the same node, the same claim, differing only in
+	// not declaring fsGroup. If this one can write too, the gate is not a gate.
+	controlGroups := strings.TrimSpace(f.Sh(ctx, "control", "id").Combined())
+	if r := f.Sh(ctx, "control", "echo sec03 > "+framework.Quote(gated+"/control.dat")); r.Err == nil {
+		blocked(t, "a pod running as uid %d without fsGroup wrote into a 0770 directory owned by gid %d, "+
+			"so the directory is not restricting anything on this export and the fsGroup pod's write "+
+			"below would succeed whether or not it holds the group. Pod identity %q",
+			testUID, testFSGroup, controlGroups)
+	}
+
 	groups := strings.TrimSpace(f.Sh(ctx, "member", "id").Combined())
-	path := dir + "/fsgroup.dat"
-	if r := f.Sh(ctx, "member", "echo sec03 > "+framework.Quote(path)); r.Err != nil {
-		t.Errorf("a pod running as uid %d with fsGroup %d cannot write to the share (%s). Its identity "+
-			"inside the pod is %q. fsGroup is what a restricted Pod Security profile leaves a workload "+
-			"to get group access with, and on this deployment it does not grant it: what decides is the "+
-			"mode and owner of the export, which no pod spec can change",
-			testUID, testFSGroup, r.Combined(), groups)
+	if !strings.Contains(groups, strconv.Itoa(testFSGroup)) {
+		t.Errorf("a pod declaring fsGroup %d does not carry that gid inside the container: id says %q. "+
+			"Kubernetes did not grant the supplementary group at all, so nothing below is about NFS",
+			testFSGroup, groups)
 		return
 	}
+
+	path := gated + "/fsgroup.dat"
+	if r := f.Sh(ctx, "member", "echo sec03 > "+framework.Quote(path)); r.Err != nil {
+		t.Errorf("a pod running as uid %d with fsGroup %d cannot write into a directory owned by gid %d "+
+			"with mode 0770, which a pod without fsGroup was refused (%s). Its identity inside the pod "+
+			"is %q. fsGroup is what a restricted Pod Security profile leaves a workload to get group "+
+			"access with, and on this deployment the supplementary group does not reach the server: "+
+			"AUTH_SYS carries the gid list on every request, so what drops it is the export or the "+
+			"server, not the pod spec", testUID, testFSGroup, testFSGroup, r.Combined(), groups)
+		return
+	}
+	t.Logf("a pod with fsGroup %d wrote into a directory only that group may write, which the identical "+
+		"pod without fsGroup was refused, so the supplementary group reaches the server and grants "+
+		"access", testFSGroup)
+
 	owner, err := f.StatOwner(ctx, "member", path)
 	if err != nil {
 		t.Fatalf("reading the ownership of what the fsGroup pod wrote: %v", err)
@@ -476,9 +536,8 @@ func TestSecFSGroupOnAnNFSVolume(t *testing.T) {
 	default:
 		t.Logf("the file the fsGroup pod wrote is owned %s rather than by gid %d, and the volume was "+
 			"not rewritten, so fsGroup is a supplementary group inside the pod and nothing more here "+
-			"(pod identity %q). The write succeeded on the directory's own permissions. An operator "+
-			"relying on fsGroup for group access on this deployment is relying on the export's mode",
-			owner, testFSGroup, groups)
+			"(pod identity %q). An operator relying on fsGroup for group access on this deployment is "+
+			"relying on the server honouring the gid list, which it does", owner, testFSGroup, groups)
 	}
 }
 
@@ -655,9 +714,18 @@ const nfsPort = 2049
 // view nothing happened (RFC 8881 Section 8.4.2 on what a server may discard,
 // and Section 9 for what a lock is worth).
 //
-// Everything here is observed from clients. The locks are taken and questioned
-// through pods, and the question "does the server still hold node A's lock" is a
-// LOCKT sent from node A's own pod. Nothing reads the server.
+// Everything here is observed from clients; nothing reads the server. But the
+// observing client cannot be either of the two the fault is about, and that is
+// the whole difficulty. The Linux NFS client answers `F_GETLK` from its own
+// lock table whenever a local lock conflicts, without asking the server
+// ([`fcntl(2)`](https://man7.org/linux/man-pages/man2/fcntl.2.html)), so a
+// question about node A's lock asked on node A comes back HELD whether or not
+// the server still has it — which is precisely the failure being hunted. Node B
+// cannot ask either, because node B is the client that had to leave. So the
+// question is put to a third node, which holds no lock on the file and must
+// therefore go to the server for its answer. A cluster with two workers cannot
+// answer this case correctly and skips rather than asserting something its own
+// kernel decided.
 //
 // The removal is deliberately a graceful one, not a force delete. Waiting for
 // node B's mount to go means node B stops being a client of this server at all,
@@ -666,32 +734,49 @@ const nfsPort = 2049
 // workload leaves a node.
 //
 // Steps:
-//  1. One claim, one pod on each of two nodes.
-//  2. Require byte-range locks to reach the server on both mounts.
-//  3. Each pod takes a write lock on a disjoint range of one file.
-//  4. Confirm the server holds both at once, each asked from the other node.
-//  5. Delete node B's pod gracefully and wait until node B has no mount left.
-//  6. Node B's range must be free, which is what proves state was discarded at
-//     all, so that step 7 cannot pass by nothing having happened.
-//  7. Node A's range must still be held, and node A must still be able to read
-//     and write through its mount.
+//  1. One claim, one pod on each of three nodes: a holder, a leaver, and an
+//     observer that takes no lock.
+//  2. Require byte-range locks to reach the server on all three mounts.
+//  3. The holder and the leaver each take a write lock on a disjoint range.
+//  4. Confirm from the observer that the server holds both at once.
+//  5. Delete the leaver's pod gracefully and wait until node B has no mount.
+//  6. From the observer, the leaver's range must be free, which is what proves
+//     state was discarded at all, so that step 7 cannot pass by nothing having
+//     happened.
+//  7. From the observer, the holder's range must still be held, and the holder
+//     must still be able to read and write through its mount.
 func TestSecServerKeepsTwoClientsStateApart(t *testing.T) {
 	f := framework.New(t, "SEC-04")
 	requireCap(t, f.Caps.MultiNode, "asking whether two clients' state is separable needs two schedulable workers")
 	ctx, cancel := caseCtx(t, 20*time.Minute)
 	defer cancel()
 
-	nodeA, nodeB := f.TwoNodes(ctx)
+	workers, err := f.WorkerNodes(ctx)
+	if err != nil {
+		t.Fatalf("listing worker nodes: %v", err)
+	}
+	// A third worker is a capability, not a preference. Without an observer
+	// that holds no lock on the file, the only clients left to ask are the one
+	// whose kernel would answer from its own table and the one that had to
+	// leave, and a pass from either says nothing about the server.
+	requireCap(t, len(workers) >= 3, "observing one node's lock after another node leaves needs a third "+
+		"schedulable worker: the holder's own client answers F_GETLK locally, and the leaver is gone")
+	nodeA, nodeB, nodeC := workers[0], workers[1], workers[2]
+
 	pvc := f.MustRWXPVC(ctx, "sec04")
-	const stayer, leaver = "stayer", "leaver"
+	const stayer, leaver, observer = "stayer", "leaver", "observer"
 	f.MustPod(ctx, toolsPod(stayer, pvc.Name, nodeA))
 	f.MustPod(ctx, toolsPod(leaver, pvc.Name, nodeB))
+	// Mounts the same claim and takes nothing. Its only job is to be a client
+	// with no local lock state for either range, so every answer it gives came
+	// from the server.
+	f.MustPod(ctx, toolsPod(observer, pvc.Name, nodeC))
 
 	pv, err := f.PVForClaim(ctx, "sec04")
 	if err != nil {
 		t.Fatalf("finding the volume behind the claim: %v", err)
 	}
-	requireServerSideLocking(ctx, t, f, pv.Name, framework.PosixLock, nodeA, nodeB)
+	requireServerSideLocking(ctx, t, f, pv.Name, framework.PosixLock, nodeA, nodeB, nodeC)
 
 	path := fileIn("sec04.lock")
 	// Disjoint, so neither lock can ever be refused because of the other and a
@@ -712,27 +797,27 @@ func TestSecServerKeepsTwoClientsStateApart(t *testing.T) {
 	// a cleanup that execs into a pod that is gone reports an error that means
 	// nothing.
 
-	// Each range asked from the other node, so both answers come from the
-	// server rather than from the asking node's own kernel. A range the server
-	// does not think is held would make everything below vacuous.
+	// Both ranges asked from the observer, which holds neither, so both answers
+	// come from the server rather than from the asking node's own kernel. A
+	// range the server does not think is held would make everything below
+	// vacuous.
 	for _, c := range []struct {
-		asker string
 		rng   framework.LockRange
 		owner string
-	}{{leaver, stayerRange, nodeA}, {stayer, leaverRange, nodeB}} {
-		ans, err := f.GetLock(ctx, c.asker, path, c.rng)
+	}{{stayerRange, nodeA}, {leaverRange, nodeB}} {
+		ans, err := f.GetLock(ctx, observer, path, c.rng)
 		if err != nil {
 			failOrBlock(t, err, "asking the server who holds %s", c.rng)
 		}
 		if ans.Free {
-			t.Fatalf("the server reports %s free while a pod on %s holds it, so the locks are not "+
-				"reaching the server and this case cannot say anything about whose state is whose",
-				c.rng, c.owner)
+			t.Fatalf("the server reports %s free while a pod on %s holds it, asked from %s which holds "+
+				"nothing, so the locks are not reaching the server and this case cannot say anything "+
+				"about whose state is whose", c.rng, c.owner, nodeC)
 		}
 	}
-	t.Logf("the server holds %s for a pod on %s and %s for a pod on %s at once, so it has state for "+
-		"both clients", stayerRange, nodeA, leaverRange, nodeB)
-	if err := f.RecordNodeLocks(ctx, "before-node-b-leaves", nodeA, nodeB); err != nil {
+	t.Logf("the server holds %s for a pod on %s and %s for a pod on %s at once, both confirmed from a "+
+		"third client on %s, so it has state for both clients", stayerRange, nodeA, leaverRange, nodeB, nodeC)
+	if err := f.RecordNodeLocks(ctx, "before-node-b-leaves", nodeA, nodeB, nodeC); err != nil {
 		t.Logf("recording the client lock tables before the fault: %v", err)
 	}
 
@@ -752,14 +837,19 @@ func TestSecServerKeepsTwoClientsStateApart(t *testing.T) {
 			"client, so what follows would not be the question this case asks", nodeB, pv.Name, err)
 	}
 	t.Logf("%s has released the volume, so it is no longer a client of this server", nodeB)
-	if err := f.RecordNodeLocks(ctx, "after-node-b-leaves", nodeA, nodeB); err != nil {
+	if err := f.RecordNodeLocks(ctx, "after-node-b-leaves", nodeA, nodeB, nodeC); err != nil {
 		t.Logf("recording the client lock tables after the fault: %v", err)
 	}
 
+	// Both questions go to the observer on node C. For the control that is
+	// merely tidy, since node A never held the leaver's range either. For the
+	// assertion below it is the case: node A's own kernel would answer from its
+	// local lock table and report its own lock held whatever the server thinks.
+	//
 	// The control first. If the departed client's own range is still held,
 	// nothing was discarded, and the survival below would be survival of a
 	// fault that never landed.
-	gone, err := f.GetLock(ctx, stayer, path, leaverRange)
+	gone, err := f.GetLock(ctx, observer, path, leaverRange)
 	if err != nil {
 		failOrBlock(t, err, "asking the server whether %s was released", leaverRange)
 	}
@@ -769,11 +859,12 @@ func TestSecServerKeepsTwoClientsStateApart(t *testing.T) {
 			"client's loss reaches another; DATA-06 owns the question of when a departed client's lock "+
 			"comes back", leaverRange, nodeB, gone.Conflict)
 	} else {
-		t.Logf("%s was discarded when %s stopped being a client", leaverRange, nodeB)
+		t.Logf("%s was discarded when %s stopped being a client, as seen from %s", leaverRange, nodeB, nodeC)
 	}
 
-	// The assertion.
-	held, err := f.GetLock(ctx, stayer, path, stayerRange)
+	// The assertion, asked from the one client that has to go to the server for
+	// the answer.
+	held, err := f.GetLock(ctx, observer, path, stayerRange)
 	if err != nil {
 		failOrBlock(t, err, "asking the server whether %s survived", stayerRange)
 	}
@@ -968,6 +1059,19 @@ func shortened(sum string) string {
 // most clusters, so going through it could only ever exercise one side, and
 // what is under test is the server's view of one client rather than the proxy's.
 //
+// What this establishes, and what it does not. It establishes that the server
+// sees, in each family, the node's own address and not some other party's, and
+// that an IPv4 client on an IPv6 listener arrives in the mapped form: that is
+// the address normalisation the upstream report is about, and it is what an
+// export rule is written against. It does **not** establish that the server
+// assigns one NFSv4 client identity across the two families. A server can
+// record both addresses correctly and still hold two sets of state, and
+// nothing visible from a client distinguishes those: the identity lives in the
+// server's state tables, both mounts are on one node whose kernel would answer
+// a lock query locally, and reading the server is out of bounds here. So the
+// case asserts the visibility and says so, rather than claiming the identity
+// and testing the address.
+//
 // Steps:
 //  1. Provision a claim on one node, so an export exists that this node is
 //     already a client of.
@@ -975,7 +1079,9 @@ func shortened(sum string) string {
 //  3. Clone the export twice, once per family, and mount both on that node.
 //  4. Write through each, so each has an established connection.
 //  5. Require the peer the server records for each to be that node's own
-//     address in that family. Anything else is one client seen as two.
+//     address in that family. Anything else means the address an export rule
+//     would be matched against is not the client's.
+//  6. Record whether the IPv4 client arrived mapped.
 func TestSecClientIdentityAcrossAddressFamilies(t *testing.T) {
 	f := framework.New(t, "SEC-06")
 	requireCap(t, f.Caps.DualStack, "mounting one export over both address families needs a dual-stack cluster")
@@ -1066,13 +1172,14 @@ func TestSecClientIdentityAcrossAddressFamilies(t *testing.T) {
 		peers := peersOfFamily(framework.PeersOn(conns, nfsPort), m.family)
 		if !containsAddr(peers, want) {
 			t.Errorf("the client mounting over %s is %s, and the server records no connection from it: "+
-				"the %s peers it does see are %v. One client reaching a server over two families must "+
-				"be one identity in each, or a per-client rule matches over one family and not the "+
-				"other, and which one a node gets is decided by a mount it did not choose",
-				m.family, want, m.family, peers)
+				"the %s peers it does see are %v. The address an export rule would be matched against "+
+				"is therefore not this client's in that family, so a rule naming the node matches over "+
+				"one family and not the other, and which one a node gets is decided by a mount it did "+
+				"not choose", m.family, want, m.family, peers)
 			continue
 		}
-		t.Logf("the server records %s as %s over %s, which is that node's own address in that family",
+		t.Logf("the server records %s as %s over %s, which is that node's own address in that family. "+
+			"Whether the two families share one NFSv4 client identity is not asked here",
 			node, want, m.family)
 	}
 
@@ -1426,7 +1533,19 @@ func TestSecDataPathConfidentiality(t *testing.T) {
 	}
 	r := f.Sh(ctx, "stranger", fmt.Sprintf("nc -z -w %d %s %d 2>&1; echo RC=$?",
 		int(dataPathProbeTimeout.Seconds()), framework.Quote(host), nfsPort))
-	switch out := strings.TrimSpace(r.Combined()); {
+	out := strings.TrimSpace(r.Combined())
+	lowered := strings.ToLower(out)
+	switch {
+	case r.Err != nil:
+		// The exec never reached the shell, so nothing was learned about the
+		// network. Recording this as unreachable would be the trap doc 07
+		// Section 4 names, in the one case that is supposed to be immune to it
+		// because it only records: a harness failure written down as a
+		// statement about the deployment.
+		fmt.Fprintf(&record, "\nreachability from a pod with no claim: not probed, the exec failed: %v\n", r.Err)
+		t.Logf("the connection attempt could not be made from the pod at all (%v: %s), so this reading was "+
+			"not taken. It is recorded as not taken rather than as unreachable: the probe never ran, and a "+
+			"probe that never ran is not evidence that anything refused it", r.Err, out)
 	case strings.Contains(out, "RC=0"):
 		read++
 		fmt.Fprintf(&record, "\nreachability from a pod with no claim: connected to %s:%d\n", host, nfsPort)
@@ -1434,13 +1553,21 @@ func TestSecDataPathConfidentiality(t *testing.T) {
 			"the network path restricts who may speak to the server, so what refuses an uninvited "+
 			"client is the export's own rules and nothing else; SEC-05 asks whether it does",
 			host, nfsPort)
-	case strings.Contains(strings.ToLower(out), "applet not found"), strings.Contains(strings.ToLower(out), "not found"),
-		strings.Contains(strings.ToLower(out), "usage"), strings.Contains(strings.ToLower(out), "invalid option"):
+	case strings.Contains(lowered, "applet not found"), strings.Contains(lowered, "not found"),
+		strings.Contains(lowered, "usage"), strings.Contains(lowered, "invalid option"):
 		fmt.Fprintf(&record, "\nreachability from a pod with no claim: not probed, the image's nc could "+
 			"not do it: %s\n", out)
 		t.Logf("the tools image cannot attempt a connection (%s), so this reading was not taken. It is "+
 			"recorded as not taken rather than as unreachable: an instrument nobody verified reports "+
 			"silence, not an answer (F-006)", out)
+	case !strings.Contains(out, "RC="):
+		// The echo that prints RC is unconditional, so its absence means the
+		// shell did not finish. F-011 is an exec returning success with nothing
+		// on stdout, and this is where that shape would become a finding about
+		// the network.
+		fmt.Fprintf(&record, "\nreachability from a pod with no claim: not probed, no status came back: %s\n", out)
+		t.Logf("the connection attempt printed no RC line (%q), so the shell did not run to the end and "+
+			"this reading was not taken", out)
 	default:
 		read++
 		fmt.Fprintf(&record, "\nreachability from a pod with no claim: refused or unreachable: %s\n", out)

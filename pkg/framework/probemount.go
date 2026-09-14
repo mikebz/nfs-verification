@@ -110,11 +110,22 @@ func (f *Framework) ProbeMount(ctx context.Context, node string, src NFSSource, 
 	if err := CheckScriptID(id); err != nil {
 		return MountProbe{}, err
 	}
+	// Run-scoped, because the node agent DaemonSet outlives any one run. Two
+	// runs against the same cluster, or a retry after a cancelled probe, would
+	// otherwise share a mountpoint and a script path: one invocation would
+	// overwrite the other's script, or unmount the other's mount.
+	probeID := f.Name(id)
+	if err := CheckScriptID(probeID); err != nil {
+		return MountProbe{}, err
+	}
 	if relPath == "" {
 		relPath = "-"
 	}
-	mountPoint := "/tmp/nfsv-probe-" + id
-	script, err := RunScript("probe-mount.sh", id, src.String(), mountPoint, probeMountOptions, relPath)
+	if err := checkProbePath(relPath); err != nil {
+		return MountProbe{}, err
+	}
+	mountPoint := "/tmp/nfsv-probe-" + probeID
+	script, err := RunScript("probe-mount.sh", probeID, src.String(), mountPoint, probeMountOptions, relPath)
 	if err != nil {
 		return MountProbe{}, err
 	}
@@ -140,6 +151,39 @@ func (f *Framework) ProbeMount(ctx context.Context, node string, src NFSSource, 
 			src, node, truncate(out, 200))
 	}
 	return probe, nil
+}
+
+// checkProbePath rejects anything that would read outside the export the probe
+// just mounted.
+//
+// Quoting is not enough here, and that is the whole point: `framework.Quote`
+// stops a path being reinterpreted as shell, it does not stop it being a
+// different path. This argument is concatenated under the mountpoint and read
+// by `sha256sum` in the node agent's **privileged** container, so an absolute
+// path or a `..` component turns SEC-05's evidence step into an arbitrary host
+// read. AGENTS.md asks for exactly this on any identifier that becomes part of a
+// filename: a helper that is safe only because of who calls it today is one
+// refactor away from not being safe at all.
+//
+// "-" is the caller's way of saying "mount only, read nothing", and is allowed.
+func checkProbePath(rel string) error {
+	if rel == "-" {
+		return nil
+	}
+	if rel == "" {
+		return fmt.Errorf("the probe was given an empty path to read; pass \"-\" to skip the read")
+	}
+	if strings.HasPrefix(rel, "/") {
+		return fmt.Errorf("the probe path %q is absolute; it is joined under the probe's own mountpoint, "+
+			"so an absolute path reads the agent container's filesystem rather than the export", rel)
+	}
+	for _, part := range strings.Split(rel, "/") {
+		if part == ".." {
+			return fmt.Errorf("the probe path %q climbs out of the mount with %q; the probe reads from a "+
+				"privileged container, so it may only name a file inside the export it mounted", rel, "..")
+		}
+	}
+	return nil
 }
 
 // parseMountProbe reads the token lines scripts/probe-mount.sh prints.

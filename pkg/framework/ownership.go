@@ -56,15 +56,25 @@ func (c OwnerCensus) Counted() int {
 	return n
 }
 
-// SameOwnership reports whether two censuses describe the same ownership. It
-// ignores Raw and Total on purpose: a case that added a file between the two
-// readings has changed the total without anything having been chowned.
+// SameOwnership reports whether two censuses describe the same ownership.
+//
+// What counts as a change is an owner **losing** files. A chown moves entries
+// from one owner to another, so the owner they left is smaller in the second
+// reading; that is the storm SEC-03 is watching for, and it is what erases what
+// SEC-01 and SEC-02 assert on. A workload that merely created files between the
+// two readings only ever makes an owner larger, and is not a chown.
+//
+// This is why the comparison is not element-wise. An earlier version compared
+// the counts directly, which read an added file as a chown, and was only ever
+// correct because the two censuses either side of it were taken with nothing
+// writing in between.
 func (c OwnerCensus) SameOwnership(other OwnerCensus) bool {
-	if len(c.Counts) != len(other.Counts) {
-		return false
+	held := make(map[OwnerCount]int, len(other.Counts))
+	for _, e := range other.Counts {
+		held[OwnerCount{UID: e.UID, GID: e.GID}] = e.Files
 	}
-	for i := range c.Counts {
-		if c.Counts[i] != other.Counts[i] {
+	for _, e := range c.Counts {
+		if held[OwnerCount{UID: e.UID, GID: e.GID}] < e.Files {
 			return false
 		}
 	}
@@ -120,6 +130,18 @@ func ParseOwnerCensus(out string) (OwnerCensus, error) {
 		}
 		return census.Counts[i].GID < census.Counts[j].GID
 	})
+	// Total is counted independently of the per-owner walk precisely so that
+	// the two can disagree, and this is where the disagreement has to stop the
+	// run. owner-census.sh sends stat's errors to /dev/null, so a walk that
+	// could not read part of the tree still prints a well-formed census; the
+	// entries it silently dropped are exactly the ones a chown storm would have
+	// touched, and SameOwnership would call the result unchanged.
+	if census.Counted() != census.Total {
+		return OwnerCensus{}, fmt.Errorf("the ownership census read %d entries but the directory holds %d, "+
+			"so %d were not counted; an ownership comparison drawn from it would call the entries it "+
+			"could not read unchanged: %q",
+			census.Counted(), census.Total, census.Total-census.Counted(), truncate(out, 200))
+	}
 	return census, nil
 }
 

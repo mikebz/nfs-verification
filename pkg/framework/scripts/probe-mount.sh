@@ -44,6 +44,24 @@ if [ "$rc" -ne 0 ]; then
 	exit 0
 fi
 
+# From here the mount is live, and everything below can be interrupted: the
+# case's context can expire while sha256sum is blocked on the export, and
+# kubectl exec's SIGTERM arrives with the mount still up. Without this trap the
+# script exits before the unmount below and leaves NFS mounted in a container
+# that lives for the whole run, which is what ProbeMount promises cannot happen
+# and what teardown would then be deleting the export underneath.
+#
+# The trap is deliberately armed here rather than before the mount: there is
+# nothing to clean up until the mount is granted, and an unmount attempt against
+# a refusal would only add noise to a case that is reading exit statuses.
+cleanup() {
+	# Lazy as a last resort. An ordinary unmount can fail while the read that
+	# was interrupted still holds the mountpoint; detaching is strictly better
+	# than leaving it, because this namespace is the container's own.
+	umount "$mnt" 2>/dev/null || umount -l "$mnt" 2>/dev/null
+}
+trap cleanup EXIT HUP INT TERM
+
 if [ "$rel" != "-" ]; then
 	# The checksum is the evidence that a granted mount really reached another
 	# workload's bytes, so it is taken as its own command and checked, never as
@@ -57,4 +75,12 @@ if [ "$rel" != "-" ]; then
 fi
 
 umount "$mnt" 2>/dev/null
-echo "UMOUNT_RC=$?"
+umount_rc=$?
+echo "UMOUNT_RC=$umount_rc"
+
+# Disarm only once the unmount the caller is told about has succeeded. If it
+# failed, the trap gets its lazy attempt on the way out, and UMOUNT_RC still
+# reports the failure the caller needs to see.
+if [ "$umount_rc" -eq 0 ]; then
+	trap - EXIT HUP INT TERM
+fi
