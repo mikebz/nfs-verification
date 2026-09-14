@@ -212,6 +212,7 @@ func serverConfigBlob(ctx context.Context, c *framework.Client) string {
 	if err != nil {
 		return ""
 	}
+	cmCache := make(map[string]*corev1.ConfigMap)
 	var sb strings.Builder
 	for i := range pods {
 		p := &pods[i]
@@ -226,8 +227,18 @@ func serverConfigBlob(ctx context.Context, c *framework.Client) string {
 			if v.ConfigMap == nil {
 				continue
 			}
-			cm, err := c.Kube.CoreV1().ConfigMaps(p.Namespace).Get(ctx, v.ConfigMap.Name, metav1.GetOptions{})
-			if err != nil {
+			key := p.Namespace + "/" + v.ConfigMap.Name
+			cm, ok := cmCache[key]
+			if !ok {
+				var err error
+				cm, err = c.Kube.CoreV1().ConfigMaps(p.Namespace).Get(ctx, v.ConfigMap.Name, metav1.GetOptions{})
+				if err != nil {
+					cmCache[key] = nil
+					continue
+				}
+				cmCache[key] = cm
+			}
+			if cm == nil {
 				continue
 			}
 			for _, val := range cm.Data {

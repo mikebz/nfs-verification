@@ -237,6 +237,7 @@ func DiscoverTiming(ctx context.Context, c *Client) (env.Timing, error) {
 	if err != nil {
 		return env.Timing{}, err
 	}
+	cmCache := make(map[string]*corev1.ConfigMap)
 	for i := range pods {
 		p := &pods[i]
 		var blob strings.Builder
@@ -254,8 +255,18 @@ func DiscoverTiming(ctx context.Context, c *Client) (env.Timing, error) {
 			if v.ConfigMap == nil {
 				continue
 			}
-			cm, err := c.Kube.CoreV1().ConfigMaps(p.Namespace).Get(ctx, v.ConfigMap.Name, metav1.GetOptions{})
-			if err != nil {
+			key := p.Namespace + "/" + v.ConfigMap.Name
+			cm, ok := cmCache[key]
+			if !ok {
+				var err error
+				cm, err = c.Kube.CoreV1().ConfigMaps(p.Namespace).Get(ctx, v.ConfigMap.Name, metav1.GetOptions{})
+				if err != nil {
+					cmCache[key] = nil
+					continue
+				}
+				cmCache[key] = cm
+			}
+			if cm == nil {
 				continue
 			}
 			var cmBlob strings.Builder

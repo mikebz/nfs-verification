@@ -1,10 +1,15 @@
 package framework
 
 import (
+	"context"
+	"fmt"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 )
 
 // Server discovery falls back to a name and port heuristic when no selector is
@@ -100,5 +105,118 @@ func TestPodReadyIgnoresTerminating(t *testing.T) {
 					"vanishes afterwards", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestDiscoverTimingConfigMapAPICalls measures API Get calls for ConfigMap lookups.
+func TestDiscoverTimingConfigMapAPICalls(t *testing.T) {
+	ctx := context.Background()
+	cmOther := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "other-config", Namespace: "default"},
+		Data:       map[string]string{"exporter.conf": "exports = /export"},
+	}
+	cmTiming := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "timing-config", Namespace: "default"},
+		Data:       map[string]string{"ganesha.conf": "Lease_Lifetime = 60\nGrace_Period = 90"},
+	}
+	var objects []runtime.Object
+	objects = append(objects, cmOther, cmTiming)
+
+	// 5 pods, each with 4 volumes referencing other-config and 1 volume at the end referencing timing-config
+	for i := 0; i < 5; i++ {
+		p := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      fmt.Sprintf("nfs-server-%d", i),
+				Namespace: "default",
+			},
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{Name: "nfs", Ports: []corev1.ContainerPort{{ContainerPort: 2049}}},
+				},
+				Volumes: []corev1.Volume{
+					{Name: "v1", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: "other-config"}}}},
+					{Name: "v2", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: "other-config"}}}},
+					{Name: "v3", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: "other-config"}}}},
+					{Name: "v4", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: "other-config"}}}},
+					{Name: "v5", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: "timing-config"}}}},
+				},
+			},
+			Status: corev1.PodStatus{Phase: corev1.PodRunning},
+		}
+		if i < 4 {
+			// Pods 0-3 only have other-config
+			p.Spec.Volumes = p.Spec.Volumes[:4]
+		}
+		objects = append(objects, p)
+	}
+
+	kube := fake.NewSimpleClientset(objects...)
+	var cmGetCount int
+	kube.PrependReactor("get", "configmaps", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		cmGetCount++
+		return false, nil, nil
+	})
+
+	client := &Client{Kube: kube}
+	timing, err := DiscoverTiming(ctx, client)
+	if err != nil {
+		t.Fatalf("DiscoverTiming failed: %v", err)
+	}
+	if timing.LeaseSeconds != 60 || timing.GraceSeconds != 90 {
+		t.Errorf("got timing lease=%d grace=%d, want 60, 90", timing.LeaseSeconds, timing.GraceSeconds)
+	}
+	t.Logf("ConfigMap API Get calls: %d", cmGetCount)
+}
+
+// BenchmarkDiscoverTimingConfigMap benchmarks timing discovery across server pods mounting ConfigMaps.
+func BenchmarkDiscoverTimingConfigMap(b *testing.B) {
+	ctx := context.Background()
+	cmOther := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "other-config", Namespace: "default"},
+		Data:       map[string]string{"exporter.conf": "exports = /export"},
+	}
+	cmTiming := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "timing-config", Namespace: "default"},
+		Data:       map[string]string{"ganesha.conf": "Lease_Lifetime = 60\nGrace_Period = 90"},
+	}
+	var objects []runtime.Object
+	objects = append(objects, cmOther, cmTiming)
+
+	for i := 0; i < 10; i++ {
+		p := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      fmt.Sprintf("nfs-server-%d", i),
+				Namespace: "default",
+			},
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{Name: "nfs", Ports: []corev1.ContainerPort{{ContainerPort: 2049}}},
+				},
+				Volumes: []corev1.Volume{
+					{Name: "v1", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: "other-config"}}}},
+					{Name: "v2", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: "other-config"}}}},
+					{Name: "v3", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: "other-config"}}}},
+					{Name: "v4", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: "other-config"}}}},
+					{Name: "v5", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: "timing-config"}}}},
+				},
+			},
+			Status: corev1.PodStatus{Phase: corev1.PodRunning},
+		}
+		if i < 9 {
+			p.Spec.Volumes = p.Spec.Volumes[:4]
+		}
+		objects = append(objects, p)
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		kube := fake.NewSimpleClientset(objects...)
+		client := &Client{Kube: kube}
+		_, err := DiscoverTiming(ctx, client)
+		if err != nil {
+			b.Fatalf("DiscoverTiming failed: %v", err)
+		}
 	}
 }
