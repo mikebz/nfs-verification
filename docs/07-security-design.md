@@ -3,11 +3,15 @@
 Author: mikebz@
 Created: 2026-09-13
 Updated: 2026-09-14
-Status: **shipped**, delivery step 8. The harness pieces and all seven cases are
-in the tree and have been run once against a live cluster; Section 10 is what
-that run returned. The PR is not yet open.
-Serves: SEC-03, SEC-04, SEC-05, SEC-06, SEC-07, SEC-08, SEC-09.
-Requirements in [`01-test-plan.md`](01-test-plan.md) Section 3.6.
+Status: **in review**, [PR #57](https://github.com/mikebz/nfs-verification/pull/57).
+SEC-03 to SEC-09 landed in delivery step 8; SEC-01 shipped in Step 2
+([PR #3](https://github.com/mikebz/nfs-verification/pull/3)) and SEC-02 in Step 2b
+([PR #4](https://github.com/mikebz/nfs-verification/pull/4)), and both are
+documented here for the first time. Consolidated to serve the complete Security
+test group. Every case has been run against a live cluster; Section 10 is what
+that run returned.
+Serves: SEC-01 through SEC-09. Requirements in
+[`01-test-plan.md`](01-test-plan.md) Section 3.6.
 Builds on [`03-chaos-operations-design.md`](03-chaos-operations-design.md),
 [`04-grace-and-lock-reclaim-design.md`](04-grace-and-lock-reclaim-design.md),
 [`05-data-path-and-locktool-design.md`](05-data-path-and-locktool-design.md) and
@@ -37,6 +41,11 @@ turns a deployment choice into a test failure — the mistake SEC-02 already
 refuses to make with `-root-squash`. What a case **can** assert is that the
 identity machinery works as the deployment must rely on it working:
 
+- that an identity written through one client is the identity a second client
+  reads back (SEC-01), because ownership that does not survive the crossing makes
+  every permission on the share a function of where the pod landed,
+- that privilege is required to give a file away, whatever the export's squash
+  setting is (SEC-02),
 - that one client's state is not destroyed by another client's departure
   (SEC-04), because NFSv4.1 state is held per client and the client identity is
   therefore the blast radius of every recovery,
@@ -115,7 +124,51 @@ stranger, and the `CAP_SYS_ADMIN` probe in Section 2 produced precisely that
 shape. A refusal is reported only when the failure is attributable to the server;
 anything else is blocked. **A denial the suite cannot attribute is not a denial.**
 
-## 5. The seven cases
+## 5. The nine cases
+
+The first two shipped before this document existed, in Steps 2 and 2b. They are
+described here because a reader asking what the suite checks about security
+should find all of it in one place, and because SEC-02's assertion changed in
+review (F-021).
+
+**SEC-01: does an identity survive the crossing.** A pod running as an ordinary
+uid writes a file on one node; a pod on another node reads the ownership back.
+The point is not that `stat` agrees with itself, it is that permissions on an
+RWX share mean the same thing to every consumer of it: an ownership that changes
+between clients makes every mode bit on the volume a function of where the pod
+was scheduled. NFSv4 carries owners as strings rather than integers, so the
+crossing is a real translation and not a copy, and the classic failure is a
+client whose idmapper substitutes nobody.
+
+The case separates the two failures it can see, because they belong to different
+people. Ownership is read first **on the writer's own client**, where a wrong id
+means the mapping broke on the way in and no reader will fix it, and then on the
+second client. Wrong on both is the server; wrong only on the reader is that
+node's idmapper.
+
+**SEC-02: who may change a file's ownership.** Two questions live here and only
+one has a single correct answer, which is why the case treats them differently.
+
+- *Settled everywhere, so asserted.* Changing a file's owner requires privilege,
+  and owning the file is not privilege
+  ([`chown(2)`](https://man7.org/linux/man-pages/man2/chown.2.html)). An owner who
+  could hand a file to somebody else could evade anything counted per owner or
+  plant a file in another tenant's name. A `chmod` of the same file runs first as
+  a control: a server that refuses every metadata change would otherwise pass the
+  assertion vacuously.
+- *A deployment choice, so recorded.* What the server does with a client claiming
+  uid 0 is compared against `-root-squash` where that states the intent and
+  recorded otherwise — but the same answer is required on **every** client.
+  A half-squash is worse than either setting, because what a workload may do to
+  the shared volume then depends on where it was scheduled.
+
+**The probe is the operation, never the number `stat` prints.** This is the one
+decision in the case worth remembering. Reading 65534 and calling it squash is
+how the case was wrong from the day it shipped: root squash and a client
+idmapper that cannot resolve `root@domain` display identically, so the old
+version would have failed a correctly configured export the moment anyone passed
+`-root-squash=off` (F-021). Whether a privileged operation is permitted cannot be
+confused that way.
 
 **SEC-03: what `fsGroup` actually does to an NFS volume.** A pod declaring
 `fsGroup` is promised two things by Kubernetes: the gid as a supplementary group,
@@ -308,10 +361,12 @@ are one client and cannot be told apart.
 
 ## 8. What a green run does and does not claim
 
-A green SEC section says: the server distinguishes its clients, a stranger is
-refused, one client's state survives another's disappearance, `fsGroup` grants
-what it promises without rewriting the volume, and the server holds the
-capabilities it declared and no more than the platform gave it.
+A green SEC section says: an identity written through one client is the identity
+another reads back, an owner cannot give a file away, the server distinguishes
+its clients, a stranger is refused, one client's state survives another's
+disappearance, `fsGroup` grants what it promises without rewriting the volume,
+and the server holds the capabilities it declared and no more than the platform
+gave it.
 
 It does not say the export's rules are the right rules, that AUTH_SYS is
 sufficient, that traffic is confidential, or that a pod cannot impersonate
@@ -321,8 +376,10 @@ Appendix B defers.
 
 ## 9. Delivery
 
-Three pull requests, all `TestSec` under `make test-sec`, category budget 30
-minutes:
+SEC-01 went in with Step 2 and SEC-02 with Step 2b, both before any design doc
+covered them; the plan's delivery table has the PRs. Step 8 planned the remaining
+seven as three pull requests, all `TestSec` under `make test-sec`, category
+budget 30 minutes:
 
 1. **SEC-03 and SEC-09.** `fsGroup` on the pod spec, the ownership sweep, the
    capability reader. No new privilege and no new hazard.
@@ -340,6 +397,15 @@ the peer table, the capability reader, the ownership census — turned out to be
 read-only code with unit tests of its own, so separating it bought review
 isolation that the hazard did not need. The probe mount's safety case is
 Section 6 either way, and it is the part to read first.
+
+Review then rewrote two cases, both for the same reason: they were reading
+something *about* the server instead of asking the server a question. SEC-04
+read the server's socket table, then each node's own `clientaddr`, and now reads
+nothing — it takes two clients' locks and removes one client. SEC-02 read what
+`stat` printed, and now asks whether a `chown` is permitted. The pattern is worth
+naming for the next phase: **where a case can perform the operation whose outcome
+it cares about, inspecting a precondition instead is the weaker test**, and on
+this deployment it was the wrong one.
 
 ## 10. What the runs returned
 
