@@ -233,13 +233,9 @@ func serverConfigBlob(ctx context.Context, c *framework.Client) string {
 				var err error
 				cm, err = c.Kube.CoreV1().ConfigMaps(p.Namespace).Get(ctx, v.ConfigMap.Name, metav1.GetOptions{})
 				if err != nil {
-					cmCache[key] = nil
 					continue
 				}
 				cmCache[key] = cm
-			}
-			if cm == nil {
-				continue
 			}
 			for _, val := range cm.Data {
 				sb.WriteString(val + "\n")

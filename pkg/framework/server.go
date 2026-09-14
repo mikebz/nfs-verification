@@ -261,13 +261,9 @@ func DiscoverTiming(ctx context.Context, c *Client) (env.Timing, error) {
 				var err error
 				cm, err = c.Kube.CoreV1().ConfigMaps(p.Namespace).Get(ctx, v.ConfigMap.Name, metav1.GetOptions{})
 				if err != nil {
-					cmCache[key] = nil
 					continue
 				}
 				cmCache[key] = cm
-			}
-			if cm == nil {
-				continue
 			}
 			var cmBlob strings.Builder
 			for _, val := range cm.Data {

@@ -108,7 +108,15 @@ func TestPodReadyIgnoresTerminating(t *testing.T) {
 	}
 }
 
-// TestDiscoverTimingConfigMapAPICalls measures API Get calls for ConfigMap lookups.
+// TestDiscoverTimingConfigMapAPICalls covers timing discovery from ConfigMaps
+// mounted on server pods, asserting that ConfigMap lookups are cached to avoid
+// redundant API Get calls.
+//
+// Steps:
+//  1. Offer server pods with multiple volumes referencing ConfigMaps.
+//  2. Intercept API Get calls to configmaps using a fake reactor.
+//  3. Discover timing and assert the correct lease and grace values are returned.
+//  4. Assert the number of API Get calls is minimized by caching.
 func TestDiscoverTimingConfigMapAPICalls(t *testing.T) {
 	ctx := context.Background()
 	cmOther := &corev1.ConfigMap{
@@ -168,7 +176,12 @@ func TestDiscoverTimingConfigMapAPICalls(t *testing.T) {
 	t.Logf("ConfigMap API Get calls: %d", cmGetCount)
 }
 
-// BenchmarkDiscoverTimingConfigMap benchmarks timing discovery across server pods mounting ConfigMaps.
+// BenchmarkDiscoverTimingConfigMap measures the performance of timing discovery
+// across server pods mounting ConfigMaps.
+//
+// Steps:
+//  1. Construct server pods mounting ConfigMaps containing ganesha timing configs.
+//  2. Benchmark DiscoverTiming across iterations.
 func BenchmarkDiscoverTimingConfigMap(b *testing.B) {
 	ctx := context.Background()
 	cmOther := &corev1.ConfigMap{
