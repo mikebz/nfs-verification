@@ -102,6 +102,57 @@ func TestClientPodManifestWithNoMounts(t *testing.T) {
 	}
 }
 
+// TestClientPodManifestIdentityFields covers the securityContext block: the two
+// identity fields the SEC-01 and SEC-02 cases pin, and the fsGroup SEC-03 adds.
+//
+// fsGroup is the one field here with a side effect. On a volume plugin that
+// manages ownership, kubelet chowns the whole volume before the pod starts, so
+// a template that emitted it for every pod would quietly rewrite the ownership
+// the other identity cases assert on. The second half of this test is
+// therefore as important as the first.
+//
+// Steps:
+//  1. Render a pod pinning uid, gid and fsGroup, and check all three decoded.
+//  2. Render a pod pinning only a uid, and check no fsGroup appeared.
+//  3. Render an ordinary pod, and check it has no securityContext at all.
+func TestClientPodManifestIdentityFields(t *testing.T) {
+	f := &Framework{CaseID: "SEC-03"}
+	pod, err := f.PodBuilder(PodSpec{
+		Name:       "member",
+		Mounts:     []MountSpec{{Claim: "share", Path: "/mnt/share"}},
+		RunAsUser:  Int64(1234),
+		RunAsGroup: Int64(1234),
+		FSGroup:    Int64(5678),
+	})
+	if err != nil {
+		t.Fatalf("rendering a pod with an fsGroup: %v", err)
+	}
+	sc := pod.Spec.SecurityContext
+	if sc == nil || sc.RunAsUser == nil || sc.RunAsGroup == nil || sc.FSGroup == nil {
+		t.Fatalf("identity fields did not survive decoding: %+v", sc)
+	}
+	if *sc.RunAsUser != 1234 || *sc.RunAsGroup != 1234 || *sc.FSGroup != 5678 {
+		t.Errorf("identity decoded as uid %d gid %d fsGroup %d", *sc.RunAsUser, *sc.RunAsGroup, *sc.FSGroup)
+	}
+
+	onlyUser, err := f.PodBuilder(PodSpec{Name: "writer", RunAsUser: Int64(1234)})
+	if err != nil {
+		t.Fatalf("rendering a pod with only a uid: %v", err)
+	}
+	if fsg := onlyUser.Spec.SecurityContext.FSGroup; fsg != nil {
+		t.Errorf("a pod that asked for no fsGroup got %d; on a plugin that manages ownership that "+
+			"chowns the whole share underneath every other case", *fsg)
+	}
+
+	plain, err := f.PodBuilder(PodSpec{Name: "plain"})
+	if err != nil {
+		t.Fatalf("rendering an ordinary pod: %v", err)
+	}
+	if sc := plain.Spec.SecurityContext; sc != nil && (sc.RunAsUser != nil || sc.FSGroup != nil) {
+		t.Errorf("an ordinary pod rendered with an identity: %+v", sc)
+	}
+}
+
 // TestNodeAgentManifestRenders checks the one privileged component in the
 // suite. Every property here is what makes node-level assertions possible at
 // all: lose one and the agent starts up and sees nothing.

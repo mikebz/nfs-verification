@@ -270,14 +270,17 @@ How the data is read, and what a green run does and does not establish, is in
 | ID | Case | Expected |
 |---|---|---|
 | SEC-01 | ✅ UID/GID preservation across pods | Ownership as written. Derived from reports of v4 clients mapping local IDs to `nobody` on modern kernels. |
-| SEC-02 | ✅ `root_squash` enabled: root-owned pod writes | Squashed to anonymous as configured |
-| SEC-03 | Pod `securityContext.fsGroup` interaction | Group access correct; no unexpected chown storm on large volumes |
-| SEC-04 | Export access rules through the cluster Service path | Per-client rules still apply. Derived from an open report that connections carrying no client identity are treated as the proxy host, degrading per-IP rules to the global access type. **High priority: Kubernetes always inserts a Service.** |
-| SEC-05 | Denied client attempts mount | Rejected, not silently granted |
-| SEC-06 | Dual-stack client identity (**skipped unless both IP families present**) | Client identity consistent. Derived from an open report of inconsistent normalization between IPv4 and IPv4-mapped IPv6. |
-| SEC-07 | Two pods with identical client identity after restart | No state collision; no lost locks |
-| SEC-08 | Data path confidentiality, stated | Records whether NFS traffic on the shared pod network is cleartext, and whether any transport encryption is in effect. This is a **finding, not a pass/fail**: with no dedicated storage network, cleartext NFS shares a fabric with tenant traffic, and that fact belongs in the record whether or not it is acceptable. |
-| SEC-09 | Server pod under the platform's admission policy | Server runs with the capability set it actually needs and no more. A file-handle-based backend needs `CAP_DAC_READ_SEARCH` for `open_by_handle_at(2)`; if the policy strips it, file handle operations fail with EPERM. Conditional on the backend using that path. |
+| SEC-02 | ✅ Who may change a file's ownership | An owner is refused a `chown` of its own file: changing a file's owner requires privilege everywhere, and owning it is not privilege ([`chown(2)`](https://man7.org/linux/man-pages/man2/chown.2.html)). What the server does with a client claiming uid 0 is a deployment choice, so it is asserted only against `-root-squash` where that states the intent, and otherwise recorded — but whichever rule is in force must be applied to every client alike, since a half-squash makes what a workload may do depend on where it was scheduled. The probe is the operation, never what `stat` displays: F-021 is this case reading a client-side mapping as the export's policy. |
+| SEC-03 | ✅ Pod `securityContext.fsGroup` interaction | Group access correct; no unexpected chown storm on large volumes |
+| SEC-04 | ✅ Client state isolation between nodes | One node losing its mount must not discard another node's locks, and the survivor must still be able to read and write. NFSv4.1 holds state per client, so if two nodes are one client to the server, either one's departure takes the other's state with it and the survivor is never told. Derived from an open report that connections carrying no client identity are treated as the proxy host; the access-control half of that report is measured end to end by SEC-05, which attempts the mount rather than inspecting addresses. **High priority: Kubernetes always inserts a Service.** |
+| SEC-05 | ✅ Denied client attempts mount | Rejected, not silently granted |
+| SEC-06 | ✅ Dual-stack client identity (**skipped unless both IP families present**) | Client identity consistent. Derived from an open report of inconsistent normalization between IPv4 and IPv4-mapped IPv6. |
+| SEC-07 | ✅ Two pods with identical client identity after restart | No state collision; no lost locks |
+| SEC-08 | ✅ Data path confidentiality, stated | Records whether NFS traffic on the shared pod network is cleartext, and whether any transport encryption is in effect. This is a **finding, not a pass/fail**: with no dedicated storage network, cleartext NFS shares a fabric with tenant traffic, and that fact belongs in the record whether or not it is acceptable. |
+| SEC-09 | ✅ Server pod under the platform's admission policy | Server runs with the capability set it actually needs and no more. A file-handle-based backend needs `CAP_DAC_READ_SEARCH` for `open_by_handle_at(2)`; if the policy strips it, file handle operations fail with EPERM. Conditional on the backend using that path. |
+
+How each of these is probed, and what a green run does and does not establish,
+is in [`07-security-design.md`](07-security-design.md).
 
 ### 3.7 Version skew (SKEW, conditional)
 
@@ -404,8 +407,8 @@ Defect routing when the sharing layer is independently versioned: reproduce outs
 
 ### 5.1 Progress summary
 
-Thirty-five cases are merged in the tree today out of 66 core cases (53.0%) and
-69 total cases (50.7%) including conditional skew testing. Each case's status is
+Forty-two cases are in the tree today out of 66 core cases (63.6%) and 69 total
+cases (60.9%) including conditional skew testing. Each case's status is
 marked directly in Section 3: shipped cases carry a ✅, and the rest carry nothing.
 
 | Category | Shipped | Deferred | Remaining | Total | Status |
@@ -414,12 +417,47 @@ marked directly in Section 3: shipped cases carry a ✅, and the rest carry noth
 | DATA | 13 | 1 | 0 | 14 | Complete (DATA-14 deferred to SCALE-07) (Steps 1, 2, 2b, 6) |
 | CHAOS | 5 | 0 | 13 | 18 | In progress (Steps 3, 4 done; Step 10 remaining) |
 | OBS | 4 | 0 | 3 | 7 | In progress (Steps 2b, 4 done; Step 7 in progress; OBS-01 half in Step 10) |
-| SEC | 2 | 0 | 7 | 9 | In progress (Steps 2, 2b done; Step 8 remaining) |
+| SEC | 9 | 0 | 0 | 9 | Complete (Steps 2, 2b, 8). SEC-05 is red against this deployment ([F-018](findings.md)) and SEC-06 skips on a single-stack cluster |
 | SCALE | 0 | 0 | 7 | 7 | Not started (Step 9) |
 | SKEW | 0 | 0 | 3 | 3 | Not started (Step 11, conditional on independent versions) |
-| **Total** | **35** | **1** | **33** | **69** | **35 / 66 core cases shipped (53.0%)** |
+| **Total** | **42** | **1** | **26** | **69** | **42 / 66 core cases shipped (63.6%)** |
 
-### 5.2 Delivery steps
+### 5.2 What the latest runs returned
+
+Delivery says what exists. This says how it did, on the one deployment it has
+been run against: a three-worker GKE cluster `gke-w1`, Kubernetes
+v1.37.0-gke.2941000, Container-Optimized OS with kernel 6.12.94+, StorageClass
+`nfs` backed by an in-cluster `nfs-server-provisioner` v4.0.8, profile `default`
+(lease 60s, grace 90s). Results from one deployment are not results about NFS,
+and every red below is a statement about this deployment.
+
+**Whole suite, 2026-09-13, `make test-e2e`, 62 minutes: 26 passed, 5 failed, 4
+blocked**, over the thirty-five cases that existed then. The seven security
+cases landed afterwards and have not been in a whole-suite run.
+
+**Security category, 2026-09-14, `make test-sec`, run `20260914-011748`, 2m45s:
+7 passed, 1 failed, 1 skipped** over SEC-01 to SEC-09. Five earlier runs returned
+the same verdicts, but each against a case review has since replaced: SEC-04
+twice, then SEC-02, then SEC-03 and SEC-04 again.
+
+None of the reds is a defect in the storage server, and each one has a finding:
+
+| Case | Result | Whose problem |
+|---|---|---|
+| SEC-05 | fail | A node with no claim mounted another claim's export and read its bytes. The exports carry no client rules, nothing in the network path restricts who may connect, and `no_root_squash` is set, so the access control around a claim ends at the mount. [F-018](findings.md) |
+| DATA-02 | fail | Four clients appending to one file landed 150 of 200 records and tore none, one appender losing its whole contribution. NFSv4.1 has no append operation, so this goes to the boundary discussion rather than to the server owner, and it is intermittent. [F-016](findings.md) |
+| OBS-03 | fail | This provisioner announces no grace in its container log stream, so there is no signal to observe. [F-008](findings.md), and [F-022](findings.md) for where the signal actually is |
+| OBS-06 | fail | The export has no per-volume quota, so both capacity sources describe the backing filesystem rather than the claim. [F-009](findings.md) |
+| PROV-04, PROV-11 | fail | The StorageClass advertises `allowVolumeExpansion` and nothing implements it. [F-004](findings.md) |
+
+The four blocked are CHAOS-01, DATA-12 and DATA-13, which need a process name
+this image does not let the harness discover, and CHAOS-07, which needs the
+grace window OBS-03 could not see. SEC-06 skips because the cluster is
+single-stack. **Blocked and skipped are not passes**: those vectors are
+unexercised here, and a green run against this provisioner is not evidence that
+grace behaves.
+
+### 5.3 Delivery steps
 
 One step is one pull request, or a short run of them. Later steps depend only on
 earlier ones. Steps are numbered independently of the documents; a step's design
@@ -428,19 +466,19 @@ doc, where it has one, is named in its row.
 | Step | Scope | Status |
 |---|---|---|
 | 1 | Approach, harness skeleton, preflight (Section 0), PROV-01, DATA-03, DATA-05 `flock` | done, [PR #1](https://github.com/mikebz/nfs-verification/pull/1) |
-| 2 | Cases needing nothing new from the harness: PROV-03, PROV-04, DATA-01, DATA-04, SEC-01 | done, [PR #3](https://github.com/mikebz/nfs-verification/pull/3) |
-| 2b | The three held back from step 2: DATA-02, OBS-04, SEC-02 | done, [PR #4](https://github.com/mikebz/nfs-verification/pull/4) |
+| 2 | Cases needing nothing new from the harness: PROV-03, PROV-04, DATA-01, DATA-04, SEC-01 (SEC-01 documented in [doc 07](07-security-design.md)) | done, [PR #3](https://github.com/mikebz/nfs-verification/pull/3) |
+| 2b | The three held back from step 2: DATA-02, OBS-04, SEC-02 (SEC-02 documented in [doc 07](07-security-design.md), OBS-04 in [doc 06](06-observability-design.md)) | done, [PR #4](https://github.com/mikebz/nfs-verification/pull/4) |
 | 3 | `pkg/chaos`, CHAOS-01, CHAOS-02, the SLO measurement path, fault timelines. [Design](03-chaos-operations-design.md) (serves all CHAOS cases) | done, [PR #4](https://github.com/mikebz/nfs-verification/pull/4) |
 | 4 | Grace and lock reclaim: CHAOS-05, CHAOS-06, CHAOS-07. [Design](04-grace-and-lock-reclaim-design.md) (historical; consolidated in [doc 03](03-chaos-operations-design.md) and [doc 06](06-observability-design.md)) | done, [PR #8](https://github.com/mikebz/nfs-verification/pull/8) |
 | 5 | Close out PROV: PROV-02, PROV-05 to PROV-11 | done, [PR #10](https://github.com/mikebz/nfs-verification/pull/10) |
 | 6 | Close out DATA: DATA-06 to DATA-13, `locktool`. [Design](05-data-path-and-locktool-design.md) | done except the soak, [PR #12](https://github.com/mikebz/nfs-verification/pull/12) onward. DATA-10 has now been run and passes (2026-09-13); DATA-14 is deferred (Section 3.2) |
 | 7 | OBS: OBS-01 through OBS-07. [Design](06-observability-design.md) | **in progress**, first of three PRs done ([PR #29](https://github.com/mikebz/nfs-verification/pull/29)): the kubelet stats reader and OBS-06, red on the quota check ([F-009](findings.md)). Section 3.5 stays open either way: OBS-01's behavioral half needs a fault from step 10 |
-| 8 | Close out SEC: SEC-03 to SEC-09 | not started |
+| 8 | SEC: SEC-01 through SEC-09. [Design](07-security-design.md) | **in review**, [PR #57](https://github.com/mikebz/nfs-verification/pull/57): SEC-03 to SEC-09 are in the tree and the whole group was run against `gke-w1` (run `20260914-011748`, 2m45s). SEC-05 is red and stays red ([F-018](findings.md)), SEC-06 skips on a single-stack cluster, the rest pass. Review also rewrote three cases: SEC-04, which no longer reads the server at all and now asks a third node whether the locks survived; SEC-02, which probes a privileged operation rather than what `stat` prints ([F-021](findings.md)); and SEC-03, which now asks its question behind a gated directory, correcting [F-020](findings.md) |
 | 9 | Close out SCALE: SCALE-01 to SCALE-07 | not started |
 | 10 | Close out CHAOS: CHAOS-03, CHAOS-04, CHAOS-08 to CHAOS-18, and OBS-01's behavioral half | not started |
 | 11 | SKEW-01 to SKEW-03, conditional on preflight finding independent versioning | not started |
 
-### 5.3 Why this order
+### 5.4 Why this order
 
 Steps 1 to 4 built the foundation: the harness, the eleven cases that need no
 fault, the fault-injection package, and the grace and lock reclaim path.
@@ -470,7 +508,7 @@ Each maps to a real reported defect class, not speculation.
 | Crash on the delegation return path | CHAOS-08, core-dump blanket rule |
 | Lock acquisition failure tied to open-owner state | SEC-07, DATA-06 |
 | v4 clients mapping local IDs to `nobody` | SEC-01 |
-| Per-client export rules degrading to global access behind a proxy | SEC-04 |
+| Per-client export rules degrading to global access behind a proxy | SEC-05 for the access-control consequence, SEC-04 for the state-isolation one |
 | Inconsistent IPv4 / IPv4-mapped IPv6 client identity normalization | SEC-06 |
 | Deleting the server deployment renders outstanding PVs unusable | PROV-07, PROV-08, SCALE-06 |
 
@@ -491,8 +529,8 @@ These are decisions the plan made in the absence of an input. Each is a one-line
 
 1. Workload profile: 20 pods per volume, 4KiB to 1GiB files, 70/30 read/write.
 2. Scale targets: 50 volumes per cluster, 10 mounts per node.
-3. AUTH_SYS with `root_squash` on.
+3. AUTH_SYS. Whether root is squashed is no longer assumed: `-root-squash` states it where somebody knows, SEC-02 records it otherwise, and either way SEC-02 requires the same rule on every client.
 4. Node auto-repair and auto-upgrade disabled on the test node pool. If they are not, chaos results are invalid.
 5. Server workload sets `tolerationSeconds: 30`, and ungraceful node-loss testing applies the out-of-service taint. Without both, CHAOS-03 is blocked rather than failed. See the floor note in Section 3.8.
 
-Resolved since draft: failover SLO (60s process and graceful, 90s ungraceful node loss, against the `tuned` lease and grace profile); harness location (workstation, external, Kubernetes client only); lease and grace pinned to two explicit profiles rather than left at vendor defaults.
+Resolved since draft: failover SLO (60s process and graceful, 90s ungraceful node loss, against the `tuned` lease and grace profile); harness location (workstation, external, Kubernetes client only); lease and grace pinned to two explicit profiles rather than left at vendor defaults; `root_squash`, which was assumed on and is a deployment choice no case may invent.
