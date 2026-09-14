@@ -24,13 +24,13 @@ NFS RWX volumes present unique lifecycle challenges that do not exist for single
 1. **Dynamic provisioning and multi-node attachment**: When a claim is created, the provisioner
    must mint an export, allocate backing storage, configure server-side export permissions, and
    bind the volume. Because the volume is RWX, multiple pods on distinct worker nodes must mount
-   the identical export simultaneously and perform concurrent I/O without cross-contamination (`PROV-01`).
+   the identical export simultaneously and verify cross-node read-after-close data integrity (`PROV-01`).
 2. **Safe deletion and unmount ordering**: A `hard` NFSv4.1 mount blocks indefinitely if its backing
    export is destroyed while still mounted. Kubernetes Storage Object in Use Protection
    (`kubernetes.io/pvc-protection`) must prevent claim deletion while pods mount the volume (`PROV-03`),
    and teardown must never delete a claim until all mounting pods have departed the API ([F-001](findings.md)).
 3. **Reclaim policies (`Delete` vs `Retain`)**: A claim with reclaim policy `Delete` must remove the
-   underlying PV and wipe backing storage to prevent capacity leaks (`PROV-01`). A claim with `Retain`
+   underlying PV API object to ensure storage reclamation by the provisioner (`PROV-01`). A claim with `Retain`
    must preserve the PV in `Released` phase upon claim deletion, allowing manual clearance of `claimRef`,
    successful re-binding to a new claim, and verified data preservation (`PROV-06`).
 4. **Volume expansion (`PROV-04`, `PROV-11`)**: CSI drivers advertising `EXPAND_VOLUME` must grow
@@ -42,8 +42,7 @@ NFS RWX volumes present unique lifecycle challenges that do not exist for single
    working RWX volume matching the source data. When unsupported, requests must either be rejected outright
    or remain unready, never falsely reporting `readyToUse`.
 6. **Resilience during control plane outages (`PROV-07`, `PROV-08`)**: Creating or deleting claims
-   while the NFS server pod is down must not cause orphaned exports, permanent API deadlocks, or leaked
-   storage once the server recovers.
+   while the NFS server pod is down must not cause permanent API deadlocks or leaked claim/PV objects once the server recovers.
 7. **Concurrency, churn, and boundary naming (`PROV-02`, `PROV-09`, `PROV-10`)**: Rapid creation and
    deletion cycles (100 cycles) must not leak file descriptors or export IDs; 20 concurrent claims must
    receive unique export paths and IDs; and maximum-length RFC 1123 resource names (253 characters)
@@ -96,9 +95,9 @@ the provisioning test group adheres to strict architectural safety rules:
 3. **Reclaim policy restoration on success**: `PROV-06` mutates the PV reclaim policy to `Retain` to assert
    PV preservation across claim deletion, and restores it to `Delete` at the conclusion of the test run to allow
    automated framework teardown to reclaim backing storage (a mid-test failure before this point leaves the PV in `Retain` for manual triage).
-4. **Capability-guarded skips**: Tests requiring multi-node scheduling (`PROV-01`, `PROV-05`, `PROV-10`)
-   guard execution via `requireCap(t, f.Caps.MultiNode, ...)`. A single-worker cluster skips cleanly
-   rather than failing.
+4. **Capability-guarded checks**: Tests requiring multi-node scheduling (`PROV-01`, `PROV-05`, `PROV-10`)
+   guard execution via `requireCap(t, f.Caps.MultiNode, ...)`. While preflight enforces at least two
+   schedulable workers as a precondition for the suite, the case-level guard enforces capability discipline.
 
 ---
 
@@ -112,10 +111,10 @@ Detailed requirements and profile-driven timing live in [`01-test-plan.md`](01-t
 | **PROV-02** | Shipped | 20 RWX claims provisioned concurrently: all bind, unique export IDs and paths, zero server restarts | NFS server export concurrency |
 | **PROV-03** | Shipped | Delete PVC while pod still mounts: PVC stays Terminating with pvc-protection finalizer; I/O continues; deletes after pod departure | Kubernetes Storage Object In Use Protection, [F-001](findings.md) |
 | **PROV-04** | Shipped | Volume expansion: if supported, capacity grows, data intact, zero client restarts; if unsupported, API rejects cleanly | Kubernetes Volume Expansion, CSI `EXPAND_VOLUME` |
-| **PROV-05** | Shipped | Snapshot and restore: restored volume mounts RWX across two nodes, content matches source; if unsupported, clean rejection or stays unready | CSI `CREATE_DELETE_SNAPSHOT`, VolumeSnapshot API |
+| **PROV-05** | Shipped | Snapshot and restore: restored volume mounts RWX across two nodes, content matches source; if unsupported, clean rejection or stays unready | CSI snapshot creation and restore (VolumeSnapshot API) |
 | **PROV-06** | Shipped | Reclaim policy Retain: PV survives claim deletion in Released phase; after claimRef cleared, rebinds to new PVC with data intact | Kubernetes Reclaim Policies |
-| **PROV-07** | Shipped | Provision PVC while server pod is down: claim stays Pending during outage; binds and mounts after recovery with zero orphaned exports | Storage control plane resilience, Archetype A gateway |
-| **PROV-08** | Shipped | Delete PVC while server pod is down (pod unmounted first): PVC and PV complete deletion after server recovery without storage leaks | CSI controller unpublish/delete retry, [F-001](findings.md) |
+| **PROV-07** | Shipped | Provision PVC while server pod is down: claim stays Pending during outage; binds, mounts, and verifies data after server recovery | Storage control plane resilience, Archetype A gateway |
+| **PROV-08** | Shipped | Delete PVC while server pod is down (pod unmounted first): PVC and PV complete deletion after server recovery | CSI controller unpublish/delete retry, [F-001](findings.md) |
 | **PROV-09** | Shipped | Rapid create/delete churn (100 cycles): zero export ID exhaustion, zero fd leaks, zero server restarts | Provisioner state machine stability under churn |
 | **PROV-10** | Shipped | Volume name edge cases: admission rejects 1000-char and uppercase names; 253-char boundary name provisions, binds, mounts, and passes cross-node I/O | RFC 1123 DNS subdomain syntax, export configuration parser |
 | **PROV-11** | Shipped | Two-stage expansion under active I/O: background write load runs without errors; capacity expands; all committed writes survive | CSI Online Expansion, active workload integrity |
@@ -210,7 +209,7 @@ Detailed requirements and profile-driven timing live in [`01-test-plan.md`](01-t
   6. Wait for replacement server pod to become `Ready`.
   7. Wait for PVC to bind and consumer pod to become `Ready`.
   8. Write test payload to share and verify checksum on read-back.
-  9. Delete pod and claim, verifying no orphaned exports remain after recovery.
+  9. Delete pod and claim, verifying clean API removal of claim and PV.
 
 ### PROV-08: PVC deletion during server pod outage
 - **Steps**:
@@ -220,7 +219,7 @@ Detailed requirements and profile-driven timing live in [`01-test-plan.md`](01-t
   4. Delete the PVC while the server pod is offline.
   5. Wait for replacement server pod to recover and become `Ready`.
   6. Wait for the PVC to finish deleting and leave the API.
-  7. If reclaim policy was `Delete`, verify the backing PV is completely removed without storage leaks.
+  7. If reclaim policy was `Delete`, verify the backing PV completes API deletion after server recovery.
 
 ### PROV-09: Rapid create/delete churn (100 cycles)
 - **Steps**:
@@ -263,7 +262,9 @@ Detailed requirements and profile-driven timing live in [`01-test-plan.md`](01-t
 
 - **Pod-first scheduling for WaitForFirstConsumer**: Under `volumeBindingMode: WaitForFirstConsumer`,
   the Kubernetes PV controller does not bind claims until pod scheduling constraints are evaluated.
-  The harness always pairs claim creation with consumer pod creation before checking bind status ([F-002](findings.md)).
+  In cases mounting storage (`PROV-01`, `PROV-02`, `PROV-03`, etc.), the harness pairs claim creation
+  with consumer pod creation before checking bind status ([F-002](findings.md)). Churn testing (`PROV-09`)
+  exercises raw control-plane PVC creation/deletion cycles directly without consumer pods.
 - **Unmount confirmation precedes deletion**: Storage Object in Use Protection prevents premature API
   deletion, but client kernel threads hang if the export disappears while mounted. Teardown waits for
   pod API departure and unmount confirmation before issuing claim deletion ([F-001](findings.md)).
@@ -289,8 +290,6 @@ Detailed requirements and profile-driven timing live in [`01-test-plan.md`](01-t
 - **[F-009](findings.md) (Export has no per-volume quota)**: Directory-backed NFS exports without quota
   enforcement report the entire backing filesystem capacity via `statvfs`. Client `df` reflects the underlying disk,
   so control-plane claim expansion does not change the bytes reported by `df`.
-- **[F-015](findings.md) (Bound timeouts on slow provisioners)**: Provisioning latency varies across cloud
-  environments and provisioners. Timeouts are configured centrally in `pkg/framework` constants rather than literals.
 
 ---
 
