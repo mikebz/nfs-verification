@@ -143,7 +143,7 @@ func (f *Framework) CloneVolume(ctx context.Context, spec CloneVolumeSpec) (*cor
 		spec.Source.Path,
 		spec.Size,
 		spec.Options,
-		fmt.Sprintf("creating the clone PV over %s: %%w", spec.Source),
+		fmt.Sprintf("creating the clone PV over %s: %%w", strings.ReplaceAll(spec.Source.String(), "%", "%%")),
 		"creating the claim for the clone PV: %w",
 	)
 }
