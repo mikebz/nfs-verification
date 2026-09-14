@@ -101,11 +101,21 @@ the boundary discussion rather than to the server owner, because a suite that
 relaxed this would have nothing left to say about append behaviour anywhere.
 
 What changed is what the failure tells you. It now names the missing records per
-appender, because the claim is deleted at teardown and the artifact bundle keeps
-pod logs rather than the share: whatever the message says is the only evidence
-the run leaves behind. One appender's whole contribution gone is a different
-story from scattered singles across all four, and the old message could not tell
-them apart.
+appender, because at the time the claim was deleted at teardown and the artifact
+bundle kept pod logs rather than the share: whatever the message said was the
+only evidence the run left behind. One appender's whole contribution gone is a
+different story from scattered singles across all four, and the old message
+could not tell them apart.
+
+**Updated 2026-09-14**: that last constraint is gone. The bundle now keeps the
+files a case names as its evidence, on a pass as well as a failure, and DATA-02
+names the appended file, so the run leaves the file the count was taken from and
+not only the count. The per-appender message stays: it is the reading the case
+did, and it is what reaches whoever triages the failure before they open
+anything. The next red run should be triaged against both, since the file can
+answer questions the message was never asked — where in the file the survivors
+sit, and whether the lost writer's offsets were claimed by one other client or
+several.
 
 ### What it means for the system under test
 

@@ -367,6 +367,7 @@ next phase has to rediscover:
 - **A tool the image may not carry is probed before it is used**, and its absence reports blocked, naming the flag that fixes it. A missing tool is never a protocol finding.
 - **Timing and correctness bounds live in `pkg/slo`**, against the profile preflight pinned. No case carries a literal.
 - **What a case reports** (passed, failed, blocked, skipped) is defined in the repository `README.md`, and the same four words mean the same four things in every section.
+- **A case names the file it argues from, and the harness keeps a copy.** The two things every claim rests on are destroyed by teardown: the workload's record stream, which lives on the pod's own filesystem, and the file on the share a data case is about. Both are copied into the bundle before anything is deleted, on a pass as well as a failure, because a passing case's numbers are exactly the ones nobody can re-derive later. One named file per registration, capped, and nothing walks the share: a rule that collected a directory would try to bring DATA-10's hundred thousand entries home.
 
 ### 4.2 Execution by Category
 
@@ -389,6 +390,8 @@ E2E tests are organized strictly by category. Each category has its own test fil
 ### 4.3 Triage runbook
 
 Every failure produces `artifacts/<run-id>/` containing `environment.json`, server logs, client pod logs, `/proc/mounts` from every involved node, dmesg, Kubernetes Events, any core dumps, and a timeline of injected faults.
+
+Every run, failed or not, also leaves the files each case named as its evidence: the workload's record stream, which is the input to every recovery number, and the one file on the share a data case is making a claim about. They are listed in `evidence.txt` with what was captured and what was cut off at the size cap, because a truncated file and a whole one are indistinguishable from their bytes.
 
 Triage order:
 
