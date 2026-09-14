@@ -127,22 +127,22 @@ File locking in NFSv4.1 rests on principles that differ fundamentally from local
 Conventions shared across the suite (multi-node capability guards, bounded timeouts,
 profile-driven timing) live in [`01-test-plan.md`](01-test-plan.md) Section 4.1.
 
-| Case | Status | Assertion | Source & Basis |
-|---|---|---|---|
-| **DATA-01** | Shipped | 4 pods concurrently write 1MiB files: all checksums match, no cross-contamination, exactly 4 directory entries | Multi-writer file partitioning, RFC 8881 Sec 10 |
-| **DATA-02** | Shipped | 4 pods append 50 records each with `O_APPEND`: zero torn records; exact line count carries caveat | Implementation caveat: NFSv4.1 lacks atomic append; torn records are corruption |
-| **DATA-03** | Shipped | Close-to-open: pod A writes & closes, pod B opens & reads: B sees A's data | RFC 8881 Sec 10 (Client cache consistency) |
-| **DATA-04** | Shipped | Negative visibility: pod A writes without closing: reader sees empty, prefix, or full data; never unwritten bytes | Deployment-specific boundary check; immediate visibility after close |
-| **DATA-05** | Shipped | Cross-node locking: mutual exclusion holds for whole-file (`flock`) and disjoint byte ranges (`locktool`) | RFC 8881 Sec 9 (Locking & Share reservations) |
-| **DATA-06** | Shipped | Pod holding byte-range lock is force-deleted: lock released within one lease period; node unmounts cleanly | Linux client lease model; teardown unmount ordering ([F-001](findings.md)) |
-| **DATA-07** | Shipped | Two pods open file with `O_DIRECT`: writes land at disjoint offsets, bypass page cache, reads match written data | Linux `open(2)` `O_DIRECT`, block-aligned I/O |
-| **DATA-08** | Shipped | `noac` mount option on clone PV: cross-node reader sees unclosed write immediately | `nfs(5)` attribute caching options |
-| **DATA-09** | Shipped | Same-node open unlink creates `.nfs*` silly rename; cross-node unlink returns old data or `ESTALE`; rename follows file | Linux VFS silly-rename semantics, RFC 8881 file handles |
-| **DATA-10** | Shipped | 100k entries directory listed while 50k entries deleted: listing completes, 0 invented names; server pod restarts and dmesg error markers monitored | READDIR cache reuse safety under pressure |
-| **DATA-11** | Shipped | Sparse file write: holes read as zero, logical size matches; hole punch recorded as unsupported on NFSv4.1 | RFC 7862 (NFSv4.2 `DEALLOCATE` unavailable on 4.1); zero-fill intact |
-| **DATA-12** | Shipped | `fsync` durability: write records with `conv=fsync`, SIGKILL server: 100% acknowledged records survive with verdict `correct` | RFC 8881 Sec 18.3 (`COMMIT` durability guarantee) |
-| **DATA-13** | Shipped | Uncommitted durability: write records without `fsync`, SIGKILL server: uncommitted records may be absent or short, 0 `wrong` | RFC 8881 Sec 18.3 (Uncommitted writes lack durability) |
-| **DATA-14** | Deferred | 20 pods, 70/30 read/write soak for 1h with `fio`: zero checksum mismatches | Deferred to `SCALE-07` soak testing (see Section 6) |
+| Case | Assertion | Source & Basis |
+|---|---|---|
+| **DATA-01** | ✅ 4 pods concurrently write 1MiB files: all checksums match, no cross-contamination, exactly 4 directory entries | Multi-writer file partitioning, RFC 8881 Sec 10 |
+| **DATA-02** | ✅ 4 pods append 50 records each with `O_APPEND`: zero torn records; exact line count carries caveat | Implementation caveat: NFSv4.1 lacks atomic append; torn records are corruption |
+| **DATA-03** | ✅ Close-to-open: pod A writes & closes, pod B opens & reads: B sees A's data | RFC 8881 Sec 10 (Client cache consistency) |
+| **DATA-04** | ✅ Negative visibility: pod A writes without closing: reader sees empty, prefix, or full data; never unwritten bytes | Deployment-specific boundary check; immediate visibility after close |
+| **DATA-05** | ✅ Cross-node locking: mutual exclusion holds for whole-file (`flock`) and disjoint byte ranges (`locktool`) | RFC 8881 Sec 9 (Locking & Share reservations) |
+| **DATA-06** | ✅ Pod holding byte-range lock is force-deleted: lock released within one lease period; node unmounts cleanly | Linux client lease model; teardown unmount ordering ([F-001](findings.md)) |
+| **DATA-07** | ✅ Two pods open file with `O_DIRECT`: writes land at disjoint offsets, bypass page cache, reads match written data | Linux `open(2)` `O_DIRECT`, block-aligned I/O |
+| **DATA-08** | ✅ `noac` mount option on clone PV: cross-node reader sees unclosed write immediately | `nfs(5)` attribute caching options |
+| **DATA-09** | ✅ Same-node open unlink creates `.nfs*` silly rename; cross-node unlink returns old data or `ESTALE`; rename follows file | Linux VFS silly-rename semantics, RFC 8881 file handles |
+| **DATA-10** | ✅ 100k entries directory listed while 50k entries deleted: listing completes, 0 invented names; server pod restarts and dmesg error markers monitored | READDIR cache reuse safety under pressure |
+| **DATA-11** | ✅ Sparse file write: holes read as zero, logical size matches; hole punch recorded as unsupported on NFSv4.1 | RFC 7862 (NFSv4.2 `DEALLOCATE` unavailable on 4.1); zero-fill intact |
+| **DATA-12** | ✅ `fsync` durability: write records with `conv=fsync`, SIGKILL server: 100% acknowledged records survive with verdict `correct` | RFC 8881 Sec 18.3 (`COMMIT` durability guarantee) |
+| **DATA-13** | ✅ Uncommitted durability: write records without `fsync`, SIGKILL server: uncommitted records may be absent or short, 0 `wrong` | RFC 8881 Sec 18.3 (Uncommitted writes lack durability) |
+| **DATA-14** | **Deferred:** 20 pods, 70/30 read/write soak for 1h with `fio`: zero checksum mismatches | Deferred to `SCALE-07` soak testing (see Section 6) |
 
 ## 5. Detailed case walkthroughs (Shipped cases)
 
