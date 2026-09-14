@@ -36,14 +36,18 @@ type PodSpec struct {
 	// RunAsUser and RunAsGroup set the pod's identity. The identity cases need
 	// a pod that is not root, because the property under test is whether the
 	// uid a pod writes as is the uid another pod reads back.
-	//
-	// fsGroup and supplementary groups are deliberately absent. fsGroup makes
-	// kubelet walk the volume and chown every file in it on each mount, which
-	// on a share of any size is slow enough to dominate a case and destructive
-	// enough to erase the ownership the identity cases are asserting on. It
-	// arrives with SEC-03, which is the case that means to measure that.
 	RunAsUser  *int64
 	RunAsGroup *int64
+	// FSGroup is the supplementary group Kubernetes grants the pod, and the gid
+	// it will rewrite the volume's ownership to on a volume plugin that
+	// supports ownership management.
+	//
+	// Leave it nil unless the case under way is about fsGroup itself. On a
+	// plugin that does support it, kubelet walks the volume and chowns every
+	// file on each mount, which on a share of any size is slow enough to
+	// dominate a case and destructive enough to erase the ownership the other
+	// identity cases assert on.
+	FSGroup *int64
 }
 
 // podTemplateData is what manifests/client-pod.yaml is rendered against.
@@ -63,10 +67,12 @@ type podTemplateData struct {
 // podSecurityData carries the identity fields as values rather than pointers,
 // because a template cannot dereference one.
 type podSecurityData struct {
-	SetUser  bool
-	User     int64
-	SetGroup bool
-	Group    int64
+	SetUser    bool
+	User       int64
+	SetGroup   bool
+	Group      int64
+	SetFSGroup bool
+	FSGroup    int64
 }
 
 type podMountData struct {
@@ -96,13 +102,16 @@ func (f *Framework) PodBuilder(spec PodSpec) (*corev1.Pod, error) {
 	for k, v := range spec.Labels {
 		data.Labels[k] = v
 	}
-	if spec.RunAsUser != nil || spec.RunAsGroup != nil {
+	if spec.RunAsUser != nil || spec.RunAsGroup != nil || spec.FSGroup != nil {
 		data.Security = &podSecurityData{}
 		if spec.RunAsUser != nil {
 			data.Security.SetUser, data.Security.User = true, *spec.RunAsUser
 		}
 		if spec.RunAsGroup != nil {
 			data.Security.SetGroup, data.Security.Group = true, *spec.RunAsGroup
+		}
+		if spec.FSGroup != nil {
+			data.Security.SetFSGroup, data.Security.FSGroup = true, *spec.FSGroup
 		}
 	}
 	for i, m := range spec.Mounts {

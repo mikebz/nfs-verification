@@ -319,7 +319,36 @@ The design for `DATA-14` is preserved for `SCALE-07`: one job per pod over an is
   intermittently lose records without tearing under heavy load. A failure message must cite the protocol
   limitation and report missing record IDs.
 
-## 9. Sources
+## 9. What changed after this was written
+
+- **Consolidation by test groups.** To align design documentation directly with the
+  test groups implemented in `test/e2e/`, the contents of this document have been
+  consolidated to authoritatively cover all Data Path cases (`DATA-01` through `DATA-14`),
+  unifying early delivery cases (`DATA-01` to `DATA-05`) with `DATA-06` to `DATA-13` and `locktool`.
+- **DATA-14 was deferred**, with the flag, the helper, the script and the target
+  removed. Section 6.
+- **DATA-11's requirement moved into the test plan.** Narrowing the punch from an
+  assertion to a record changes what is verified, so Section 3.2's row was
+  amended rather than the narrowing living only here.
+- **The run happened.** On 2026-09-11, against a three-worker GKE cluster on
+  Kubernetes v1.37 with the in-cluster `nfs-server-provisioner`, DATA-05 to
+  DATA-09 and DATA-11 to DATA-13 passed along with CHAOS-06; DATA-11's punch half
+  reported blocked, which is the documented answer on a busybox image.
+- **DATA-10 has since been run, and passes.** Three times: `full-e2e-20260912b`,
+  `pr46-data-20260913` and `pr47-data-20260913`, taking between four and five
+  minutes each. The export holds 100k entries, and a listing racing 50k
+  deletions returned 98–99k of them, which is lawful rather than a defect. This
+  supersedes the sentence that stood here saying it was unmeasured; the test
+  plan's Section 5.2 carries the runs it came from.
+- **F-006 and F-007** came out of this phase: `scripts/lock-probe.sh` passed
+  `flock -w` to an applet that has no `-w`, and two cases reported results they
+  had not measured. Both are fixed and recorded in [`findings.md`](findings.md).
+
+Still open: whether `locktool` should grow a `dio` subcommand if real images turn
+out not to carry `oflag=direct`, and whether any server reclaims a sub-file range
+differently from a whole-file one.
+
+## 10. Sources
 
 - [RFC 8881](https://www.rfc-editor.org/rfc/rfc8881.html), NFSv4.1:
   - Section 9: File Locking and Share Reservations (`LOCK`, `LOCKT`, `LOCKU`).
@@ -337,3 +366,4 @@ The design for `DATA-14` is preserved for `SCALE-07`: one job per pod over an is
   `fs/nfs/nfs4state.c` (lock state and `EIO` on lost lock).
 - Kubernetes [Persistent Volumes](https://kubernetes.io/docs/concepts/storage/persistent-volumes/)
   and [CSI specification](https://github.com/container-storage-interface/spec/blob/master/spec.md).
+
