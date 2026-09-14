@@ -2,10 +2,11 @@
 
 Author: mikebz@
 Created: 2026-09-11
-Updated: 2026-09-13
-Status: **in progress.** Serves the complete Observability test group:
-OBS-02, OBS-03, OBS-04, and OBS-06 shipped; OBS-05 and OBS-07 designed; OBS-01
-configuration half shipped, behavioral half deferred to Step 10.
+Updated: 2026-09-14
+Status: **in progress.** Delivery step 7 (OBS-06 shipped in [PR #29](https://github.com/mikebz/nfs-verification/pull/29);
+OBS-01, OBS-05, OBS-07 designed). OBS-02 and OBS-03 shipped in Step 4 ([PR #8](https://github.com/mikebz/nfs-verification/pull/8));
+OBS-04 shipped in Step 2b ([PR #4](https://github.com/mikebz/nfs-verification/pull/4)). Consolidated here to serve
+the complete Observability test group.
 Serves: OBS-01 through OBS-07. Requirements in [`01-test-plan.md`](01-test-plan.md) Section 3.5.
 Builds on [`03-chaos-operations-design.md`](03-chaos-operations-design.md),
 [`04-grace-and-lock-reclaim-design.md`](04-grace-and-lock-reclaim-design.md) and
@@ -49,18 +50,18 @@ operator sees comes from the outside: the kubelet watching a container, and the
 Kubernetes API server tracking objects. That covers less of NFS than its volume of
 events and metrics suggests, and the boundary decides what these cases can honestly claim.
 
-| Question an operator asks | Answered from outside? | Channel |
+| Question an operator asks | Answered from outside (control plane)? | Telemetry channel / condition |
 |---|---|---|
-| Is the process running; did it restart, and when | Yes | Container status / Events (OBS-02) |
+| Is the process running; did it restart, and when | Yes | Container status (`ServerStartedAfter`) / Events (OBS-02) |
 | How much CPU and memory is it using | Yes | Kubelet stats summary (OBS-05) |
 | Was it OOMKilled | Yes, when a limit exists | Container termination reason |
 | Did a client fail to mount a volume, and why | Yes | Kubelet Events on client pod (OBS-04) |
 | How full is a volume | Yes, when driver implements stats | Kubelet stats summary (OBS-06) |
-| **Is the server answering NFS at all** | **No** (lifecycle only) | Service readiness probe (OBS-01) |
+| **Is the server answering NFS at all** | **No** (lifecycle only) | Service readiness probe targeting port 2049 / health probe (OBS-01) |
 | **Is it in grace, did reclaims succeed** | **No** (invisible to kubelet) | Container runtime log stream (OBS-03) |
-| **NFS operation and error rates (READ, WRITE, LOCK)** | **No** | Server metrics endpoint (OBS-07) |
-| **Clients holding state, locks held, open files** | **No** | Server metrics endpoint (OBS-07) |
-| **Which export is busy or failing** | **No** | Server-side metrics / logs |
+| **NFS operation and error rates (READ, WRITE, LOCK)** | **No** (invisible to control plane) | Server metrics endpoint (OBS-07; conditional on server publishing series) |
+| **Clients holding state, locks held, open files** | **No** (invisible to control plane) | Server metrics endpoint (OBS-07; conditional on server publishing series) |
+| **Which export is busy or failing** | **No** | Server-side logs or per-export metrics |
 
 The dividing line: the outside channel reports the **container** and the
 **Kubernetes storage plumbing**, and says nothing about the **NFS protocol**.
@@ -75,12 +76,12 @@ thinner still:
   against and no kubelet OOMKill either: the host node's OOM killer fires instead, which is
   less visible and destabilizes the whole node. That is OBS-05's finding.
 
-## 3. The four telemetry channels and harness readers
+## 3. Telemetry channels, readers, and configuration checks
 
-The suite builds four minimal readers, using existing workstation credentials and
-avoiding any dependency on an in-cluster monitoring stack:
+The suite builds minimal readers and collectors, using existing workstation credentials without
+requiring an in-cluster monitoring stack:
 
-1. **The Kubelet Stats Summary Reader** (`pkg/framework/kubelet.go`):
+1. **The Kubelet Stats Summary Reader** (`pkg/framework/kubeletstats.go`):
    Accessed via the API server's node proxy (`/api/v1/nodes/<node>/proxy/stats/summary`).
    Returns per-volume capacity, used bytes, and available bytes with the kubelet's own
    timestamp and PVC reference (`OBS-06`), and container memory working set from the same
@@ -90,26 +91,27 @@ avoiding any dependency on an in-cluster monitoring stack:
    Crucially, timestamps come from the container runtime (RFC 3339 nano), not from the server's
    own log formatting. It classifies lines into grace entry or exit using an exit-first heuristic,
    reading previous-container logs across pod restarts (`OBS-03`).
-3. **The Event Stream Collector** (`pkg/framework/`):
-   Watches Kubernetes `v1.Event` objects associated with client and server pods. Watches for
-   `Warning` events such as `FailedMount` and `FailedAttachVolume` on client pods (`OBS-04`),
-   and pod restart / killing events during server failovers (`OBS-02`).
+3. **The Event Poller and Container Status Reader** (`pkg/framework/events.go` and `pkg/framework/status.go`):
+   Polls Kubernetes `v1.Event` objects associated with client pods (`WaitPodEvent` in `events.go`)
+   for `Warning` events such as `FailedMount` and `FailedAttachVolume` (`OBS-04`). For failover traces
+   (`OBS-02`), reads container restart timestamps via `ServerStartedAfter` (`pkg/framework/status.go`)
+   and server logs (`ServerLog`).
 4. **The Server Metrics Pod Proxy Reader**:
    Accessed via the API server's pod proxy (`/api/v1/namespaces/<ns>/pods/<pod>:<port>/proxy/metrics`).
    Implements a minimal text scanner for the Prometheus exposition format, checking series
    survival and counter resets across server restarts (`OBS-07`).
-5. **The Service Readiness Probe Checker**:
+5. **The Service Readiness Probe Configuration Checker**:
    Inspects the server pod's container spec and the backing Service's endpoints. Asserts that
-   readiness is driven by an active network probe targeting the NFS service (port 2049) rather
-   than container lifecycle (`OBS-01`).
+   readiness is driven by an active probe targeting the NFS service (port 2049 or an NFS-aware health probe)
+   rather than container lifecycle alone (`OBS-01`).
 
 Both proxy subresources (`nodes/proxy` and `pods/proxy`) represent direct control-plane
 access. Neither runs a scraper inside the cluster, and neither execs into nodes.
 
-## 4. The uniform verdict rule
+## 4. The uniform verdict contract
 
 A missing telemetry reading or broken signal must be reported consistently across all cases.
-An earlier draft mixed skip, fail, and block arbitrarily; the suite now enforces one rule:
+An earlier draft mixed skip, fail, and block arbitrarily; the suite establishes this uniform contract:
 
 | What happened | Verdict | Rationale |
 |---|---|---|
@@ -122,6 +124,10 @@ than skips, so the lack of visibility is highlighted as a deployment defect. Sim
 when an export reports the entire backing disk rather than the claim's provisioned size,
 OBS-06 fails on its quota assertion (F-009).
 
+Where secondary channel errors occur during multi-channel discovery (e.g., `ServerLog` returning
+an error in OBS-02 while container start status is available), the harness logs the channel failure
+as a diagnostic while asserting that at least one primary operator channel recorded the event.
+
 ## 5. What these seven cases assert
 
 Shared conventions (one clock per measurement, waiting past the target, bounds from `pkg/slo`)
@@ -130,12 +136,12 @@ specific to the Observability test group:
 
 | Case | Assertion | Source & Basis |
 |---|---|---|
-| **OBS-01** | The deployment declares a readiness probe targeting the NFS port, and endpoints drop when NFS is unavailable | Kubernetes probes and Service endpoints. Readiness tracking container lifecycle alone is a failure |
-| **OBS-02** | Failover duration is observable with a timestamp in metrics or logs | Kubernetes Events and server log stream. Fails on silence or missing timestamps |
+| **OBS-01** | The deployment declares an active readiness probe targeting the NFS service, and endpoints drop when NFS is unavailable | Kubernetes probes and Service endpoints. An active probe targeting port 2049 or an NFS health check is verified in configuration (Step 7); behavioral drop of endpoints when frozen is verified with a fault in Step 10 |
+| **OBS-02** | Failover leaves a timestamped trace an operator can find; duration is measurable | Container start status (`ServerStartedAfter`) and server log stream (`ServerLog`). Fails if neither provides a timestamped record after the fault |
 | **OBS-03** | Grace period entry and exit are observable with timestamps; duration is bounded by `2 * LeaseSeconds` | RFC 8881 Section 8.4.2. Read from runtime log timestamps; fails if unannounced (F-008) |
-| **OBS-04** | A mount failure on a client pod surfaces as an actionable `Warning` Event naming the volume | Kubelet mount logic. Fails if silent, or if the pod ever falsely reports `Ready` |
+| **OBS-04** | A mount failure on a client pod surfaces as an actionable `Warning` Event naming the volume; pod does not report Ready | Kubelet mount logic. Fails if no mount failure event arrives within budget, if the event omits the volume name, or if container status reports Ready. Wording of the failure cause is logged as a diagnostic warning because kubelet controls event phrasing |
 | **OBS-05** | The server container declares a memory limit, and its working set is readable and moves under load | Kubelet Summary API. Fails if no limit is declared; never manufactures an OOMKill |
-| **OBS-06** | Kubelet volume usage agrees with pod `df` within tolerance, both move with writes, and quota applies | CSI `NodeGetVolumeStats` capability. Fails if unannounced or if reported total is backing disk (F-009) |
+| **OBS-06** | Kubelet volume usage agrees with pod `df` within tolerance, both move with writes, and quota applies | CSI `NodeGetVolumeStats` capability. Kubelet stats summary (`pkg/framework/kubeletstats.go`) compared against pod `df -P -k` (`pkg/framework/volumeusage.go`). Fails if unannounced or if reported total is backing disk (F-009) |
 | **OBS-07** | Server metrics answer before and after restart; counters persist or reset cleanly | Prometheus metrics scraping. Fails if no metrics endpoint is exposed |
 
 ## 6. Detailed case walkthroughs
@@ -145,30 +151,32 @@ specific to the Observability test group:
   wedges in kernel `D` state or deadlocks, the container stays running, Kubernetes reports the pod
   `Ready`, and the Service continues routing new client connections to a dead export.
 - **Design**:
-  - *Configuration half (shipped)*: Inspects the StatefulSet/Pod container spec. Asserts that
-    a readiness probe exists, targets port 2049 (or an NFS health script), and that the Service's
-    endpoints track it. Fails if readiness merely mirrors container lifecycle.
-  - *Behavioral half (Step 10)*: Injects a freeze fault (SIGSTOP via node agent) without killing
+  - *Configuration half (Step 7, designed)*: Inspects the StatefulSet/Pod container spec. Asserts that
+    an active readiness probe exists, targeting port 2049 or an NFS-aware health script, and that
+    the Service's endpoints track it. Fails if readiness merely mirrors container lifecycle.
+  - *Behavioral half (Step 10, planned)*: Injects a freeze fault (SIGSTOP via node agent) without killing
     the container. Asserts that Service endpoints drop the pod within the probe's blind window
     (`periodSeconds * failureThreshold`).
+  - *Scope boundary*: A TCP socket probe on port 2049 verifies listener reachability, not full NFS protocol
+    correctness. The configuration check verifies that an active probe exists to detach dead containers;
+    the Step 10 fault verifies the drop behavior under process hang.
 
 ### OBS-02: Failover event is observable
 - **Problem**: When a failover happens, an operator needs to see when it started, when it finished,
   and how long it took, using standard operational tooling.
 - **Design**:
-  - Monitors two independent channels: Kubernetes Events on the server pod/StatefulSet, and the
-    server container's log stream.
-  - Validates that at least one channel provides timestamped markers for outage start and recovery.
-  - Asserts that the computed duration is positive and bounded by the failover SLO.
-  - Accepts either channel, but records whether the finding came from Kubernetes (container restart)
-    or NFS (daemon recovery).
+  - Monitors two timestamped channels: the server container's log stream (`ServerLog`) and container
+    restart status (`ServerStartedAfter`).
+  - Asserts that at least one channel provides timestamped evidence after the fault. Fails on complete silence.
+  - Records the client's measured outage duration against the time since the fault.
+  - Logs whether the trace came from Kubernetes container restart status or NFS daemon logs.
 
 ### OBS-03: Grace period entry and exit
 - **Problem**: Grace re-entry loops mimic hung clients in front of a healthy server (the most common
   misdiagnosis in NFS on Kubernetes, per triage runbook Section 4.3). A suite cannot evaluate failover
   correctness without observing grace.
 - **Design**:
-  - Uses [`pkg/framework/grace.go`](file:///home/mikebz/src/nfs-verification/pkg/framework/grace.go) to stream logs.
+  - Uses `pkg/framework/grace.go` to stream logs via the Kubernetes Pod API.
   - Evaluates lines using container runtime timestamps, bypassing unstandardized server log formats.
   - Applies an **exit-first classification rule**: a line containing "grace" is checked for exit/lift
     keywords first, because common exit phrases contain the entry phrase prefixed with a negation.
@@ -181,10 +189,11 @@ specific to the Observability test group:
 - **Design**:
   - Manufactures a deterministic mount failure by creating a static PV pointing at an unroutable IP
     (RFC 5737 documentation prefix `192.0.2.0/24`) and creating a client pod referencing its claim.
-  - Watches for a `Warning` Event on the pod with reason `FailedMount` or `FailedAttachVolume`.
-  - Asserts that the event message is actionable: it must name the PVC, PV, or pod, and state an error
-    cause (mount, attach, timeout, or nfs).
-  - Asserts that the pod never falsely transitions to `Ready`.
+  - Polls for a `Warning` Event on the pod with reason `FailedMount` or `FailedAttachVolume` using `WaitPodEvent`.
+  - Asserts that the event message is actionable: it must name the PVC, PV, or pod. If the message omits
+    the specific failure cause (e.g. mount, attach, timeout, or nfs), that fact is logged as a diagnostic
+    warning rather than failing the case, because kubelet owns the message formatting.
+  - Samples the pod status after receiving the event and asserts that no container reports `Ready`.
 
 ### OBS-05: Server memory ceiling and working set telemetry
 - **Problem**: Userspace NFS servers historically suffer memory leaks or cache growth under small-file
@@ -192,7 +201,7 @@ specific to the Observability test group:
   OOM kills occur instead of container-level remediation.
 - **Design**:
   - Asserts the server container declares `resources.limits.memory`. An undeclared ceiling fails the case.
-  - Reads `container.memory.workingSetBytes` from the Kubelet Stats Summary via `nodes/proxy`.
+  - Reads `container.memory.workingSetBytes` from the Kubelet Stats Summary via `nodes/proxy` (`pkg/framework/kubeletstats.go`).
   - Applies a bounded metadata workload (creating 1,000 files) and asserts that the working set gauge moves.
   - **Never manufactures an OOMKill**: deliberately exhausting memory would crash cluster storage and
     take down unrelated workloads (Rule 7).
@@ -202,11 +211,14 @@ specific to the Observability test group:
   Furthermore, RWX shares often report the host node's root filesystem capacity rather than the claim's
   provisioned size, making capacity alerts meaningless.
 - **Design**:
-  - Reads `pvc.usedBytes` and `pvc.capacityBytes` from the Kubelet Stats Summary via `nodes/proxy`.
-  - Reads used and available space inside the pod using `df -B1` over `pods/exec`.
-  - Writes a 128 MiB verification file with `conv=fsync`.
-  - Asserts that both the kubelet summary and `df` move by the write delta.
-  - Asserts that kubelet and `df` agree within a tight tolerance derived from the kubelet sampling interval.
+  - Reads `pvc.usedBytes` and `pvc.capacityBytes` from the Kubelet Stats Summary via `nodes/proxy`
+    (`FreshKubeletUsage` in `pkg/framework/kubeletstats.go`).
+  - Reads used and available space inside the pod using `df -P -k` over `pods/exec` (`ClaimUsage` in
+    `pkg/framework/volumeusage.go`), converted to bytes.
+  - Writes a 128 MiB verification file using `yes | head -c ... > ...; sync` (`WriteBytes` in `pkg/framework/io.go`).
+  - Asserts that both the kubelet summary and `df` move by at least the movement floor.
+  - Asserts that kubelet and `df` agree within a tight tolerance derived from the smaller of the provisioned
+    claim size and the capacity the workload is shown.
   - **Asserts quota enforcement**: the reported capacity must match the claim size (e.g. 1 GiB). If it
     reports the 10 GiB backing filesystem, the case fails with [F-009](findings.md).
 
@@ -258,5 +270,8 @@ specific to the Observability test group:
   for the Kubelet Stats Summary format.
 - Kubernetes [Pod API](https://kubernetes.io/docs/reference/kubernetes-api/workload-resources/pod-v1/)
   for log options, container statuses, and probe definitions.
+- Kubernetes [probes](https://kubernetes.io/docs/concepts/configuration/liveness-readiness-startup-probes/)
+  and [Service endpoints](https://kubernetes.io/docs/concepts/services-networking/service/),
+  for readiness probe behavior and Service endpoint tracking, which is OBS-01's subject.
 - [CSI Specification](https://github.com/container-storage-interface/spec/blob/master/spec.md) for
   `NodeGetVolumeStats` optional capability.

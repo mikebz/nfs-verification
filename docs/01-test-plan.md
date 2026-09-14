@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-10
-Updated: 2026-09-13
+Updated: 2026-09-14
 Version: 1.0 (v1 scope)
 
 This is the requirements and delivery document: what gets verified, why, the

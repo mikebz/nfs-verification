@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-10
-Updated: 2026-09-13
+Updated: 2026-09-14
 Status: shipped, delivery step 4 ([PR #8](https://github.com/mikebz/nfs-verification/pull/8))
 Serves: CHAOS-05, CHAOS-06, CHAOS-07. (OBS-02 and OBS-03 design consolidated
 into [`06-observability-design.md`](06-observability-design.md)). Requirements in
@@ -40,10 +40,11 @@ duration.
 - **The lock probe**: a second client attempting a new lock once per second,
   logging outcomes in step 3's `OK|ERR <index> <epoch>` format on its own
   filesystem, so one parser serves both.
-- **Five cases**: CHAOS-05 (five failovers, per-cycle assertions), CHAOS-06
-  (locks across a failover, read from both ends), CHAOS-07 (a new lock attempted
-  during grace), OBS-02 (a failover an operator can see), OBS-03 (grace entry and
-  exit measurable).
+- **Five cases originally shipped**: CHAOS-05 (five failovers, per-cycle assertions),
+  CHAOS-06 (locks across a failover, read from both ends), CHAOS-07 (a new lock attempted
+  during grace), OBS-02 (a failover an operator can see), and OBS-03 (grace entry and
+  exit measurable). *(Note: OBS-02 and OBS-03 design ownership is now consolidated in
+  [`06-observability-design.md`](06-observability-design.md)).*
 - **Gate naming**: the chaos prefix marks a case that injures the server whatever
   plan section it comes from, which is why OBS-02 and OBS-03 carry it.
 
@@ -145,11 +146,11 @@ observable, more than one entry per cycle fails CHAOS-05. Where it is not, the
 case still asserts five recoveries and says the check was unavailable. One
 missing signal should produce one failure, not four.
 
-**OBS-02 accepts any timestamped channel an operator can reach**, and records
-which one answered. It fails on silence and on a pair of timestamps that cannot
-be turned into a duration. It does not fail when only Kubernetes answered, but it
-says so: a restart count tells an operator a pod restarted, not that NFS failed
-over.
+**OBS-02 was decided here (now authoritatively maintained in [`06-observability-design.md`](06-observability-design.md))**:
+it accepts any timestamped channel an operator can reach, and records which one answered.
+It fails on silence and on a pair of timestamps that cannot be turned into a duration.
+It does not fail when only Kubernetes answered, but it says so: a restart count tells
+an operator a pod restarted, not that NFS failed over.
 
 ## 6. Whole-file locks, and what was deferred
 
