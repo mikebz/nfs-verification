@@ -100,11 +100,15 @@ test-e2e:
 #
 #   make test-case CASE=TestDataConcurrentAppendToOneFile FLAGS="-storage-class=nfs"
 #
-# CASE is anchored as a whole name, so it names one function rather than every
-# function it happens to prefix.
+# CASE must be a plain test function name, and is anchored into the -run
+# expression. It is checked rather than passed through, because -run takes a
+# regular expression: CASE='TestData.*' would quietly run the whole data
+# category, and a triage step that reproduces a different set of tests from the
+# one asked for is worse than no triage step.
 .PHONY: test-case
 test-case:
 	@test -n "$(CASE)" || { echo "set CASE to a test function, e.g. CASE=TestDataConcurrentAppendToOneFile"; exit 1; }
+	@[[ "$(CASE)" =~ ^Test[A-Za-z0-9_]*$$ ]] || { echo "CASE must be one test function name, matching ^Test[A-Za-z0-9_]*$$, not a pattern: got '$(CASE)'"; exit 1; }
 	go test $(PKG) -v -timeout=120m -run '^$(CASE)$$' $(COMMON)
 
 .PHONY: clean

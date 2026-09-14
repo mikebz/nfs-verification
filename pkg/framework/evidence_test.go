@@ -1,6 +1,7 @@
 package framework
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,13 +11,15 @@ import (
 
 // The evidence registry decides what survives a case, and every way it can go
 // wrong is quiet: a name that escapes the bundle directory, a second
-// registration that overwrites the first, a read command that returns success
-// and no bytes for a directory, or a truncated capture that looks like a whole
-// file. None of those fails a run. They are found here or on the day someone
-// opens the bundle and finds the wrong thing in it.
+// registration that overwrites the first, a read that returns success and no
+// bytes for a directory, a truncated capture that looks like a whole file, or a
+// previous run's file left sitting where this run's should be. None of those
+// fails a run, because collection is deliberately not allowed to fail a case.
+// They are found here or on the day someone opens the bundle and argues from
+// the wrong file.
 
 // TestKeepPodFileRejectsUnusableNames covers the names that would write outside
-// the bundle or collide with something already in it.
+// the bundle or over the manifest that describes it.
 //
 // Steps:
 //  1. Register each bad name against a fixture.
@@ -41,6 +44,10 @@ func TestKeepPodFileRejectsUnusableNames(t *testing.T) {
 
 // TestKeepPodFileRejectsAPathlessRegistration covers the registration that
 // would produce an empty file in the bundle and no sign of why.
+//
+// Steps:
+//  1. Register a name against a path that is only whitespace.
+//  2. Assert it is refused.
 func TestKeepPodFileRejectsAPathlessRegistration(t *testing.T) {
 	f := &Framework{CaseID: "DATA-02", state: &caseState{}}
 	if err := f.KeepPodFile("reader", "   ", "data02.log"); err == nil {
@@ -83,6 +90,10 @@ func TestKeepPodFileRefusesToOverwriteAnEarlierRegistration(t *testing.T) {
 // TestKeepPodFileResolvesTheCaseName checks that a logical pod name is resolved
 // at registration. Collection happens in teardown, where nothing is left to
 // turn "writer" into the object that actually holds the file.
+//
+// Steps:
+//  1. Register a file against the logical pod name a case would use.
+//  2. Assert the registration holds the prefixed object name instead.
 func TestKeepPodFileResolvesTheCaseName(t *testing.T) {
 	f := &Framework{CaseID: "CHAOS-05", state: &caseState{}}
 	if err := f.KeepPodFile("writer", "/tmp/load.log", "load.log"); err != nil {
@@ -97,8 +108,35 @@ func TestKeepPodFileResolvesTheCaseName(t *testing.T) {
 	}
 }
 
-// TestEvidenceReadCommandRunsUnderARealShell runs the generated command against
-// real files, because every failure mode it has looks like success: a quoting
+// TestWorkloadLogNameIsKeepable checks the name the workload builds for its own
+// log against the rule that will judge it.
+//
+// The workload validates this before it launches, because the name is longer
+// than the id it is built from: an id of 60 characters passes CheckScriptID and
+// produces a 69-character evidence name. Finding that out after the workload is
+// already writing would stop a running measurement to complain about a
+// filename.
+//
+// Steps:
+//  1. Build the evidence name from a plausible case id and assert it is
+//     keepable.
+//  2. Build it from an id that is itself valid but too long to survive the
+//     suffix, and assert the name is refused.
+func TestWorkloadLogNameIsKeepable(t *testing.T) {
+	if err := checkEvidenceName("load-" + "chaos05" + ".log"); err != nil {
+		t.Errorf("an ordinary case id produced an unkeepable log name: %v", err)
+	}
+	long := strings.Repeat("a", 60)
+	if err := CheckScriptID(long); err != nil {
+		t.Fatalf("the premise of this test is wrong: %q is not a valid script id: %v", long, err)
+	}
+	if err := checkEvidenceName("load-" + long + ".log"); err == nil {
+		t.Error("a 69-character evidence name was accepted, so the workload would fail after launching")
+	}
+}
+
+// TestReadEvidenceScriptRunsUnderARealShell runs the script that fetches a file
+// out of a pod, because every failure mode it has looks like success: a quoting
 // slip reads the wrong path, and a directory or a missing file that exits zero
 // puts an empty file in the bundle and calls it the evidence.
 //
@@ -109,8 +147,9 @@ func TestKeepPodFileResolvesTheCaseName(t *testing.T) {
 //     which is what the caller reads truncation off.
 //  3. Point it at a directory and at a missing path, and assert each exits
 //     non-zero with something on stderr rather than returning no bytes.
-func TestEvidenceReadCommandRunsUnderARealShell(t *testing.T) {
+func TestReadEvidenceScriptRunsUnderARealShell(t *testing.T) {
 	sh := lookOrSkip(t, "sh", "head")
+	script := materializeScript(t, "read-evidence.sh")
 	dir := t.TempDir()
 
 	small := filepath.Join(dir, "an odd' name.log")
@@ -118,7 +157,7 @@ func TestEvidenceReadCommandRunsUnderARealShell(t *testing.T) {
 	if err := os.WriteFile(small, []byte(body), 0o644); err != nil {
 		t.Fatalf("writing the small file: %v", err)
 	}
-	out, err := exec.Command(sh, "-c", evidenceReadCmd(small, 64)).Output()
+	out, err := exec.Command(sh, script, small, "64").Output()
 	if err != nil {
 		t.Fatalf("reading the small file: %v", err)
 	}
@@ -130,7 +169,7 @@ func TestEvidenceReadCommandRunsUnderARealShell(t *testing.T) {
 	if err := os.WriteFile(big, []byte(strings.Repeat("a", 500)), 0o644); err != nil {
 		t.Fatalf("writing the large file: %v", err)
 	}
-	out, err = exec.Command(sh, "-c", evidenceReadCmd(big, 100)).Output()
+	out, err = exec.Command(sh, script, big, "100").Output()
 	if err != nil {
 		t.Fatalf("reading the large file: %v", err)
 	}
@@ -142,7 +181,7 @@ func TestEvidenceReadCommandRunsUnderARealShell(t *testing.T) {
 		{"a directory", dir},
 		{"a missing file", filepath.Join(dir, "never-written.log")},
 	} {
-		cmd := exec.Command(sh, "-c", evidenceReadCmd(tc.path, 64))
+		cmd := exec.Command(sh, script, tc.path, "64")
 		var stderr strings.Builder
 		cmd.Stderr = &stderr
 		out, err := cmd.Output()
@@ -152,6 +191,100 @@ func TestEvidenceReadCommandRunsUnderARealShell(t *testing.T) {
 		if strings.TrimSpace(stderr.String()) == "" {
 			t.Errorf("%s failed without saying why, so the manifest would have nothing to record", tc.what)
 		}
+	}
+}
+
+// TestClassifyCaptureKeepsTheRightBytes covers the decision between a whole
+// file, a truncated one and a read that died holding something.
+//
+// The caller asks for one byte past the cap so that these can be told apart,
+// and this is where that extra byte is spent. Keeping it would make every
+// file at the cap look truncated; dropping the bytes a failed read returned
+// would throw away the only ones a wedged mount will ever give up.
+//
+// Steps:
+//  1. Classify a short read, a read exactly at the cap, and a read one byte
+//     over it, and assert only the last is truncated.
+//  2. Classify a failed read that returned bytes, and assert the bytes are kept
+//     and a problem is recorded.
+//  3. Classify a failed read that returned nothing, and assert the problem
+//     carries what the pod put on stderr.
+func TestClassifyCaptureKeepsTheRightBytes(t *testing.T) {
+	data, truncated, problem := classifyCapture(ExecResult{Stdout: "four"})
+	if string(data) != "four" || truncated || problem != "" {
+		t.Errorf("a short read gave (%q, %v, %q), want the bytes, not truncated, no problem", data, truncated, problem)
+	}
+
+	atCap := strings.Repeat("a", EvidenceMaxBytes)
+	data, truncated, _ = classifyCapture(ExecResult{Stdout: atCap})
+	if len(data) != EvidenceMaxBytes || truncated {
+		t.Errorf("a file exactly at the cap gave %d bytes, truncated=%v; it is whole", len(data), truncated)
+	}
+
+	data, truncated, _ = classifyCapture(ExecResult{Stdout: atCap + "a"})
+	if len(data) != EvidenceMaxBytes || !truncated {
+		t.Errorf("a file one byte over the cap gave %d bytes, truncated=%v", len(data), truncated)
+	}
+
+	data, _, problem = classifyCapture(ExecResult{Stdout: "OK 1 100\nOK 2 101\n", Err: errors.New("stream closed")})
+	if string(data) != "OK 1 100\nOK 2 101\n" {
+		t.Errorf("a read that died partway discarded the %d bytes it had; those are the ones nearest the fault", len(data))
+	}
+	if problem == "" {
+		t.Error("a read that died partway reported no problem, so the bundle would look complete")
+	}
+
+	data, _, problem = classifyCapture(ExecResult{Stderr: "not a regular file\n", Err: errors.New("exit 3")})
+	if len(data) != 0 {
+		t.Errorf("a failed read with no output produced %d bytes", len(data))
+	}
+	if !strings.Contains(problem, "not a regular file") {
+		t.Errorf("the problem does not carry what the pod said: %q", problem)
+	}
+}
+
+// TestClearStaleEvidenceRemovesAnEarlierRunsFile covers the stale artifact.
+// Reusing a run id is ordinary -- `-run-id` exists for it, and triage step 1 is
+// to run one case again -- and without this the previous run's file sits in the
+// case directory next to a manifest saying this run captured nothing. That does
+// not look like a gap, it looks like evidence, which is the worst failure this
+// code has available to it.
+//
+// Steps:
+//  1. Clear a destination that holds an earlier run's file, and assert it is
+//     gone and no error is reported.
+//  2. Clear a destination that holds nothing, and assert that is not an error.
+//  3. Clear a destination something else occupies and cannot be removed, and
+//     assert the error names the path, so the capture records why rather than
+//     writing over it.
+func TestClearStaleEvidenceRemovesAnEarlierRunsFile(t *testing.T) {
+	dir := t.TempDir()
+
+	dest := filepath.Join(dir, "data02.log")
+	if err := os.WriteFile(dest, []byte("records from a run that is not this one\n"), 0o644); err != nil {
+		t.Fatalf("seeding the earlier file: %v", err)
+	}
+	if err := clearStaleEvidence(dest); err != nil {
+		t.Fatalf("clearing an earlier run's file: %v", err)
+	}
+	if _, err := os.Stat(dest); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the earlier run's file survived (%v), so triage would read it as this run's evidence", err)
+	}
+
+	if err := clearStaleEvidence(filepath.Join(dir, "never-captured.log")); err != nil {
+		t.Errorf("clearing a destination that holds nothing reported an error: %v", err)
+	}
+
+	occupied := filepath.Join(dir, "occupied.log")
+	if err := os.MkdirAll(filepath.Join(occupied, "child"), 0o755); err != nil {
+		t.Fatalf("seeding the occupied destination: %v", err)
+	}
+	err := clearStaleEvidence(occupied)
+	if err == nil {
+		t.Fatal("a destination that could not be cleared reported success")
+	}
+	if !strings.Contains(err.Error(), occupied) {
+		t.Errorf("the error does not name the path it could not clear: %v", err)
 	}
 }
 

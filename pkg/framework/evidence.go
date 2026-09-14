@@ -2,7 +2,9 @@ package framework
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -24,8 +26,8 @@ import (
 // A case therefore names what it argues from, and the harness copies it out
 // while the pods are still alive, whether the case passed or failed. A passing
 // case is not the boring case here: CHAOS-05 passes with five recovery
-// measurements in it, and F-017 is a run whose numbers needed re-deriving
-// afterwards.
+// measurements in it, and F-017 is a run whose numbers had to be re-derived
+// after the fact.
 //
 // Three rules keep that from becoming a problem of its own:
 //
@@ -35,9 +37,25 @@ import (
 //   - A byte cap, and a capture that hit it says so and says how large the file
 //     really was. A bundle holding the first megabyte of a larger file while
 //     looking like a whole file is worse than one holding nothing.
-//   - Its own clock, per file. Reading a file on a hard NFSv4.1 mount whose
-//     export is gone blocks forever and this runs during teardown, so one
-//     unreachable file must not cost the bundle every other one.
+//   - Its own clock, per file, so that one file nobody can read does not cost
+//     the bundle every other one.
+//
+// # What the clock cannot do
+//
+// A read of a file on a hard NFSv4.1 mount whose export has gone does not fail.
+// It blocks in uninterruptible I/O, and cancelling the exec stream from here
+// ends the harness's wait without ending the pod's read: no timeout available
+// to a Kubernetes client can interrupt a process in that state. So a capture
+// taken after a fault can leave a blocked reader behind in the pod.
+//
+// That is survivable, and it is survivable by design rather than by luck. The
+// pod then does not terminate inside PodTerminateTimeout, and teardown already
+// treats a pod that will not leave the API as the hazard it is: it keeps that
+// pod's claim instead of destroying an export under a live mount, which is the
+// sequence F-001 is about. The cost of a blocked capture is therefore a leaked
+// claim, recoverable by hand, and never a wedged node. collectEvidence says so
+// in the error it returns, so the run reports the trade rather than leaving it
+// to be discovered.
 
 // EvidenceMaxBytes is the most of any one file the bundle keeps. The things
 // cases name are a record-per-second log and a file of short records, both far
@@ -46,7 +64,8 @@ import (
 const EvidenceMaxBytes = 1 << 20
 
 // evidenceReadTimeout bounds one file's copy, per file for the same reason
-// nodeInspectTimeout is per node.
+// nodeInspectTimeout is per node. It covers the read and the size query
+// together: a truncated file must not cost twice what a whole one costs.
 const evidenceReadTimeout = 10 * time.Second
 
 // evidenceManifest names the index of what was captured, which is the half a
@@ -103,14 +122,18 @@ func (f *Framework) KeepPodFile(pod, path, name string) error {
 }
 
 // checkEvidenceName rejects anything that is not a plain filename, and the
-// manifest's own name. The name becomes a path under the bundle directory, so a
-// separator or a leading dot in it writes somewhere nobody asked for, and a
-// capture landing on the manifest would leave the bundle with no account of
-// what is in it.
+// manifest's own name. The name becomes a path under the bundle directory and
+// the id of the script that fetches the file, so a separator or a leading dot
+// in it writes somewhere nobody asked for, and a capture landing on the
+// manifest would leave the bundle with no account of what is in it.
+//
+// A helper that builds a name from a value a case chose validates it here
+// before it acts, not after: a registration refused halfway through a case
+// costs the evidence of everything that follows it.
 func checkEvidenceName(name string) error {
-	if !scriptID.MatchString(name) {
-		return fmt.Errorf("%q is not usable as an evidence name: it must start with a letter or digit and "+
-			"hold only letters, digits, dot, dash and underscore, since it becomes a filename in the bundle", name)
+	if err := CheckScriptID(name); err != nil {
+		return fmt.Errorf("%q is not usable as an evidence name, since it becomes a filename in the "+
+			"bundle: %w", name, err)
 	}
 	if name == evidenceManifest {
 		return fmt.Errorf("%q is the name of the manifest that says what the bundle holds; choose another", name)
@@ -155,7 +178,11 @@ func (f *Framework) collectEvidence(ctx context.Context) error {
 		}
 	}
 	if len(errs) > 0 {
-		return fmt.Errorf("evidence collection had gaps: %s", strings.Join(errs, "; "))
+		return fmt.Errorf("evidence collection had gaps: %s. A read that did not answer may still be "+
+			"running in the pod, because a hard NFSv4.1 mount whose export has gone blocks "+
+			"uninterruptibly and no client-side timeout ends that; the pod will then not terminate, and "+
+			"teardown keeps its claim rather than destroying an export under a live mount "+
+			"(docs/findings.md F-001)", strings.Join(errs, "; "))
 	}
 	if f.T != nil {
 		f.T.Logf("evidence written to %s", dir)
@@ -166,45 +193,91 @@ func (f *Framework) collectEvidence(ctx context.Context) error {
 // captureEvidence copies one file, on its own clock.
 func (f *Framework) captureEvidence(ctx context.Context, dir string, it evidenceItem) evidenceRow {
 	row := evidenceRow{Name: it.name, Pod: it.pod, Path: it.path}
+	dest := filepath.Join(dir, it.name)
+	if err := clearStaleEvidence(dest); err != nil {
+		row.Problem = err.Error()
+		return row
+	}
+	// One byte past the cap, so that a file exactly at the cap is reported
+	// complete and one byte over it is reported truncated.
+	script, err := RunScript("read-evidence.sh", it.name, it.path, strconv.Itoa(EvidenceMaxBytes+1))
+	if err != nil {
+		row.Problem = fmt.Sprintf("the read could not be built: %v", err)
+		return row
+	}
 	readCtx, cancel := context.WithTimeout(ctx, evidenceReadTimeout)
 	defer cancel()
 
-	// One byte past the cap, so that a file exactly at the cap is reported
-	// complete and one byte over it is reported truncated.
-	res := f.C.Exec(readCtx, Namespace, it.pod, "main", "sh", "-c", evidenceReadCmd(it.path, EvidenceMaxBytes+1))
-	data := []byte(res.Stdout)
-	if res.Err != nil {
-		row.Problem = fmt.Sprintf("unreadable within %s: %v: %s",
-			evidenceReadTimeout, res.Err, strings.TrimSpace(res.Stderr))
-		// Whatever arrived before it stopped is kept anyway. A read that dies
-		// partway through is what a file on a mount whose export has gone looks
-		// like, and the lines that did come back are the ones nearest whatever
-		// happened. The manifest says the file is short and why, so nobody
-		// mistakes it for the whole thing.
-		if len(data) == 0 {
-			return row
-		}
+	data, truncated, problem := classifyCapture(f.C.Exec(readCtx, Namespace, it.pod, "main", "sh", "-c", script))
+	row.Truncated, row.Problem = truncated, problem
+	if truncated {
+		// The same deadline, not a fresh one: a file that hit the cap must not
+		// be able to spend twice the per-file bound and starve the files after
+		// it. A size the pod does not answer in what is left costs the manifest
+		// a number, which is the cheap half of this.
+		row.PodSize = f.evidenceSize(readCtx, it)
 	}
-	if len(data) > EvidenceMaxBytes {
-		data = data[:EvidenceMaxBytes]
-		row.Truncated = true
-		row.PodSize = f.evidenceSize(ctx, it)
+	if len(data) == 0 && problem != "" {
+		return row
 	}
 	row.Bytes = len(data)
-	if err := os.WriteFile(filepath.Join(dir, it.name), data, 0o644); err != nil {
+	if err := os.WriteFile(dest, data, 0o644); err != nil {
 		row.Problem = fmt.Sprintf("read from the pod but not written: %v", err)
 		row.Bytes = 0
 	}
 	return row
 }
 
+// clearStaleEvidence removes whatever is already at a capture's destination.
+//
+// A run that reuses a run id is an ordinary thing to do: -run-id exists for it,
+// and triage step 1 is to run one case again. Without this, the previous run's
+// file stays in the case directory next to a manifest saying this run captured
+// nothing, which is the worst of the failure modes available here. It does not
+// look like a gap; it looks like evidence, and it is evidence of a different
+// run. A destination that cannot be cleared fails the capture rather than
+// letting the file be passed off as this run's.
+func clearStaleEvidence(dest string) error {
+	if err := os.Remove(dest); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("an earlier file at %s could not be removed, so nothing was captured rather "+
+			"than risk reporting it as this run's: %v", dest, err)
+	}
+	return nil
+}
+
+// classifyCapture decides what one read produced: the bytes worth keeping,
+// whether the file was longer than the cap, and what to say about it.
+//
+// Separate from the exec so it can be tested without a cluster, because every
+// mistake available here is silent. Keeping one byte too many turns a whole
+// file into a truncated one; discarding what a failed read returned throws away
+// the only bytes a wedged mount will ever give up; and reporting a problem the
+// bundle does not carry sends triage looking for a file that is not there.
+func classifyCapture(res ExecResult) (data []byte, truncated bool, problem string) {
+	data = []byte(res.Stdout)
+	if len(data) > EvidenceMaxBytes {
+		data, truncated = data[:EvidenceMaxBytes], true
+	}
+	if res.Err != nil {
+		// Whatever arrived before it stopped is kept anyway. A read that dies
+		// partway through is what a file on a mount whose export has gone looks
+		// like, and the lines that did come back are the ones nearest whatever
+		// happened. The manifest says the file is short and why, so nobody
+		// mistakes it for the whole thing.
+		problem = fmt.Sprintf("unreadable within %s: %v: %s",
+			evidenceReadTimeout, res.Err, strings.TrimSpace(res.Stderr))
+	}
+	return data, truncated, problem
+}
+
 // evidenceSize asks the pod how large the file really is. Only a truncated
 // capture needs it, so the common path costs no second exec, and a pod that
 // will not answer costs the manifest a number rather than the capture.
+//
+// One command with no control flow, so it stays at the call site rather than
+// becoming a script, the same as the stat and df one-liners in io.go.
 func (f *Framework) evidenceSize(ctx context.Context, it evidenceItem) string {
-	sizeCtx, cancel := context.WithTimeout(ctx, evidenceReadTimeout)
-	defer cancel()
-	out, err := f.C.MustSh(sizeCtx, Namespace, it.pod, "main", "stat -c %s "+shellQuote(it.path))
+	out, err := f.C.MustSh(ctx, Namespace, it.pod, "main", "stat -c %s "+shellQuote(it.path))
 	if err != nil {
 		return ""
 	}
@@ -213,20 +286,6 @@ func (f *Framework) evidenceSize(ctx context.Context, it evidenceItem) string {
 		return ""
 	}
 	return out
-}
-
-// evidenceReadCmd is the shell that reads one file out of a pod: its bytes on
-// stdout and nothing else, and a non-zero exit with a reason on stderr when the
-// path is not a regular file.
-//
-// The directory case is refused here rather than at registration because what a
-// path names is only knowable inside the pod, and `head` on a directory is an
-// error on some implementations and an empty success on others. An empty
-// success would put a zero-byte file in the bundle and call it the evidence.
-func evidenceReadCmd(path string, limit int) string {
-	quoted := shellQuote(path)
-	return fmt.Sprintf("if [ ! -f %s ]; then echo 'not a regular file' >&2; exit 3; fi; head -c %d %s",
-		quoted, limit, quoted)
 }
 
 // evidenceRow is what the manifest says about one registered file.

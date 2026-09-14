@@ -493,8 +493,16 @@ func TestDataConcurrentAppendToOneFile(t *testing.T) {
 	// teardown, so without this the only account of the loss is whatever the
 	// failure message below thought to ask. Registered before a single record
 	// is written, since a case that dies mid-append is the interesting one.
-	// Read back through the reader, which never appends: a copy taken from an
-	// appender could be served out of that client's own cache.
+	//
+	// Copied through the reader, which is the pod the assertion reads through,
+	// so the artifact is the file the case argued about rather than a second
+	// opinion from somewhere else. That pod's node is shared with an appender
+	// whenever the cluster has fewer nodes than appenders, and the read may
+	// therefore be served from that node's cache -- the client is the node, not
+	// the pod (docs/findings.md F-019). That caveat belongs to the case's own
+	// read, which picks the reader's node above and is what the count is taken
+	// from; an artifact taken from anywhere else would be evidence about a
+	// different read.
 	if err := f.KeepPodFile(reader, path, "data02.log"); err != nil {
 		t.Fatalf("keeping the appended file: %v", err)
 	}

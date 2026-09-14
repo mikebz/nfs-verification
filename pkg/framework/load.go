@@ -85,6 +85,16 @@ func (f *Framework) StartWriteLoadSpec(ctx context.Context, spec WriteLoadSpec) 
 	}
 	w := &WriteLoad{f: f, Pod: f.Name(pod), Dir: dir,
 		log: "/tmp/load-" + id + ".log", run: "/tmp/load-" + id + ".run"}
+	// The log is the input to every timing claim a chaos case makes, and it
+	// lives on the pod's own filesystem, so it goes with the pod at teardown
+	// unless something copies it out. The name it lands under in the bundle is
+	// longer than the id it is built from, so it is checked before anything
+	// runs: an id this rejects would otherwise stop a workload that is already
+	// writing, and refusing to start is the honest failure of the two.
+	logName := "load-" + id + ".log"
+	if err := checkEvidenceName(logName); err != nil {
+		return nil, fmt.Errorf("the workload in %s would log to an unkeepable name: %w", w.Pod, err)
+	}
 	script, err := RunScript("write-load.sh", id, dir, w.run, w.log,
 		strconv.Itoa(RecordBytes), fsync)
 	if err != nil {
@@ -93,12 +103,10 @@ func (f *Framework) StartWriteLoadSpec(ctx context.Context, spec WriteLoadSpec) 
 	if _, err := f.C.MustSh(ctx, Namespace, w.Pod, "main", script); err != nil {
 		return nil, err
 	}
-	// The log is the input to every timing claim a chaos case makes, and it
-	// lives on the pod's own filesystem, so it goes with the pod at teardown
-	// unless something copies it out. Registered here rather than at Stop,
-	// because a case that fails before it stops the workload is the one whose
-	// numbers most need re-deriving, and it never reaches Stop.
-	if err := f.KeepPodFile(w.Pod, w.log, "load-"+id+".log"); err != nil {
+	// Registered here rather than at Stop, because a case that fails before it
+	// stops the workload is the one whose numbers most need re-deriving, and it
+	// never reaches Stop.
+	if err := f.KeepPodFile(w.Pod, w.log, logName); err != nil {
 		return nil, fmt.Errorf("keeping the workload log of %s: %w", w.Pod, err)
 	}
 	if err := Poll(ctx, FastPoll, 2*time.Minute, func(ctx context.Context) (bool, error) {

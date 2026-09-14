@@ -59,7 +59,9 @@ every fault is explicitly enumerated, safe-guarded, and tracked:
   here, and it lives on the writer pod's own filesystem, so it used to go with the pod at
   teardown. The workload now registers it as case evidence, which is copied into the bundle
   on a pass as well as a failure. A passing CHAOS-05 carries five recovery measurements, and
-  without the log none of them can be re-derived; F-017 is a run whose numbers had to be.
+  without the log none of them can be re-derived: F-017 is a run whose durations had to be
+  re-checked after the fact, and it could only be settled because the numbers measured inside
+  the pods were still available to compare against the ones the workstation reported.
 
 ### Platform and network fault roadmap (Step 10)
 The remaining operations close out the CHAOS matrix in Step 10:
