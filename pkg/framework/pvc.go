@@ -335,44 +335,16 @@ func (f *Framework) CreateBrokenNFSVolume(ctx context.Context, spec BrokenNFSSpe
 		// producing the Event the case is looking for.
 		spec.Options = []string{"vers=4.1", "soft", "timeo=30", "retrans=2", "retry=1"}
 	}
-	var pv corev1.PersistentVolume
-	if err := render("static-nfs-pv.yaml", map[string]any{
-		"Name": f.Name(spec.Name), "Labels": f.Labels(), "Size": spec.Size,
-		"Server": spec.Server, "Path": spec.Path, "Options": spec.Options,
-	}, &pv); err != nil {
-		return nil, nil, err
-	}
-	created, err := f.C.Kube.CoreV1().PersistentVolumes().Create(ctx, &pv, metav1.CreateOptions{})
-	if err != nil {
-		return nil, nil, fmt.Errorf("creating the broken PV: %w", err)
-	}
-	f.Defer(func(ctx context.Context) {
-		_ = IgnoreNotFound(f.C.Kube.CoreV1().PersistentVolumes().Delete(ctx, created.Name, metav1.DeleteOptions{}))
-	})
-
-	qty, err := resource.ParseQuantity(spec.Size)
-	if err != nil {
-		return nil, nil, fmt.Errorf("parsing size %q: %w", spec.Size, err)
-	}
-	empty := ""
-	claim := &corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{Name: f.Name(spec.Name), Namespace: Namespace, Labels: f.Labels()},
-		Spec: corev1.PersistentVolumeClaimSpec{
-			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany},
-			// By name and with an empty class: this claim must bind to the
-			// broken volume and to nothing else, least of all to a real one.
-			VolumeName:       created.Name,
-			StorageClassName: &empty,
-			Resources: corev1.VolumeResourceRequirements{
-				Requests: corev1.ResourceList{corev1.ResourceStorage: qty},
-			},
-		},
-	}
-	boundClaim, err := f.C.Kube.CoreV1().PersistentVolumeClaims(Namespace).Create(ctx, claim, metav1.CreateOptions{})
-	if err != nil {
-		return nil, nil, fmt.Errorf("creating the claim for the broken PV: %w", err)
-	}
-	return created, boundClaim, nil
+	return f.createStaticNFSVolumeAndClaim(
+		ctx,
+		spec.Name,
+		spec.Server,
+		spec.Path,
+		spec.Size,
+		spec.Options,
+		"creating the broken PV: %w",
+		"creating the claim for the broken PV: %w",
+	)
 }
 
 // SetPVReclaimPolicy changes the reclaim policy on a PersistentVolume.

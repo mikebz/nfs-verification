@@ -136,31 +136,51 @@ func (f *Framework) CloneVolume(ctx context.Context, spec CloneVolumeSpec) (*cor
 		return nil, nil, fmt.Errorf("a clone volume with no mount options is the same mount twice, " +
 			"which is the thing the cases using this exist to contrast against")
 	}
+	return f.createStaticNFSVolumeAndClaim(
+		ctx,
+		spec.Name,
+		spec.Source.Server,
+		spec.Source.Path,
+		spec.Size,
+		spec.Options,
+		fmt.Sprintf("creating the clone PV over %s: %%w", spec.Source),
+		"creating the claim for the clone PV: %w",
+	)
+}
+
+// createStaticNFSVolumeAndClaim creates a static PersistentVolume over an NFS export
+// and a PersistentVolumeClaim bound directly to it by name.
+func (f *Framework) createStaticNFSVolumeAndClaim(
+	ctx context.Context,
+	name, server, path, size string,
+	options []string,
+	pvErrFmt, claimErrFmt string,
+) (*corev1.PersistentVolume, *corev1.PersistentVolumeClaim, error) {
 	var pv corev1.PersistentVolume
 	if err := render("static-nfs-pv.yaml", map[string]any{
-		"Name": f.Name(spec.Name), "Labels": f.Labels(), "Size": spec.Size,
-		"Server": spec.Source.Server, "Path": spec.Source.Path, "Options": spec.Options,
+		"Name": f.Name(name), "Labels": f.Labels(), "Size": size,
+		"Server": server, "Path": path, "Options": options,
 	}, &pv); err != nil {
 		return nil, nil, err
 	}
 	created, err := f.C.Kube.CoreV1().PersistentVolumes().Create(ctx, &pv, metav1.CreateOptions{})
 	if err != nil {
-		return nil, nil, fmt.Errorf("creating the clone PV over %s: %w", spec.Source, err)
+		return nil, nil, fmt.Errorf(pvErrFmt, err)
 	}
 	f.Defer(func(ctx context.Context) {
 		_ = IgnoreNotFound(f.C.Kube.CoreV1().PersistentVolumes().Delete(ctx, created.Name, metav1.DeleteOptions{}))
 	})
 
-	qty, err := resource.ParseQuantity(spec.Size)
+	qty, err := resource.ParseQuantity(size)
 	if err != nil {
-		return nil, nil, fmt.Errorf("parsing size %q: %w", spec.Size, err)
+		return nil, nil, fmt.Errorf("parsing size %q: %w", size, err)
 	}
 	empty := ""
 	claim := &corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{Name: f.Name(spec.Name), Namespace: Namespace, Labels: f.Labels()},
+		ObjectMeta: metav1.ObjectMeta{Name: f.Name(name), Namespace: Namespace, Labels: f.Labels()},
 		Spec: corev1.PersistentVolumeClaimSpec{
 			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany},
-			// By name and with an empty class: this claim binds to the clone and
+			// By name and with an empty class: this claim binds to the static PV and
 			// to nothing else, least of all to a freshly provisioned volume.
 			VolumeName:       created.Name,
 			StorageClassName: &empty,
@@ -171,7 +191,7 @@ func (f *Framework) CloneVolume(ctx context.Context, spec CloneVolumeSpec) (*cor
 	}
 	bound, err := f.C.Kube.CoreV1().PersistentVolumeClaims(Namespace).Create(ctx, claim, metav1.CreateOptions{})
 	if err != nil {
-		return nil, nil, fmt.Errorf("creating the claim for the clone PV: %w", err)
+		return nil, nil, fmt.Errorf(claimErrFmt, err)
 	}
 	return created, bound, nil
 }
