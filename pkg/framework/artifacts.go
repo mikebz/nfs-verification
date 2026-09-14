@@ -71,7 +71,11 @@ func (f *Framework) dumpPods(ctx context.Context, dir, ns, selector, kind string
 	for i := range pods.Items {
 		p := &pods.Items[i]
 		if b, err := json.MarshalIndent(p, "", "  "); err == nil {
-			_ = os.WriteFile(filepath.Join(sub, p.Name+".json"), b, 0o644)
+			if err := os.WriteFile(filepath.Join(sub, p.Name+".json"), b, 0o644); err != nil {
+				return err
+			}
+		} else {
+			return err
 		}
 		for _, c := range p.Spec.Containers {
 			f.writeLogs(ctx, sub, ns, p.Name, c.Name, false)
@@ -137,17 +141,30 @@ func (f *Framework) dumpNodeState(ctx context.Context, dir string) error {
 		// One node at a time, each on its own short clock. A node with a wedged
 		// mount blocks on cat /proc/mounts, and the whole point of the bundle is
 		// that it still contains the other nodes when that happens.
-		nodeCtx, cancel := context.WithTimeout(ctx, nodeInspectTimeout)
-		if mounts, err := agent.ReadFile(nodeCtx, n, "/proc/mounts"); err == nil {
-			_ = os.WriteFile(filepath.Join(dir, "proc-mounts-"+n+".txt"), []byte(mounts), 0o644)
-		} else {
-			_ = os.WriteFile(filepath.Join(dir, "proc-mounts-"+n+".txt"),
-				[]byte(fmt.Sprintf("unreadable within %s: %v\n", nodeInspectTimeout, err)), 0o644)
+		err := func() error {
+			nodeCtx, cancel := context.WithTimeout(ctx, nodeInspectTimeout)
+			defer cancel()
+
+			if mounts, err := agent.ReadFile(nodeCtx, n, "/proc/mounts"); err == nil {
+				if err := os.WriteFile(filepath.Join(dir, "proc-mounts-"+n+".txt"), []byte(mounts), 0o644); err != nil {
+					return err
+				}
+			} else {
+				if err := os.WriteFile(filepath.Join(dir, "proc-mounts-"+n+".txt"),
+					[]byte(fmt.Sprintf("unreadable within %s: %v\n", nodeInspectTimeout, err)), 0o644); err != nil {
+					return err
+				}
+			}
+			if dmesg, err := agent.Dmesg(nodeCtx, n); err == nil {
+				if err := os.WriteFile(filepath.Join(dir, "dmesg-"+n+".txt"), []byte(dmesg), 0o644); err != nil {
+					return err
+				}
+			}
+			return nil
+		}()
+		if err != nil {
+			return err
 		}
-		if dmesg, err := agent.Dmesg(nodeCtx, n); err == nil {
-			_ = os.WriteFile(filepath.Join(dir, "dmesg-"+n+".txt"), []byte(dmesg), 0o644)
-		}
-		cancel()
 	}
 	return nil
 }
