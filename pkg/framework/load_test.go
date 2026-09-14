@@ -127,9 +127,6 @@ ERR 5 1700000004
 	}
 }
 
-// TestWriteLoadScriptRuns runs the rendered workload under a real shell. It
-// says the script is correct, not that NFS behaves: what the chaos cases assert
-// still needs a cluster.
 // TestWriteLoadScriptRuns runs the rendered workload under a real shell, in a
 // path with a space in it. It says the script is correct, not that NFS behaves:
 // what the chaos cases assert still needs a cluster.
