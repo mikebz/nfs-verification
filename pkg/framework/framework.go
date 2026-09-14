@@ -58,6 +58,9 @@ type caseState struct {
 	// unproven records claims whose mount was never observed to go away, keyed
 	// by claim name and holding the reason. Teardown refuses to delete these.
 	unproven map[string]string
+	// evidence is the files this case named as what it argues from, copied
+	// into the bundle before teardown destroys the pods and the claim.
+	evidence []evidenceItem
 }
 
 // SubTest returns a fixture bound to a subtest's *testing.T.
@@ -123,6 +126,16 @@ func New(t *testing.T, caseID string) *Framework {
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), DeleteTimeout)
 		defer cancel()
+		// Evidence first, and on every result. It is what the case argues from
+		// and the only copy of it: the workload's log dies with the pod and the
+		// share dies with the claim. A passing chaos case is not the boring
+		// case, since its recovery numbers came from a log nobody can re-read
+		// afterwards. Its own clock, like the bundle below it.
+		evidenceCtx, evidenceCancel := context.WithTimeout(ctx, EvidenceTimeout)
+		if err := f.collectEvidence(evidenceCtx); err != nil {
+			t.Logf("collecting evidence: %v", err)
+		}
+		evidenceCancel()
 		if t.Failed() {
 			// Artifacts before teardown: deleted pods tell no stories. On its
 			// own clock, so that a sick node cannot spend the whole budget here

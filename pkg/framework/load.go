@@ -93,6 +93,14 @@ func (f *Framework) StartWriteLoadSpec(ctx context.Context, spec WriteLoadSpec) 
 	if _, err := f.C.MustSh(ctx, Namespace, w.Pod, "main", script); err != nil {
 		return nil, err
 	}
+	// The log is the input to every timing claim a chaos case makes, and it
+	// lives on the pod's own filesystem, so it goes with the pod at teardown
+	// unless something copies it out. Registered here rather than at Stop,
+	// because a case that fails before it stops the workload is the one whose
+	// numbers most need re-deriving, and it never reaches Stop.
+	if err := f.KeepPodFile(w.Pod, w.log, "load-"+id+".log"); err != nil {
+		return nil, fmt.Errorf("keeping the workload log of %s: %w", w.Pod, err)
+	}
 	if err := Poll(ctx, FastPoll, 2*time.Minute, func(ctx context.Context) (bool, error) {
 		rep, err := w.Report(ctx)
 		if err != nil {

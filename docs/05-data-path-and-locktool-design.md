@@ -348,6 +348,15 @@ The design for `DATA-14` is preserved for `SCALE-07`: one job per pod over an is
 - **F-006 and F-007** came out of this phase: `scripts/lock-probe.sh` passed
   `flock -w` to an applet that has no `-w`, and two cases reported results they
   had not measured. Both are fixed and recorded in [`findings.md`](findings.md).
+- **DATA-02 now keeps the file it argues about.** F-016's account of the loss had
+  to be squeezed into the failure message, because the claim was deleted at
+  teardown and the bundle held pod logs rather than the share. A case can now name
+  one file as its evidence and the harness copies it into the bundle before
+  teardown, on a pass as well as a failure. The per-appender message stays: the
+  file says what is in it, the message says what the case made of it, and a
+  triage that starts from the second and checks it against the first is the point.
+  The size cap and the one-file rule are in the test plan's harness design
+  section, since they hold for any case.
 
 Still open: whether `locktool` should grow a `dio` subcommand if real images turn
 out not to carry `oflag=direct`, and whether any server reclaims a sub-file range

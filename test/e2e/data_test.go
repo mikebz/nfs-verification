@@ -445,9 +445,9 @@ const appendCaveat = "\n\nNote before filing: NFSv4.1 has no append operation. A
 //     assertion, so a mismatch carries the note that routes it.
 //  6. Whenever any of that fails, name the records that are missing, per
 //     appender. Not gated on the line count: a record written twice and
-//     another lost leave a file of exactly the right length. The file is
-//     deleted at teardown, so the message is the only evidence there will be
-//     of what the loss looked like.
+//     another lost leave a file of exactly the right length. The file itself
+//     is kept in the bundle, so the message is where to start rather than all
+//     there is.
 func TestDataConcurrentAppendToOneFile(t *testing.T) {
 	f := framework.New(t, "DATA-02")
 	ctx, cancel := caseCtx(t, 20*time.Minute)
@@ -487,6 +487,17 @@ func TestDataConcurrentAppendToOneFile(t *testing.T) {
 
 	path := fileIn("data02.log")
 	f.MustShf(ctx, pods[0], ": > %s", framework.Quote(path))
+
+	// The file itself, kept in the bundle. F-016 is a finding about which
+	// records went missing from this one file, and the claim is deleted at
+	// teardown, so without this the only account of the loss is whatever the
+	// failure message below thought to ask. Registered before a single record
+	// is written, since a case that dies mid-append is the interesting one.
+	// Read back through the reader, which never appends: a copy taken from an
+	// appender could be served out of that client's own cache.
+	if err := f.KeepPodFile(reader, path, "data02.log"); err != nil {
+		t.Fatalf("keeping the appended file: %v", err)
+	}
 
 	// The redirect wraps the whole loop, so the file is opened once with
 	// O_APPEND and every record is written through that one descriptor. That is
@@ -549,9 +560,10 @@ func TestDataConcurrentAppendToOneFile(t *testing.T) {
 	// that is missing a record. The shape is the finding -- one appender's
 	// whole contribution gone means its writes were overwritten at an offset
 	// another client believed was end of file, while scattered singles across
-	// every appender mean something else entirely -- and nobody can go and
-	// look afterwards, because the claim is deleted at teardown and the
-	// artifact bundle keeps pod logs rather than the share. See F-016.
+	// every appender mean something else entirely. See F-016. The file is in
+	// the bundle too, so the two can be read against each other; this stays in
+	// the message because it is the reading the case did, and a message that
+	// names the shape is what reaches whoever triages the failure first.
 	var missing []string
 	for _, pod := range pods {
 		var lost []int

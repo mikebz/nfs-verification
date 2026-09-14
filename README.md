@@ -73,7 +73,7 @@ capability the case needs, discovered at preflight.
 |---|---|
 | `pkg/slo` | Timing and correctness targets, and the two lease/grace profiles |
 | `pkg/env` | The environment record written to `artifacts/<run-id>/environment.json` |
-| `pkg/framework` | Clients, per-case fixture, pods and PVCs from embedded manifests, exec, locks and the lock probe, locktool delivery, the grace observer, the kubelet stats reader, the privileged node agent, artifact collection |
+| `pkg/framework` | Clients, per-case fixture, pods and PVCs from embedded manifests, exec, locks and the lock probe, locktool delivery, the grace observer, the kubelet stats reader, the privileged node agent, artifact and evidence collection |
 | `pkg/framework/manifests` | The YAML the suite applies, rendered and decoded into typed objects so it can be diffed against what was applied: the client pod and the node agent DaemonSet |
 | `pkg/framework/scripts` | The shell the suite runs inside pods, as scripts rather than as Go strings |
 | `pkg/chaos` | The fault operations the CHAOS cases inject |
@@ -99,6 +99,7 @@ make test-chaos     FLAGS="-storage-class=nfs -lease-seconds=60 -grace-seconds=9
 make test-obs       FLAGS="-storage-class=nfs -lease-seconds=60 -grace-seconds=90"
 make test-sec       FLAGS="-storage-class=nfs -lease-seconds=60 -grace-seconds=90"
 make test-e2e       FLAGS="-storage-class=nfs -lease-seconds=60 -grace-seconds=90"
+make test-case      CASE=TestDataConcurrentAppendToOneFile FLAGS="-storage-class=nfs -lease-seconds=60 -grace-seconds=90"
 make clean                                                # remove artifacts/ and bin/
 ```
 
@@ -175,10 +176,22 @@ Nothing runs until preflight passes. Preflight writes
 `artifacts/<run-id>/<CASE-ID>/` with pod logs, Kubernetes Events, `/proc/mounts`
 and dmesg from every involved node, and the injected-fault timeline.
 
+Two things a case argues from do not survive to that point on their own: the
+workload's record stream, which lives on the writer pod's filesystem so the
+measurement never crosses the filesystem under test, and the file on the share a
+data case is making a claim about. Both go with the pod and the claim at
+teardown. A case therefore **names** what it argues from, and the harness copies
+it into the same directory before anything is deleted, **whether the case passed
+or failed** — a passing chaos case's five recovery numbers are precisely the ones
+nobody can re-derive afterwards. One named file per registration, capped at 1MiB
+each, and nothing walks the share: `evidence.txt` lists what arrived, where it
+came from, and what was cut off at the cap, because a truncated file and a whole
+one look the same from the bytes.
+
 ## Timeouts and budgets
 
 Every wait in the harness is bounded. The bounds below are named constants, the
-exported ones in `pkg/framework/wait.go` and the two lowercase ones next to the
+exported ones in `pkg/framework/wait.go` and the lowercase ones next to the
 code they bound, and a new wait should take one of them rather than a literal. A
 handful of helpers predate the rule and still pass their own: the workload, lock
 and lock-probe helpers wait two minutes for a holder to report, `io.go` waits a
@@ -195,11 +208,13 @@ claims.
 | `PodTerminateTimeout` | 90s | A deleted pod leaving the API |
 | `DeleteTimeout` | 5m | The whole cleanup for one case |
 | `ArtifactTimeout` | 60s | The failure bundle, inside the cleanup budget |
+| `EvidenceTimeout` | 30s | Copying the files a case named, on every result, inside the cleanup budget |
 | `ExpandTimeout` | 5m | One volume expansion, control plane round trip included |
 | `SnapshotProbeTimeout` | 15s | A `VolumeSnapshot` reaching ready |
 | `ServerOutageObserveDuration` | 10s | How long claim state is watched while the server is down |
 | `FastPoll` | 250ms | Between polls where a second would blur the measurement |
 | `nodeInspectTimeout` | 10s | One node's inspection, per node |
+| `evidenceReadTimeout` | 10s | One named file's copy, per file |
 | `kubeletReadTimeout` | 30s | One kubelet stats read, per node |
 
 Two of these are not round numbers by accident. Test pods carry a 5 second
@@ -217,7 +232,9 @@ charged to every case eats the `go test -timeout` budget for the package.
 
 Every chaos case runs a workload in a client pod that writes one 4KiB record per
 second with `conv=fsync` and logs the outcome and time of every attempt on the
-pod's own filesystem, never on the share. One log gives all three assertions:
+pod's own filesystem, never on the share. That log is copied into the case's
+bundle at teardown, pass or fail, since it is the input to all three assertions
+below and it dies with the pod. One log gives all three:
 
 - **Recovery**: time from the fault to the first write committed after it,
   against `pkg/slo` for the profile preflight pinned. Never a literal.

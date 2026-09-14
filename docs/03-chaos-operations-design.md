@@ -55,6 +55,11 @@ every fault is explicitly enumerated, safe-guarded, and tracked:
 - **Fault timeline recording**: The framework records a timestamped `FaultEvent` for each
   successful fault operation. On test failure, `CollectArtifacts` bundles the recorded faults
   and cluster state into the run's artifact directory (`artifacts/<run-id>/`) for post-failure triage.
+- **The record stream is kept**: the workload's log is the input to every recovery number
+  here, and it lives on the writer pod's own filesystem, so it used to go with the pod at
+  teardown. The workload now registers it as case evidence, which is copied into the bundle
+  on a pass as well as a failure. A passing CHAOS-05 carries five recovery measurements, and
+  without the log none of them can be re-derived; F-017 is a run whose numbers had to be.
 
 ### Platform and network fault roadmap (Step 10)
 The remaining operations close out the CHAOS matrix in Step 10:
