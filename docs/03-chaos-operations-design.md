@@ -28,7 +28,7 @@ derived from the protocol:
 1. **Recovery**: time until client I/O resumes, measured against the pinned `pkg/slo` profile.
 2. **Error behavior**: zero I/O errors across failover on `hard` NFSv4.1 mounts.
 3. **Durability**: zero loss of data acknowledged as committed before the fault.
-4. **State preservation**: all advisory locks held before failover successfully reclaimed.
+4. **State preservation**: all advisory locks held before failover successfully reclaimed given a healthy recovery store (with CHAOS-17 verifying an honest, non-conflicting failure when the store is corrupted).
 5. **Grace period enforcement**: new locks refused during grace, preventing state corruption.
 
 Done means eighteen repeatable resiliency cases that drive real cluster and storage
@@ -89,8 +89,8 @@ Every chaos case runs a dedicated workload in a client pod while the fault is in
 - **Zero I/O errors on hard mounts**:
   - Under `hard` mount options (`nfs(5)`), the Linux client retries RPCs indefinitely when the
     server is unreachable.
-  - Returning an I/O error (`EIO`) to an application during a server failover is a protocol
-    violation, not a slow recovery. Errors are asserted strictly to be zero.
+  - Returning an I/O error (`EIO`) to an application during a server failover on a `hard` mount
+    violates the client mount contract (`nfs(5)`), not a slow recovery. Errors are asserted strictly to be zero.
 - **Durability content sweep**:
   - Once client I/O resumes, a verifier pod on an **independent worker node** reads back every
     record index acknowledged before the fault.
@@ -138,9 +138,10 @@ Server Down ──► Server Restart ──► Grace Window Starts ──► Gra
 - **Multi-cycle repeated failovers (`CHAOS-05`)**:
   - Injects five sequential failover cycles.
   - *Cadence*: Each cycle is injected only after the previous cycle has fully recovered.
-  - *Per-cycle assertions*: Each cycle must recover within SLO and exit grace without a re-entry
-    loop. A cumulative wall-clock budget would hide an outage that took four minutes if others
-    were fast.
+  - *Per-cycle assertions*: Each cycle must recover within SLO and enter grace at most once
+    (checking for grace re-entry loops without requiring an observed exit; OBS-03 owns the grace
+    entry/exit assertion). A cumulative wall-clock budget would hide an outage that took four
+    minutes if others were fast.
 
 ## 5. What these cases assert
 
@@ -156,7 +157,7 @@ the core assertions across the Resiliency & Chaos test group:
 | **CHAOS-04** | Step 10 | Network partition server from clients, then heal: I/O blocks then resumes, no corruption | CNI network isolation, TCP retransmit recovery |
 | **CHAOS-05** | Shipped | Repeated failover (5 cycles): each cycle recovers, no grace re-entry loop | RFC 8881 Sec 8.4.2, grace stability under churn |
 | **CHAOS-06** | Shipped | Failover with held locks: 100% locks reclaimed, conflicting clients blocked | RFC 8881 Sec 9 (LOCK) & Sec 8.4.2 (Reclaim), `locktool` |
-| **CHAOS-07** | Shipped | New lock attempt during grace: rejected with retryable error, granted only after grace | RFC 8881 Sec 8.4.2 (Grace state exclusivity) |
+| **CHAOS-07** | Shipped | New lock attempt during grace: 0 grants inside grace window (blocked/refused), grant succeeded after grace | RFC 8881 Sec 8.4.2 (Grace state exclusivity) |
 | **CHAOS-08** | Step 10 | Client handles stale handles (`ESTALE`) after server restart with new state without permanent hang | RFC 8881 filehandle persistence |
 | **CHAOS-09** | Step 10 | Kubelet restart on client node with active mounts: mounts survive, I/O resumes | Kubelet volume manager mount tracking |
 | **CHAOS-10** | Step 10 | CSI node plugin eviction with active mounts: existing mounts unaffected, new mounts queue | CSI architecture, kernel mount independence |
@@ -182,42 +183,42 @@ the core assertions across the Resiliency & Chaos test group:
 
 ### CHAOS-02: Delete server pod under active write
 - **Steps**:
-  1. Acquire an exclusive lock on a shared file from client pod A.
-  2. Start active write load from client pod B.
+  1. Start active workload and let it commit writes.
+  2. Take a lock on a shared file from the writer pod and confirm the second client pod (verifier) is refused.
   3. Delete the server pod gracefully via `DeleteServerPod`.
-  4. Measure recovery to first successful post-outage write (`StallAfter`).
-  5. Verify that client pod A still holds its lock and can write through it.
-  6. Verify from client pod C that a conflicting lock attempt is refused.
-  7. Verify all pre-fault writes are intact.
+  4. Measure client I/O recovery by finding the silence gap in the workload log via `StallAfter` and assert it is within the restart SLO.
+  5. Assert zero I/O errors across the failover and verify all pre-fault writes are intact from an independent worker node.
+  6. Verify the writer still holds its lock and the second client is still refused.
 
 ### CHAOS-05: Repeated failovers (5 cycles)
 - **Steps**:
   1. Start write load and initialize grace observation.
   2. For cycle = 1 to 5:
      a. Delete server pod gracefully.
-     b. Wait for client workload to recover (`StallAfter` within restart SLO).
-     c. Read server log stream to verify grace was entered and exited.
-     d. Assert that grace was entered at most once during this cycle (no re-entry loops).
+     b. Wait for client workload to recover (`StallAfter` silence gap within restart SLO).
+     c. Read server container log stream through Kubernetes API to count grace entries.
+     d. Assert that grace was entered at most once during this cycle (no re-entry loops; OBS-03 owns the entry/exit assertion).
      e. Allow short stabilization before the next injection.
   3. Verify all committed writes across all 5 cycles survived on stable storage.
 
 ### CHAOS-06: Lock reclaim across failover (whole-file and byte-range)
 - **Steps**:
-  1. Client pod A acquires byte range [0, 1024]. Client pod B acquires byte range [2048, 4096] on the same file using `locktool`.
-  2. Client pod C attempts to acquire [0, 2048] and verifies it is blocked.
-  3. Delete server pod gracefully while locks are held.
-  4. Server recovers and enters grace.
-  5. Both client A and client B reclaim their respective ranges.
-  6. Verify via `locktool getlk` and `/proc/locks` that both clients still hold their ranges.
-  7. Client C attempts acquisition after grace exit and verifies exclusion holds.
+  1. Start active workload and take four whole-file locks (`flock`) across two clients on separate nodes (three held by writer, one by verifier).
+  2. Subtest takes disjoint byte ranges on a separate file using `locktool`: `[0, 4096)` held by writer, `[8192, 12288)` held by verifier.
+  3. Verify cross-node exclusion for all whole-file locks and byte ranges before any fault is injected.
+  4. Delete server pod gracefully and assert recovery duration within restart SLO.
+  5. Assert each whole-file lock holder still reports held, and cross-node probes are refused. Assert 100% reclaim fraction.
+  6. Query the server with `F_GETLK` from the opposite client to assert each byte range is still held by its original owner with unmodified boundaries.
+  7. Read `/proc/locks` on each holder's node to verify client kernel matches server state.
+  8. Deploy a third client pod after failover to probe `[0, 4096)` and `[8192, 12288)`, verifying conflicting acquisitions are refused.
 
 ### CHAOS-07: New lock attempted during grace
 - **Steps**:
   1. Client pod A acquires lock and keeps outstanding state.
   2. Delete server pod to trigger restart and grace window.
   3. Client pod B runs `lock-probe.sh`, attempting new lock acquisition once per second.
-  4. Kubelet server log stamps grace entry and exit.
-  5. Assert that no lock was granted to client B inside the narrowed grace window (`ClockSkewGuard`).
+  4. Observer reads server pod container logs through the Kubernetes API to identify grace entry and exit timestamps.
+  5. Assert that no lock was granted to client B inside the narrowed grace window (`ClockSkewGuard`) (attempts may be refused or kernel-blocked).
   6. Assert that client B successfully acquires the lock after grace exit.
 
 ## 7. Key decisions
