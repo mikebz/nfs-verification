@@ -238,3 +238,31 @@ const (
 // SoakDegradationBound is the permitted throughput degradation trend over a
 // sustained soak (SCALE-07).
 const SoakDegradationBound = 0.10
+
+// The bounds a chown storm on a populated share is measured against.
+//
+// Neither is a protocol value. `fsGroup` is a Kubernetes promise, and what it
+// costs is a property of the volume plugin: on a plugin that manages ownership,
+// kubelet walks the volume and chowns every file before the pod starts, which
+// on a share of any size is unbounded in the only sense that matters.
+const (
+	// FSGroupPopulatedEntries is how many files go on the share before a pod
+	// declaring fsGroup is started against it.
+	//
+	// Enough that a recursive walk is measurable against a mount that does not
+	// do one, and small enough that creating them is not itself the case. A
+	// storm is orders of magnitude, not a few percent, so this does not have to
+	// be large to separate the two.
+	FSGroupPopulatedEntries = 2000
+
+	// FSGroupStartOverhead is how much longer a pod declaring fsGroup may take
+	// to become Ready than an identical pod on the same populated claim without
+	// it.
+	//
+	// Measured against a control rather than stated absolutely, because the
+	// absolute number is mostly scheduling and image pull, which have nothing
+	// to do with the question. What is being bounded is the difference the
+	// declaration makes, and a walk over the entries above is far past this on
+	// any real share.
+	FSGroupStartOverhead = 60 * time.Second
+)

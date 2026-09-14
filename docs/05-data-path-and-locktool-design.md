@@ -314,8 +314,8 @@ plan.
   `pr46-data-20260913` and `pr47-data-20260913`, taking between four and five
   minutes each. The export holds 100k entries, and a listing racing 50k
   deletions returned 98–99k of them, which is lawful rather than a defect. This
-  supersedes the sentence that stood here saying it was unmeasured; the README's
-  "State of this code" carries the run it came from.
+  supersedes the sentence that stood here saying it was unmeasured; the test
+  plan's Section 5.2 carries the runs it came from.
 - **F-006 and F-007** came out of this phase: `scripts/lock-probe.sh` passed
   `flock -w` to an applet that has no `-w`, and two cases reported results they
   had not measured. Both are fixed and recorded in [`findings.md`](findings.md).

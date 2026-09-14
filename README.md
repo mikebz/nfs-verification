@@ -6,10 +6,27 @@ Updated: 2026-09-14
 
 End-to-end verification of NFS RWX persistent volumes on Kubernetes.
 
+**The point.** This is a test harness, not a product. It drives a real cluster
+and asserts what a client can actually observe of an RWX NFS volume: that two
+pods on two nodes see each other's writes, that a lock taken on one node
+excludes the other, that data acknowledged before a fault is still there after
+it, that the platform reports what it says it reports. Assertions come from what
+NFSv4.1, the Kubernetes API and the CSI spec guarantee, and each case cites the
+document it rests on. A deployment that cannot meet a correct assertion is a
+finding about that deployment, never a reason to relax the assertion.
+
+**The direction.** v1 covers provisioning, data integrity, chaos, observability
+and security, with scale and version skew after them and the conditional
+categories gated on what preflight discovers. Cases land one vector at a time,
+each with the harness it needs and nothing more.
+
 This repository holds the harness, preflight, the fault injection package, grace
-observability, `locktool`, the kubelet stats reader, and thirty-five verification
-cases. What is shipped, what is in progress, and the delivery order are tracked
-in the test plan ([`docs/01-test-plan.md`](docs/01-test-plan.md)).
+observability, `locktool`, the kubelet stats reader, and the cases themselves.
+Which cases exist, which are left, and what the last run returned are tracked in
+the test plan ([`docs/01-test-plan.md`](docs/01-test-plan.md)); what those runs
+taught, and why each result is what it is, is the findings log
+([`docs/findings.md`](docs/findings.md)). Counts and results live there and not
+here, so that this file stays true between runs.
 
 ## Documentation
 
@@ -23,20 +40,24 @@ prerequisites.
 | [`docs/findings.md`](docs/findings.md) | What running against a real cluster taught, `F-001` upward. **Read it before touching teardown, deletion, or anything that unmounts** |
 | [`AGENTS.md`](AGENTS.md) | How to work here: change size, case conventions, the sources every assertion cites, what to claim when you are done |
 
-One design doc per delivery step, in `docs/`, each stating at its top which
-cases it serves and whether it shipped:
+One design doc per delivery group, in `docs/`. Each opens with a header saying
+which cases it serves and whether it is designed, shipped or superseded, so both
+the scope and the status are read there rather than mirrored here:
 
-| Design doc | Step | Cases | Status |
-|---|---|---|---|
-| [`03-chaos-operations-design.md`](docs/03-chaos-operations-design.md) | 3, 4, 6, 10 | CHAOS-01 through CHAOS-18 (full resiliency and chaos test group) | In progress: CHAOS-01, CHAOS-02, CHAOS-05, CHAOS-06, CHAOS-07 shipped |
-| [`04-grace-and-lock-reclaim-design.md`](docs/04-grace-and-lock-reclaim-design.md) | 4 | Step 4 historical record | Superseded by doc 03 (chaos) and doc 06 (obs) |
-| [`05-data-path-and-locktool-design.md`](docs/05-data-path-and-locktool-design.md) | 6 | DATA-06 to DATA-13, the byte-range half of DATA-05 and the disjoint-range half of CHAOS-06, plus `locktool` | Shipped, DATA-14 deferred |
-| [`06-observability-design.md`](docs/06-observability-design.md) | 7 | OBS-01 through OBS-07 (full observability test group) | In progress: OBS-02, OBS-03, OBS-04, OBS-06 shipped |
+| Design doc | Delivery group |
+|---|---|
+| [`03-chaos-operations-design.md`](docs/03-chaos-operations-design.md) | Node and pod faults |
+| [`04-grace-and-lock-reclaim-design.md`](docs/04-grace-and-lock-reclaim-design.md) | Server restart, grace and lock reclaim, since absorbed by docs 03 and 06 |
+| [`05-data-path-and-locktool-design.md`](docs/05-data-path-and-locktool-design.md) | Data path, byte-range locking and `locktool` |
+| [`06-observability-design.md`](docs/06-observability-design.md) | Observability |
+| [`07-security-design.md`](docs/07-security-design.md) | Security and client identity |
 
-Every fact has one home: what a case must verify is the test plan's, what is
-built and how to run it is this file's, why a phase is shaped the way it is
-belongs to its design doc, and what a real run taught is `findings.md`'s. A copy
-anywhere else is how these documents drifted the first time.
+Every fact has one home: what a case must verify and how far delivery has got
+are the test plan's, how the harness works and how to run it are this file's,
+why a phase is shaped the way it is belongs to its design doc, and what a real
+run taught is `findings.md`'s. A copy anywhere else is how these documents
+drifted the first time, and **a result from a particular run is never this
+file's**: it is out of date by the next merge.
 
 A case reports one of four things. **Passed**: the assertion held. **Failed**:
 the deployment did not do what the protocol, the Kubernetes API or the CSI spec
@@ -279,57 +300,25 @@ config file the pod spec does not reference will fail preflight, and the run
 needs `-lease-seconds` and `-grace-seconds`. That is deliberate: a default value
 here would silently invalidate every timing assertion.
 
-## State of this code
+## Reading a run
 
-The harness compiles, `go vet` is clean, and the unit tests in `pkg/slo` and
-`pkg/framework` pass.
+Where the suite has got to, and what it returned the last time it was run
+against a cluster, are in the test plan's Section 5. Which deployment behaviours
+those results exposed, and why each one is what it is, are in
+[`docs/findings.md`](docs/findings.md). Neither belongs here: a status paragraph
+in a README is wrong one merge after it is written, and the two documents that
+own those facts are updated in the same change as the code.
 
-**The whole suite has been run.** Twice on 2026-09-13, and the later of the two
-is the one reported here: `make test-e2e` against a three-worker GKE cluster
-(Kubernetes v1.37, Container-Optimized OS, kernel 6.12.94+) with the in-cluster
-`nfs-server-provisioner` and the `default` profile (lease 60s, grace 90s), in
-62 minutes: **26 passed, 5 failed, 4 reported blocked**, out of the thirty-five
-cases listed above.
+Read a failure with the findings log open, and read a pass with the same
+suspicion. Three separate runs have found cases that reported more than they had
+measured, and in one of them the over-reported result was a **passing** one that
+had been passing for months (F-007, F-014, F-015). A case that cannot run reports
+blocked or skipped, and neither is a pass: the vector is simply unexercised, and
+the reason is the finding.
 
-None of the five reds is a defect in the storage server, and none of them is
-new. Each one is a finding that already has a number:
-
-| Case | Result | Whose problem |
-|---|---|---|
-| DATA-02 | fail | Four clients appending to one file landed 150 of 200 records and tore none, with one appender losing its whole contribution and the other three losing none. NFSv4.1 has no append operation, so this is a property of the deployment and goes to the boundary discussion, not to the server owner. It is also intermittent: two runs the same day landed all 200. F-016 |
-| OBS-03 | fail | This provisioner never announces grace, so there is no signal to observe. F-008 |
-| OBS-06 | fail | The export has no per-volume quota, so both capacity sources describe the backing filesystem rather than the claim. F-009 |
-| PROV-04, PROV-11 | fail | The StorageClass advertises `allowVolumeExpansion` and nothing implements it. F-004 |
-
-The earlier sweep of the same day had a sixth red, PROV-07, which was a defect
-in this harness rather than in the cluster: a checksum helper returned an empty
-string as a digest (F-015). It is fixed, and PROV-07 passes in the run above —
-in the same position of the same suite where it failed, which is the comparison
-worth having.
-
-The four blocked are CHAOS-01, DATA-12 and DATA-13, which need a process name
-this image does not let the harness discover, and CHAOS-07, which needs the
-grace window F-008 says this server never announces. Blocked is not a pass:
-these vectors are unexercised here.
-
-**A green run against this provisioner is not evidence that grace behaves.**
-CHAOS-06's reclaim assertion needs no grace window, which is why it passes while
-CHAOS-07 cannot run at all.
-
-Two things the same run settled that earlier versions of this section listed as
-open. **DATA-10 has now been run** and passes: 100k directory entries listed
-under concurrent deletes, in 238s. **OBS-02 passes**; it had failed on an
-earlier run for a reason unrelated to grace.
-
-Two gaps remain in what runs today. **DATA-14 is deferred**, so nothing covers
-sustained mixed load at scale; that gap belongs to SCALE-07, and Section 3.2 of
-the test plan has the reasoning. And **step 7 is two thirds unwritten**: OBS-05,
-OBS-07 and the configuration half of OBS-01 have a design doc and no code
-([`docs/06-observability-design.md`](docs/06-observability-design.md)).
-
-Read the failures with the findings log open. Three separate runs have now found
-cases that reported more than they had measured — F-007, F-014 and F-015 — and
-in the case of F-014 the result being over-reported was a green one, for months.
+Expect a first run on a new cluster to surface flag values that need setting for
+the deployment at hand, which is what the specific preflight failure messages
+exist to make quick.
 
 > [!TIP]
 > On macOS, run long suites under `caffeinate -is`. A workstation that sleeps
@@ -338,21 +327,16 @@ in the case of F-014 the result being over-reported was a green one, for months.
 > understated while the cluster-side measurements stay correct. F-017 has the
 > run where that happened and what it looked like.
 
-Notable findings from running the suite against real clusters are recorded in
-[`docs/findings.md`](docs/findings.md).
-
-Expect a first run on a new cluster to surface flag values that need setting
-for the deployment at hand, which is what the specific preflight failure messages
-exist to make quick.
-
 The unit tests cover the parts of the harness that can be wrong on a
 workstation: every manifest renders and decodes, the capacity and ownership
 parsers are run against the real `stat` and `df` on the machine running the
 test rather than against a written-out fixture, the background writer, the
 chaos workload and the lock probe are run under a real shell against a real
 `flock`, the grace wording rule is tested in both directions because an exit
-read as an entry reports a healthy server as looping through grace, and the
-rules that decide which process a SIGKILL is aimed at are tested directly,
-because getting that wrong kills the wrong process on a real cluster rather than
-failing a test. What none
-of them can tell you is whether NFS behaves; that needs a cluster.
+read as an entry reports a healthy server as looping through grace, the rules
+that decide which process a SIGKILL is aimed at are tested directly, because
+getting that wrong kills the wrong process on a real cluster rather than
+failing a test, and the socket-table parser is run against rows copied from a
+real server, because a byte order read backwards produces plausible addresses
+belonging to nobody rather than an error. What none of them can tell you is
+whether NFS behaves; that needs a cluster.
