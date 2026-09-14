@@ -124,109 +124,199 @@ func nobodyNote(o framework.Owner) string {
 	return ""
 }
 
-// SEC-02: what the export does to a root-owned write. Squash is an export
-// setting the Kubernetes API cannot see, so the case reads it from
-// `-root-squash` when the operator states it and otherwise records what the
-// export does without asserting a value it was never told.
+// SEC-02: who the server lets change a file's ownership.
 //
-// What it asserts either way is coherence, which is where the real defects
-// live: whatever the export does to root, it must do the same thing on every
-// client, and the identity it settles on must not be root's on one node and
-// anonymous on another.
+// Two questions live here, and only one of them has a single correct answer.
+//
+// **Who may give a file away** is settled and the same everywhere: changing a
+// file's owner requires privilege, and owning the file is not privilege
+// ([`chown(2)`](https://man7.org/linux/man-pages/man2/chown.2.html)). An owner
+// who could hand a file to somebody else could evade a quota, plant a file in
+// another user's name, or launder what it wrote. A server that permits it is
+// wrong however it is configured, so this half is asserted outright.
+//
+// **What happens to a client claiming uid 0** is a deployment choice. Under
+// AUTH_SYS, the `sec=sys` this suite measures (plan Appendix B), nobody is
+// authenticated: the client puts a uid in the request and the server takes its
+// word for it. So root on any host that can reach the export can claim the
+// server's root, and root squash is the server declining that claim by mapping
+// uid 0 to an anonymous id. Most servers squash by default; a deployment whose
+// workloads need root-owned files turns it off and accepts what that means.
+// Neither is a defect, so what this case requires is that whichever rule is in
+// force is applied **strictly**: the same answer on every client, with no
+// half-squash. Where -root-squash states the intent, the behaviour must match
+// it, and the mismatch is a failure.
+//
+// The probe is always the operation, never the number `stat` prints. NFSv4
+// carries owners as strings, so a client whose idmapper cannot resolve one
+// displays nobody over a file the server still owns as root. Reading 65534 and
+// calling it squash is exactly how this case used to be wrong: it reported a
+// client-side mapping as a server-side policy, and would have failed a
+// correctly configured export the moment anyone passed -root-squash=off
+// (F-021). Asking whether a privileged operation is permitted cannot be
+// confused that way.
 //
 // Steps:
-//  1. Put a root pod on each of two nodes, on one claim.
-//  2. Write a file as root from each. If the first cannot write, report
-//     blocked; if only the second cannot, the export treats identical clients
-//     differently, which is a failure.
-//  3. Read the ownership each client's write landed with, and require the two
-//     to agree.
-//  4. Read the first file from the second client, and require that to agree
-//     too.
-//  5. Compare against -root-squash when it was passed; otherwise record what
-//     the export does rather than asserting a value nobody stated.
-func TestSecRootSquashBehaviour(t *testing.T) {
+//  1. A root pod and an ordinary-uid pod on each of two nodes, on one claim.
+//  2. Each ordinary user creates a file it owns and chmods it. The chmod must
+//     succeed: it is the control, without which the refusal in step 3 could be
+//     a server that refuses every metadata change rather than one enforcing a
+//     privilege boundary.
+//  3. Each ordinary user tries to chown its own file to a different uid. Both
+//     must be refused.
+//  4. Root tries to chown a file on each node. Whatever the answer, both nodes
+//     must give it.
+//  5. Compare against -root-squash where it was stated; otherwise record which
+//     rule is in force and what it means on a shared cluster.
+//  6. Record separately what the ownership reads back as, naming the idmapper
+//     when that is what the display reflects.
+func TestSecOwnershipChangePrivilege(t *testing.T) {
 	f := framework.New(t, "SEC-02")
-	requireCap(t, f.Caps.MultiNode, "checking squash on two clients needs two schedulable workers")
+	requireCap(t, f.Caps.MultiNode, "requiring one rule on every client needs two schedulable workers")
 	ctx, cancel := caseCtx(t, 15*time.Minute)
 	defer cancel()
 
 	nodeA, nodeB := f.TwoNodes(ctx)
 	pvc := f.MustRWXPVC(ctx, "sec02")
-	// Both pods are root. That is the point: the question is what the export
-	// does with a uid 0 write, and it has to answer the same way twice.
-	f.MustPod(ctx, toolsPod("roota", pvc.Name, nodeA))
-	f.MustPod(ctx, toolsPod("rootb", pvc.Name, nodeB))
+	const rootA, rootB, userA, userB = "roota", "rootb", "usera", "userb"
+	f.MustPod(ctx, toolsPod(rootA, pvc.Name, nodeA))
+	f.MustPod(ctx, toolsPod(rootB, pvc.Name, nodeB))
+	for _, u := range []struct{ pod, node string }{{userA, nodeA}, {userB, nodeB}} {
+		f.MustPod(ctx, framework.PodSpec{
+			Name: u.pod, Node: u.node, Mounts: mounts(pvc.Name),
+			RunAsUser: framework.Int64(testUID), RunAsGroup: framework.Int64(testGID),
+		})
+	}
 
+	// World-writable, so an ordinary uid has somewhere to create the file it
+	// owns whatever the share's own root permits. What is under test is who may
+	// change ownership, not who may create a file.
 	dir := fileIn("sec02")
-	if r := f.Sh(ctx, "roota", "mkdir -p "+framework.Quote(dir)); r.Err != nil {
-		t.Skipf("blocked on export configuration: root on %s cannot create a directory on the share (%s). "+
-			"That is itself a squash outcome, but with no writable path the case cannot compare two clients",
-			nodeA, r.Combined())
-	}
-	pathA, pathB := dir+"/from-root-a.dat", dir+"/from-root-b.dat"
-	if r := f.Sh(ctx, "roota", "echo sec02 > "+framework.Quote(pathA)); r.Err != nil {
-		t.Skipf("blocked on export configuration: root on %s cannot write to the share (%s)", nodeA, r.Combined())
-	}
-	if r := f.Sh(ctx, "rootb", "echo sec02 > "+framework.Quote(pathB)); r.Err != nil {
-		t.Errorf("root on %s wrote to the share but root on %s could not (%s): "+
-			"the export treats two identical clients differently", nodeA, nodeB, r.Combined())
-		return
+	if r := f.Sh(ctx, rootA, "mkdir -p "+framework.Quote(dir)+" && chmod 0777 "+framework.Quote(dir)); r.Err != nil {
+		blocked(t, "root on %s cannot create a writable directory on the share (%s), so there is nowhere "+
+			"for an ordinary user to own a file and nothing to ask about ownership", nodeA, r.Combined())
 	}
 
-	ownerA, err := f.StatOwner(ctx, "roota", pathA)
-	if err != nil {
-		t.Fatalf("reading ownership of the file root wrote on %s: %v", nodeA, err)
-	}
-	ownerB, err := f.StatOwner(ctx, "rootb", pathB)
-	if err != nil {
-		t.Fatalf("reading ownership of the file root wrote on %s: %v", nodeB, err)
+	// The rule that holds everywhere, asked on both clients.
+	for _, u := range []struct{ pod, node string }{{userA, nodeA}, {userB, nodeB}} {
+		own := fmt.Sprintf("%s/owned-by-%s.dat", dir, u.pod)
+		if r := f.Sh(ctx, u.pod, "echo sec02 > "+framework.Quote(own)); r.Err != nil {
+			blocked(t, "uid %d on %s cannot write to a 0777 directory on the share (%s), so it cannot own "+
+				"the file this case asks about", testUID, u.node, r.Combined())
+		}
+		// The control. An owner may change its own file's mode, so a server
+		// that refuses this refuses every metadata change and the refusal
+		// below would prove nothing about privilege.
+		if r := f.Sh(ctx, u.pod, "chmod 0640 "+framework.Quote(own)+" 2>&1"); r.Err != nil {
+			blocked(t, "uid %d on %s cannot chmod a file it owns (%s). This server refuses metadata changes "+
+				"outright, so a refusal to chown would say nothing about whether it enforces privilege",
+				testUID, u.node, r.Combined())
+		}
+
+		allowed, out := chownAllowed(ctx, f, u.pod, own, testUID+1)
+		if allowed {
+			after, err := f.StatOwner(ctx, u.pod, own)
+			detail := ""
+			if err == nil {
+				detail = fmt.Sprintf(" The file is now owned %s.", after)
+			}
+			t.Errorf("uid %d on %s owns %s and was allowed to give it away to uid %d.%s Changing a file's "+
+				"owner requires privilege and owning the file is not privilege (chown(2)); a server that "+
+				"lets any owner reassign a file lets one tenant plant files in another's name and evade "+
+				"anything counted per owner", testUID, u.node, own, testUID+1, detail)
+		} else {
+			t.Logf("uid %d on %s was refused when it tried to give away a file it owns (%s)", testUID, u.node, out)
+		}
 	}
 
-	// Coherence first: same operation, two clients, one answer.
-	if ownerA.UID != ownerB.UID || ownerA.GID != ownerB.GID {
-		t.Errorf("root's write landed as %s on %s and as %s on %s: the export squashes inconsistently "+
-			"between clients, which is worse than either setting on its own",
-			ownerA, nodeA, ownerB, nodeB)
+	// The rule that is a deployment choice, asked on both clients so that an
+	// answer given inconsistently is caught rather than averaged.
+	rootAllowed := make(map[string]bool, 2)
+	rootSaid := make(map[string]string, 2)
+	var asWritten framework.Owner
+	var asWrittenErr error
+	for _, r := range []struct{ pod, node string }{{rootA, nodeA}, {rootB, nodeB}} {
+		own := fmt.Sprintf("%s/owned-by-%s.dat", dir, r.pod)
+		if res := f.Sh(ctx, r.pod, "echo sec02 > "+framework.Quote(own)); res.Err != nil {
+			t.Fatalf("root on %s cannot write to a 0777 directory on the share: %s", r.node, res.Combined())
+		}
+		if r.pod == rootA {
+			// Read before the chown, or a permitted chown rewrites the very
+			// ownership the record below is about.
+			asWritten, asWrittenErr = f.StatOwner(ctx, r.pod, own)
+		}
+		rootAllowed[r.node], rootSaid[r.node] = chownAllowed(ctx, f, r.pod, own, testUID)
 	}
-	// And across clients: the file root wrote on A must read the same from B.
-	crossed, err := f.StatOwner(ctx, "rootb", pathA)
-	if err != nil {
-		t.Fatalf("reading on %s the ownership of what root wrote on %s: %v", nodeB, nodeA, err)
-	}
-	if crossed.UID != ownerA.UID || crossed.GID != ownerA.GID {
-		t.Errorf("the file root wrote on %s reads as %s there and as %s on %s%s",
-			nodeA, ownerA, crossed, nodeB, nobodyNote(crossed))
+	if rootAllowed[nodeA] != rootAllowed[nodeB] {
+		t.Errorf("root's chown was %s on %s and %s on %s. The export applies one rule to uid 0 on one "+
+			"client and the opposite on another, which is worse than either setting on its own: what a "+
+			"workload may do to the shared volume then depends on where it was scheduled. %s said %q, %s "+
+			"said %q", allowedWord(rootAllowed[nodeA]), nodeA, allowedWord(rootAllowed[nodeB]), nodeB,
+			nodeA, rootSaid[nodeA], nodeB, rootSaid[nodeB])
 	}
 
-	squashed := ownerA.UID != 0
+	squashed := !rootAllowed[nodeA]
 	switch want := framework.Cfg().RootSquash; want {
 	case "on":
 		if !squashed {
-			t.Errorf("-root-squash=on, but root's write is owned by %s: root is not being squashed", ownerA)
+			t.Errorf("-root-squash=on, but root on %s was allowed to change a file's owner, so the server "+
+				"is honouring uid 0 rather than squashing it. Every pod in this cluster that can run as "+
+				"root therefore has root on this share", nodeA)
 		} else {
-			t.Logf("root_squash is on as configured: root's write landed as %s", ownerA)
+			t.Logf("root_squash is on as configured: root's chown was refused on both %s and %s", nodeA, nodeB)
 		}
 	case "off":
 		if squashed {
-			t.Errorf("-root-squash=off, but root's write landed as %s rather than uid 0: "+
-				"the export is squashing root when it was configured not to", ownerA)
+			t.Errorf("-root-squash=off, but root on %s was refused a chown (%s), so the server is squashing "+
+				"uid 0 when it was configured not to. A workload that needs to own files as root will fail "+
+				"here in ways that look like permission bugs in the application", nodeA, rootSaid[nodeA])
 		} else {
-			t.Logf("root is preserved as configured: root's write landed as %s", ownerA)
+			t.Logf("root is preserved as configured: root's chown was permitted on both %s and %s", nodeA, nodeB)
 		}
 	default:
-		// Recorded, not asserted. Nobody told this run what the export is
-		// configured to do, and inventing an expectation would turn a
-		// deployment choice into a test failure.
+		// Recorded, not asserted. Nobody told this run what the export is meant
+		// to do, and inventing an expectation would turn a deployment choice
+		// into a test failure.
 		if squashed {
-			t.Logf("recorded: this export squashes root, whose write landed as %s on both %s and %s. "+
-				"Pass -root-squash=on to make that an assertion", ownerA, nodeA, nodeB)
+			t.Logf("recorded: this export squashes root. Root's chown was refused on both %s and %s (%s). "+
+				"Pass -root-squash=on to make that an assertion", nodeA, nodeB, rootSaid[nodeA])
 		} else {
-			t.Logf("recorded: this export preserves root, whose write landed as %s on both %s and %s. "+
-				"On a shared cluster that is worth knowing: any pod that can run as root owns the share. "+
-				"Pass -root-squash=off to make that an assertion", ownerA, nodeA, nodeB)
+			t.Logf("recorded: this export does not squash root, which was allowed to change a file's owner "+
+				"on both %s and %s. Under AUTH_SYS the server takes a client's word for its uid, so on a "+
+				"shared cluster any pod that can run as root owns this share. Pass -root-squash=off to "+
+				"make that an assertion", nodeA, nodeB)
 		}
 	}
+
+	// What the ownership displays as, recorded and deliberately not used above.
+	// This is the client's idmapper talking, and reading it as the server's
+	// policy is the error F-021 records.
+	if asWrittenErr != nil {
+		t.Logf("reading back the ownership root's file displays as: %v", asWrittenErr)
+		return
+	}
+	t.Logf("recorded: the file root wrote displays as %s on %s%s. That is what the client renders, not what "+
+		"the server enforces, which is why the verdict above comes from the chown and not from this",
+		asWritten, nodeA, nobodyNote(asWritten))
+}
+
+// chownAllowed reports whether a pod may change a file's owner, and returns
+// what the attempt printed so that a refusal can be quoted.
+//
+// The attempt is the probe. Whether the server permits a privileged operation
+// is the question; what `stat` displays afterwards is a rendering, and F-021 is
+// what happens when the two are confused.
+func chownAllowed(ctx context.Context, f *framework.Framework, pod, path string, uid int) (bool, string) {
+	r := f.Sh(ctx, pod, fmt.Sprintf("chown %d %s 2>&1", uid, framework.Quote(path)))
+	return r.Err == nil, strings.TrimSpace(r.Combined())
+}
+
+// allowedWord renders a permit/refuse outcome for a failure message.
+func allowedWord(allowed bool) string {
+	if allowed {
+		return "permitted"
+	}
+	return "refused"
 }
 
 // testFSGroup is the gid SEC-03 declares. Like the uid above it is one nothing

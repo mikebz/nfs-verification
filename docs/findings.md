@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-10
-Updated: 2026-09-13
+Updated: 2026-09-14
 
 Things learned by running the suite against a real cluster that are worth
 remembering. Each entry is dated, and says what happened, why, what changed in
@@ -20,7 +20,7 @@ New entries go at the top, and take the next number.
 | # | Found | What it says | Cited by |
 |---|---|---|---|
 | [F-022](#f-022-the-servers-grace-announcements-were-in-a-log-file-not-in-the-container-log-stream) | 2026-09-13 | The grace lines F-008 said do not exist do exist, in the NFS daemon's own log file inside the export volume; `kubectl logs` carries only the Go provisioner's output | F-008, doc 07 |
-| [F-021](#f-021-a-root-owned-file-reads-back-as-nobody-for-a-reason-that-is-not-squash) | 2026-09-13 | The server returns named owners as names, and the client's idmapper maps `root` to nobody while an unnamed uid survives numerically, so SEC-02 reads a client-side mapping as the export squashing root | SEC-02's open item, doc 07 |
+| [F-021](#f-021-a-root-owned-file-reads-back-as-nobody-for-a-reason-that-is-not-squash) | 2026-09-13 | The server returns named owners as names, and the client's idmapper maps `root` to nobody while an unnamed uid survives numerically, so what `stat` shows cannot tell squash from a failed mapping; SEC-02 now probes whether a `chown` is permitted instead | SEC-02, doc 07 |
 | [F-020](#f-020-fsgroup-does-nothing-to-an-nfs-volume-here-in-either-direction) | 2026-09-13 | `fsGroup` reaches the pod's supplementary groups and nothing else: no chown storm, no ownership change, and the write that succeeds does so on the export's 0777 setgid root | SEC-03's record, `slo.FSGroupStartOverhead` |
 | [F-019](#f-019-the-client-an-nfs-server-can-name-is-the-node-and-it-arrives-ipv4-mapped) | 2026-09-13 | The server sees node addresses, never pod addresses, and an IPv4 client on its IPv6 listener appears as `::ffff:a.b.c.d`, so `/proc/net/tcp` alone shows no NFS connections at all | `peers.go`, SEC-06, SEC-08 |
 | [F-018](#f-018-the-export-admits-any-client-that-can-reach-it-so-a-claims-access-control-ends-at-the-mount) | 2026-09-13 | A node with no claim mounted another claim's export and read its bytes; the exports carry no client rules and nothing in the network path restricts who may try | SEC-05's failure, SEC-08's record, doc 07 |
@@ -101,8 +101,9 @@ daemon's log at stdout; nothing about the server itself has to change.
 **Found:** 2026-09-13, hand probes against GKE cluster `gke-w1`, confirmed by
 `make test-sec` run `20260913-171950`.
 
-**Severity:** SEC-02 passes, and the sentence it prints about this deployment is
-wrong in a way that would send somebody to the export configuration.
+**Severity:** SEC-02 passed while printing a sentence about this deployment that
+was wrong in a way that would send somebody to the export configuration. Fixed
+below; the failure mode is worth keeping because nothing in the run was red.
 
 ### What happened
 
@@ -140,10 +141,19 @@ the server's own filesystem agrees with it.
 
 ### What changed
 
-Nothing in this phase. It is recorded as an open item in doc 07, because the
-correct fix changes what SEC-02 asserts rather than how it reads something, and
-that belongs in a change of its own: the case has to separate the server's view
-of an owner from the client's before it can name either one.
+SEC-02 was rewritten, in the same PR that recorded this, to probe the operation
+instead of the display. It no longer derives anything from the number `stat`
+prints: it asks whether a `chown` is permitted, which is a question the idmapper
+cannot answer wrongly. An ordinary uid being refused a `chown` of its own file is
+asserted outright, because that holds on every server; root being permitted or
+refused is compared against `-root-squash` only when that flag states the intent,
+and is required to be the same on every client either way.
+
+The previous version would have failed a correctly configured export the moment
+anyone passed `-root-squash=off`, because it read 65534 as the server's answer.
+A run with exactly that flag now passes and prints both halves at once: root's
+`chown` permitted on both nodes, and the file root wrote displaying as
+`65534(nobody):65534(nobody)`.
 
 ### What it means for the system under test
 

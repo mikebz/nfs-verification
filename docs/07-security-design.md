@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-13
-Updated: 2026-09-13
+Updated: 2026-09-14
 Status: **shipped**, delivery step 8. The harness pieces and all seven cases are
 in the tree and have been run once against a live cluster; Section 10 is what
 that run returned. The PR is not yet open.
@@ -66,7 +66,7 @@ suite runs**; no case exists yet, and nothing here is a result.
 | The same table, address family | The listener is IPv6 and an IPv4 client arrives **IPv4-mapped** | SEC-06 has a subject even on a single-stack cluster, and it is a record rather than an assertion there |
 | An unrelated pod, no claim, mounting another claim's export | **Granted**, read-write, and the other tenant's bytes came back | SEC-05 has an outcome to report and the report is red |
 | The same mount with `CAP_SYS_ADMIN` only | Refused with `EACCES`, for a **client-side** reason | The trap this phase most needs to avoid: a probe that cannot mount reports a refusal that never happened |
-| Ownership of a root-written file, server side and client side | uid 0 on the server, **nobody** on the client | The export does not squash; the client cannot map the owner *name*. SEC-02 reads this as squash today, which is a finding against this suite |
+| Ownership of a root-written file, server side and client side | uid 0 on the server, **nobody** on the client | The export does not squash; the client cannot map the owner *name*. SEC-02 read this as squash, which was a finding against this suite; it now asks whether a `chown` is permitted, which the idmapper cannot answer wrongly. F-021 |
 | A pod with `fsGroup`, on a populated share | Supplementary gid granted, **volume ownership untouched**, new files take their group from the directory's setgid bit | SEC-03's two halves, and which of them can fail |
 | The server's grace announcements | Present in a log **file inside the export**, absent from the container's stdout | Refines F-008: the signal exists, the channel does not carry it |
 
@@ -344,21 +344,28 @@ Section 6 either way, and it is the part to read first.
 ## 10. What the runs returned
 
 `make test-sec FLAGS="-storage-class=nfs -lease-seconds=60 -grace-seconds=90"`,
-run `20260913-233438`, GKE cluster `gke-w1`, Kubernetes v1.37.0-gke.2941000,
+run `20260914-001604`, GKE cluster `gke-w1`, Kubernetes v1.37.0-gke.2941000,
 three `e2-standard` workers on Container-Optimized OS with kernel 6.12.94+,
 StorageClass `nfs` backed by `nfs-server-provisioner` v4.0.8, profile `default`
-(lease 60s, grace 90s). The whole category took 2m33s against a 30 minute budget.
+(lease 60s, grace 90s). The whole category took 2m37s against a 30 minute budget.
 
-This is the third run of the category. Two earlier runs, `20260913-171950` and
-`20260913-231606`, returned the same verdicts on the same cluster, but both
-exercised a SEC-04 that no longer exists: review replaced it twice, and the
-result of a case that has been rewritten is not a result for the case in the
-tree. Only the run above describes the code as it stands.
+This is the fourth run of the category, and the only one that describes the code
+as it stands. The three before it — `20260913-171950`, `20260913-231606` and
+`20260913-233438` — returned the same verdicts on the same cluster, but each
+exercised a case review has since replaced: SEC-04 twice, then SEC-02. The result
+of a case that has been rewritten is not a result for the case in the tree.
+
+SEC-02 was also run once on its own with `-root-squash=off`, which is what this
+export is actually configured for, to exercise the branch that asserts rather
+than records. It passes, and prints both halves of F-021 in one output: root's
+`chown` permitted on both nodes, and the file root wrote displaying as
+`65534(nobody):65534(nobody)`. No other case takes a flag the table above does
+not.
 
 | Case | Result | What it said |
 |---|---|---|
 | SEC-01 | pass | ownership survives the crossing |
-| SEC-02 | pass | coherent across clients, and see F-021 for what it names the cause |
+| SEC-02 | pass | an owner was refused a `chown` of its own file on both nodes; root was permitted it on both, so this export does not squash, whatever the ownership displays as (F-021) |
 | SEC-03 | pass | no chown storm, no ownership change, 1s against 1s, and the gid never reaches the volume (F-020) |
 | SEC-04 | pass | the server held both nodes' locks at once, discarded only the departing node's, and the survivor kept its lock and its I/O |
 | SEC-05 | **fail** | a node with no claim mounted the owner's export and read its bytes (F-018) |
@@ -388,10 +395,6 @@ Three things the run taught that the design did not anticipate:
 
 ## 11. Open
 
-- Whether the `nobody` ownership in Section 2 is the client's idmapper or the
-  server's reporting is now settled, and it is the client's: F-021. SEC-02 still
-  attributes it to the export, which is wrong, and correcting it is a change to
-  SEC-02's assertion rather than to this phase.
 - What bound a `fsGroup` mount should be held to when a chown storm *is*
   happening has no ratified value. The case measures against a control pod on the
   same claim rather than inventing one, and the number belongs in `pkg/slo`.

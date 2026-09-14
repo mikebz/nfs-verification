@@ -270,7 +270,7 @@ How the data is read, and what a green run does and does not establish, is in
 | ID | Case | Expected |
 |---|---|---|
 | SEC-01 | ✅ UID/GID preservation across pods | Ownership as written. Derived from reports of v4 clients mapping local IDs to `nobody` on modern kernels. |
-| SEC-02 | ✅ `root_squash` enabled: root-owned pod writes | Squashed to anonymous as configured |
+| SEC-02 | ✅ Who may change a file's ownership | An owner is refused a `chown` of its own file: changing a file's owner requires privilege everywhere, and owning it is not privilege ([`chown(2)`](https://man7.org/linux/man-pages/man2/chown.2.html)). What the server does with a client claiming uid 0 is a deployment choice, so it is asserted only against `-root-squash` where that states the intent, and otherwise recorded — but whichever rule is in force must be applied to every client alike, since a half-squash makes what a workload may do depend on where it was scheduled. The probe is the operation, never what `stat` displays: F-021 is this case reading a client-side mapping as the export's policy. |
 | SEC-03 | ✅ Pod `securityContext.fsGroup` interaction | Group access correct; no unexpected chown storm on large volumes |
 | SEC-04 | ✅ Client state isolation between nodes | One node losing its mount must not discard another node's locks, and the survivor must still be able to read and write. NFSv4.1 holds state per client, so if two nodes are one client to the server, either one's departure takes the other's state with it and the survivor is never told. Derived from an open report that connections carrying no client identity are treated as the proxy host; the access-control half of that report is measured end to end by SEC-05, which attempts the mount rather than inspecting addresses. **High priority: Kubernetes always inserts a Service.** |
 | SEC-05 | ✅ Denied client attempts mount | Rejected, not silently granted |
@@ -432,10 +432,10 @@ and every red below is a statement about this deployment.
 blocked**, over the thirty-five cases that existed then. The seven security
 cases landed afterwards and have not been in a whole-suite run.
 
-**Security category, 2026-09-13, `make test-sec`, run `20260913-233438`, 2m33s:
-7 passed, 1 failed, 1 skipped** over SEC-01 to SEC-09. Two earlier runs of the
-category returned the same verdicts, but against a SEC-04 that review has since
-replaced.
+**Security category, 2026-09-14, `make test-sec`, run `20260914-001604`, 2m37s:
+7 passed, 1 failed, 1 skipped** over SEC-01 to SEC-09. Three earlier runs of the
+category returned the same verdicts, but each against a case review has since
+replaced: SEC-04 twice, then SEC-02.
 
 None of the reds is a defect in the storage server, and each one has a finding:
 
@@ -470,7 +470,7 @@ doc, where it has one, is named in its row.
 | 5 | Close out PROV: PROV-02, PROV-05 to PROV-11 | done, [PR #10](https://github.com/mikebz/nfs-verification/pull/10) |
 | 6 | Close out DATA: DATA-06 to DATA-13, `locktool`. [Design](05-data-path-and-locktool-design.md) | done except the soak, [PR #12](https://github.com/mikebz/nfs-verification/pull/12) onward. DATA-10 has now been run and passes (2026-09-13); DATA-14 is deferred (Section 3.2) |
 | 7 | OBS: OBS-01 through OBS-07. [Design](06-observability-design.md) | **in progress**, first of three PRs done ([PR #29](https://github.com/mikebz/nfs-verification/pull/29)): the kubelet stats reader and OBS-06, red on the quota check ([F-009](findings.md)). Section 3.5 stays open either way: OBS-01's behavioral half needs a fault from step 10 |
-| 8 | Close out SEC: SEC-03 to SEC-09. [Design](07-security-design.md) | **code complete, not yet in a PR**: all seven cases are in the tree and were run against `gke-w1` on 2026-09-13 (run `20260913-233438`, 2m33s). SEC-05 is red and stays red ([F-018](findings.md)), SEC-06 skips on a single-stack cluster, the rest pass |
+| 8 | Close out SEC: SEC-03 to SEC-09. [Design](07-security-design.md) | **in review**, [PR #57](https://github.com/mikebz/nfs-verification/pull/57): all seven cases are in the tree and were run against `gke-w1` (run `20260914-001604`, 2m37s). SEC-05 is red and stays red ([F-018](findings.md)), SEC-06 skips on a single-stack cluster, the rest pass. Review also rewrote SEC-04, which no longer reads the server at all, and SEC-02, which now probes a privileged operation rather than what `stat` prints ([F-021](findings.md)) |
 | 9 | Close out SCALE: SCALE-01 to SCALE-07 | not started |
 | 10 | Close out CHAOS: CHAOS-03, CHAOS-04, CHAOS-08 to CHAOS-18, and OBS-01's behavioral half | not started |
 | 11 | SKEW-01 to SKEW-03, conditional on preflight finding independent versioning | not started |
@@ -526,8 +526,8 @@ These are decisions the plan made in the absence of an input. Each is a one-line
 
 1. Workload profile: 20 pods per volume, 4KiB to 1GiB files, 70/30 read/write.
 2. Scale targets: 50 volumes per cluster, 10 mounts per node.
-3. AUTH_SYS with `root_squash` on.
+3. AUTH_SYS. Whether root is squashed is no longer assumed: `-root-squash` states it where somebody knows, SEC-02 records it otherwise, and either way SEC-02 requires the same rule on every client.
 4. Node auto-repair and auto-upgrade disabled on the test node pool. If they are not, chaos results are invalid.
 5. Server workload sets `tolerationSeconds: 30`, and ungraceful node-loss testing applies the out-of-service taint. Without both, CHAOS-03 is blocked rather than failed. See the floor note in Section 3.8.
 
-Resolved since draft: failover SLO (60s process and graceful, 90s ungraceful node loss, against the `tuned` lease and grace profile); harness location (workstation, external, Kubernetes client only); lease and grace pinned to two explicit profiles rather than left at vendor defaults.
+Resolved since draft: failover SLO (60s process and graceful, 90s ungraceful node loss, against the `tuned` lease and grace profile); harness location (workstation, external, Kubernetes client only); lease and grace pinned to two explicit profiles rather than left at vendor defaults; `root_squash`, which was assumed on and is a deployment choice no case may invent.
