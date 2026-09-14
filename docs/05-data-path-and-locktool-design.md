@@ -3,7 +3,11 @@
 Author: mikebz@
 Created: 2026-09-11
 Updated: 2026-09-14
-Status: shipped, delivery steps 1, 2, 2b, 6. DATA-01 through DATA-13 shipped; DATA-14 deferred.
+Status: shipped, delivery steps 1 ([PR #1](https://github.com/mikebz/nfs-verification/pull/1)),
+2 ([PR #3](https://github.com/mikebz/nfs-verification/pull/3)),
+2b ([PR #4](https://github.com/mikebz/nfs-verification/pull/4)),
+and 6 ([PR #12](https://github.com/mikebz/nfs-verification/pull/12) onward).
+DATA-01 through DATA-13 shipped; DATA-14 deferred.
 Serves: DATA-01 through DATA-14 (complete Data Path test group). Requirements in
 [`01-test-plan.md`](01-test-plan.md) Section 3.2.
 Builds on [`01-test-plan.md`](01-test-plan.md), [`03-chaos-operations-design.md`](03-chaos-operations-design.md),
@@ -26,7 +30,8 @@ NFSv4.1 makes a different, strictly bounded set of guarantees:
    guaranteed to be visible to pod B on another node only after pod A closes the file
    and pod B subsequently opens it (`DATA-03`). While pod A holds the file open, pod B
    may see nothing or a partial prefix (`DATA-04`), unless attribute caching is
-   disabled (`DATA-08`, `noac`) or the application requests Direct I/O (`DATA-07`, `O_DIRECT`).
+   disabled (`DATA-08`, `noac`). Direct I/O separately bypasses page caching on both
+   sides for block-aligned I/O (`DATA-07`, `O_DIRECT`).
 2. **Concurrent writers without corruption**: Multiple clients writing to distinct
    files on the same share must never cross-contaminate each other (`DATA-01`).
 3. **Append semantics and implementation limits (`O_APPEND`)**: NFSv4.1 has no native
@@ -67,11 +72,11 @@ primitives inside minimal container environments:
   - `try`: Probes acquisition of a range (`F_SETLK`), reporting success or conflict offset/length.
   - `getlk`: Queries the server's lock table via `F_GETLK` without acquiring, proving whether
     an existing client still holds its allocated range.
-- **Node agent `/proc/locks` reader (`pkg/framework/nodelocks.go`)**:
+- **Node agent `/proc/locks` reader (`pkg/framework/locks.go`)**:
   Reads the client node's own `/proc/locks` table via the privileged node agent.
   Matches locks using node-specific anonymous device numbers (`st_dev`) and inodes,
   distinguishing a client's belief about a lock from what the server reports ([F-010](findings.md)).
-- **Clone volume mechanism (`pkg/framework/clonepv.go`)**:
+- **Clone volume mechanism (`pkg/framework/nfssource.go`)**:
   Mount options belong to the volume in Kubernetes. To test attribute caching (`DATA-08`, `noac`),
   the harness inspects the dynamically provisioned claim's PV, extracts its server and path,
   and provisions a static clone PV pointing to the identical export with `noac` applied.
@@ -127,13 +132,13 @@ profile-driven timing) live in [`01-test-plan.md`](01-test-plan.md) Section 4.1.
 | **DATA-01** | Shipped | 4 pods concurrently write 1MiB files: all checksums match, no cross-contamination, exactly 4 directory entries | Multi-writer file partitioning, RFC 8881 Sec 10 |
 | **DATA-02** | Shipped | 4 pods append 50 records each with `O_APPEND`: zero torn records; exact line count carries caveat | Implementation caveat: NFSv4.1 lacks atomic append; torn records are corruption |
 | **DATA-03** | Shipped | Close-to-open: pod A writes & closes, pod B opens & reads: B sees A's data | RFC 8881 Sec 10 (Client cache consistency) |
-| **DATA-04** | Shipped | Negative visibility: pod A writes without closing: reader sees empty, prefix, or full data; never unwritten bytes | Documented protocol boundary; immediate visibility after close |
+| **DATA-04** | Shipped | Negative visibility: pod A writes without closing: reader sees empty, prefix, or full data; never unwritten bytes | Deployment-specific boundary check; immediate visibility after close |
 | **DATA-05** | Shipped | Cross-node locking: mutual exclusion holds for whole-file (`flock`) and disjoint byte ranges (`locktool`) | RFC 8881 Sec 9 (Locking & Share reservations) |
 | **DATA-06** | Shipped | Pod holding byte-range lock is force-deleted: lock released within one lease period; node unmounts cleanly | Linux client lease model; teardown unmount ordering ([F-001](findings.md)) |
-| **DATA-07** | Shipped | Two pods open file with `O_DIRECT`: writes land at disjoint offsets, bypass page cache, reads match committed data | Linux `open(2)` `O_DIRECT`, block-aligned I/O |
+| **DATA-07** | Shipped | Two pods open file with `O_DIRECT`: writes land at disjoint offsets, bypass page cache, reads match written data | Linux `open(2)` `O_DIRECT`, block-aligned I/O |
 | **DATA-08** | Shipped | `noac` mount option on clone PV: cross-node reader sees unclosed write immediately | `nfs(5)` attribute caching options |
 | **DATA-09** | Shipped | Same-node open unlink creates `.nfs*` silly rename; cross-node unlink returns old data or `ESTALE`; rename follows file | Linux VFS silly-rename semantics, RFC 8881 file handles |
-| **DATA-10** | Shipped | 100k entries directory listed while 50k entries deleted: listing completes, 0 invented names, 0 server crashes, 0 dmesg errors | READDIR cache reuse safety under pressure |
+| **DATA-10** | Shipped | 100k entries directory listed while 50k entries deleted: listing completes, 0 invented names; server pod restarts and dmesg error markers monitored | READDIR cache reuse safety under pressure |
 | **DATA-11** | Shipped | Sparse file write: holes read as zero, logical size matches; hole punch recorded as unsupported on NFSv4.1 | RFC 7862 (NFSv4.2 `DEALLOCATE` unavailable on 4.1); zero-fill intact |
 | **DATA-12** | Shipped | `fsync` durability: write records with `conv=fsync`, SIGKILL server: 100% acknowledged records survive with verdict `correct` | RFC 8881 Sec 18.3 (`COMMIT` durability guarantee) |
 | **DATA-13** | Shipped | Uncommitted durability: write records without `fsync`, SIGKILL server: uncommitted records may be absent or short, 0 `wrong` | RFC 8881 Sec 18.3 (Uncommitted writes lack durability) |
@@ -153,7 +158,7 @@ profile-driven timing) live in [`01-test-plan.md`](01-test-plan.md) Section 4.1.
 - **Steps**:
   1. Schedule four appender pods across worker nodes and truncate the shared file.
   2. Concurrently append 50 records (one short line each) per pod through an open file descriptor.
-  3. Read back the entire file from a dedicated reader pod on a node unused by the appenders.
+  3. Read back the entire file from a dedicated non-writing reader pod (placed on an unused node when more than 4 workers are available) to cross the server and avoid local cache hits.
   4. Assert every line is a whole, untorn record, and no record is duplicated (torn records fail immediately as corruption).
   5. Check total line count against 200 expected records; if lines were lost, report failure with the implementation caveat and list the missing record IDs per appender ([F-016](findings.md)).
 
@@ -177,7 +182,7 @@ profile-driven timing) live in [`01-test-plan.md`](01-test-plan.md) Section 4.1.
 ### DATA-05: Cross-node file and byte-range locking
 - **Steps**:
   1. Pin holder pod to Node A and contender pod to Node B on one claim.
-  2. Verify server-side locking support (`/proc/mounts` carries neither `nolock` nor `local_lock=flock|all`).
+  2. Verify server-side locking support per subtest: check for `nolock` or `local_lock=flock|all` before whole-file flock, and `nolock` or `local_lock=posix|all` before byte ranges.
   3. Subtest `whole-file-flock`:
      a. Holder acquires exclusive whole-file lock via `HoldFlock`.
      b. Contender probes lock via `TryFlock` and asserts it is refused.
@@ -191,9 +196,9 @@ profile-driven timing) live in [`01-test-plan.md`](01-test-plan.md) Section 4.1.
 - **Steps**:
   1. Pin holder pod to Node A and contender pod to Node B on one claim.
   2. Holder acquires byte range `[0, 4096)` on shared file via `locktool hold`.
-  3. Force-delete holder pod (`gracePeriodSeconds: 0`) and remove its pod finalizers.
-  4. Wait for Node A's kubelet to unmount the volume (`NodeStatus.VolumesInUse`), preventing node wedging ([F-001](findings.md)).
-  5. Contender attempts to acquire `[0, 4096)`. Assert acquisition succeeds within one lease period (`slo.LeasePeriod`).
+  3. Force-delete holder pod (`gracePeriodSeconds: 0`) via `ForceDeletePodAt` without altering pod finalizers.
+  4. Wait for Node A to release the mount (observed via `NodeStatus.VolumesInUse` if attach-required, or directly via `/proc/mounts` inspection via `AwaitUnmount`), preventing node wedging ([F-001](findings.md)).
+  5. Contender attempts to acquire `[0, 4096)` alongside the unmount wait. Assert acquisition succeeds within the profile lock release bound (`slo.LockReleaseBound`).
   6. Classify release mechanism: ~1 second indicates local descriptor cleanup; ~lease duration indicates lease expiry.
 
 ### DATA-07: Direct I/O (`O_DIRECT`) from two pods
@@ -224,37 +229,37 @@ profile-driven timing) live in [`01-test-plan.md`](01-test-plan.md) Section 4.1.
   2. Subtest `cross-node-unlink`:
      a. Pod A on Node A holds open descriptor.
      b. Pod C on Node B unlinks and creates a decoy file with the same name.
-     c. Assert Pod A reads either old content or receives `ESTALE`; fail if Pod A reads decoy content (handle reuse).
+     c. Assert Pod A reads either old content or returns an error prefixed with `ReadFailedPrefix` (including `ESTALE` and I/O errors); fail if Pod A reads decoy content (handle reuse) or unexpected bytes.
   3. Subtest `rename`:
      a. File renamed from `old.dat` to `new.dat` while descriptor open; assert descriptor reads original file content.
 
 ### DATA-10: Large directory readdir racing concurrent deletions
 - **Steps**:
-  1. Pre-check free disk space and inodes; report `blocked` if export lacks capacity for 100k entries.
+  1. Pre-check free capacity: report `blocked` if export reports fewer than 100,000 free inodes (`FreeInodes < 100000`), while logging free bytes.
   2. Record baseline kernel ring buffer (`dmesg`) on worker nodes and baseline server restart count.
   3. Populate directory with 100,000 files using batched parallel sharding.
   4. Start background process deleting 50,000 files while client pod lists the directory with `find`.
   5. Validate returned entries:
      - Count can legitimately be fewer than 100k due to concurrent deletions.
      - Any returned name not created during population fails immediately as a directory chunk use-after-free defect.
-  6. Assert server pod restart count did not increase and no new kernel oops or KASAN errors appeared in `dmesg`.
+  6. Assert server pod restart count did not increase and no new kernel oops or KASAN error markers appeared in `dmesg`.
 
 ### DATA-11: Sparse file write and hole punch
 - **Steps**:
   1. Subtest `sparse-write-and-read-back`:
      a. Write block 0, seek past hole, write block 8 (total logical length 9 blocks).
      b. Assert logical size is exactly 36KiB.
-     c. Assert the unwritten hole (blocks 1 through 7) reads back strictly as binary zeros.
+     c. Assert the unwritten hole at block 1 (`holeBlock = 1`) reads back strictly as binary zeros (checked via `countNonZero`), and block 8 matches written content.
      d. Record allocated physical blocks via `stat -c %b`.
   2. Subtest `hole-punch`:
      a. Probe whether `fallocate -p` is supported by tools image.
      b. If unsupported, report `blocked` naming `-tools-image`.
-     c. If supported, attempt hole punch: on NFSv4.1, record `EOPNOTSUPP` as protocol limitation (RFC 7862 / NFSv4.2 required). Fail only if punch reports success without zeroing.
+     c. If supported, attempt hole punch: on NFSv4.1, any non-zero exit from `fallocate -p` is recorded as an unsupported protocol limitation (RFC 7862 / NFSv4.2 `DEALLOCATE` required). Fail only if punch reports success without zeroing the block.
 
 ### DATA-12: `fsync` and `COMMIT` durability across server SIGKILL
 - **Steps**:
   1. Start write workload generating 1 record/s with `conv=fsync`.
-  2. Allow workload to commit at least 30 records (`minDurabilitySet: 10`).
+  2. Workload attempts at least 30 records, requiring at least 10 committed records (`minDurabilitySet: 10`) before fault injection.
   3. Locate server process PID on host node via `ServerTarget` and send `SIGKILL`.
   4. Wait for client I/O to recover (outage measured as silence gap; recovery timing owned by `CHAOS-01`).
   5. Run content-verifying sweep from an independent worker node across all records committed before fault.
@@ -299,8 +304,8 @@ The design for `DATA-14` is preserved for `SCALE-07`: one job per pod over an is
 - **Four-verdict durability sweep**: Binary existence checks hide truncation and byte corruption. The sweep
   differentiates `correct`, `absent`, `short`, and `wrong`, establishing the precise boundary between
   committed durability (`DATA-12`) and uncommitted prefix flushing (`DATA-13`).
-- **Force deletion requires unmount confirmation**: `DATA-06` waits for the node to clear
-  `NodeStatus.VolumesInUse` before proceeding, preventing persistent volume wedging ([F-001](findings.md)).
+- **Force deletion requires unmount confirmation**: `DATA-06` waits for the node to release the mount
+  (via `NodeStatus.VolumesInUse` or direct `/proc/mounts` inspection via `AwaitUnmount`) before proceeding, preventing persistent volume wedging ([F-001](findings.md)).
 - **Mount option guards**: Lock cases check `/proc/mounts` and report `blocked` when `nolock` or
   `local_lock` is active, preventing misattribution of configuration choices to server defects.
 
