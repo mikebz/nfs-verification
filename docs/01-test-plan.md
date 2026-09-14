@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-10
-Updated: 2026-09-13
+Updated: 2026-09-14
 Version: 1.0 (v1 scope)
 
 This is the requirements and delivery document: what gets verified, why, the
@@ -254,7 +254,7 @@ Blanket rule: any core dump on any server pod fails the run. Cores are collected
 routing are organization-specific and problem-specific, and a portable suite
 that asserted on them would fail a healthy storage system for a threshold set
 differently, and would have to find or install a monitoring stack it does not
-own. The four cases above verify the **data an alert is built on**: that it
+own. The cases above verify the **data an alert is built on**: that it
 exists, is current, and agrees with what the workload sees. A deployment missing
 that data cannot be alerted on by anyone, whatever rules they write, so each
 case fails rather than skipping when the data is absent.
@@ -428,10 +428,10 @@ doc, where it has one, is named in its row.
 | 2 | Cases needing nothing new from the harness: PROV-03, PROV-04, DATA-01, DATA-04, SEC-01 | done, [PR #3](https://github.com/mikebz/nfs-verification/pull/3) |
 | 2b | The three held back from step 2: DATA-02, OBS-04, SEC-02 | done, [PR #4](https://github.com/mikebz/nfs-verification/pull/4) |
 | 3 | `pkg/chaos`, CHAOS-01, CHAOS-02, the SLO measurement path, fault timelines. [Design](03-chaos-operations-design.md) | done, [PR #4](https://github.com/mikebz/nfs-verification/pull/4) |
-| 4 | Grace and lock reclaim: CHAOS-05, CHAOS-06, CHAOS-07, OBS-02, OBS-03. [Design](04-grace-and-lock-reclaim-design.md) | done, [PR #8](https://github.com/mikebz/nfs-verification/pull/8) |
+| 4 | Grace and lock reclaim: CHAOS-05, CHAOS-06, CHAOS-07. [Design](04-grace-and-lock-reclaim-design.md) (OBS-02, OBS-03 consolidated in [doc 06](06-observability-design.md)) | done, [PR #8](https://github.com/mikebz/nfs-verification/pull/8) |
 | 5 | Close out PROV: PROV-02, PROV-05 to PROV-11 | done, [PR #10](https://github.com/mikebz/nfs-verification/pull/10) |
 | 6 | Close out DATA: DATA-06 to DATA-13, `locktool`. [Design](05-data-path-and-locktool-design.md) | done except the soak, [PR #12](https://github.com/mikebz/nfs-verification/pull/12) onward. DATA-10 has now been run and passes (2026-09-13); DATA-14 is deferred (Section 3.2) |
-| 7 | OBS: OBS-05, OBS-06, OBS-07 and the half of OBS-01 that needs no fault. [Design](06-observability-design.md) | **in progress**, first of three PRs done ([PR #29](https://github.com/mikebz/nfs-verification/pull/29)): the kubelet stats reader and OBS-06, red on the quota check ([F-009](findings.md)). Section 3.5 stays open either way: OBS-01's behavioral half needs a fault from step 10 |
+| 7 | OBS: OBS-01 through OBS-07. [Design](06-observability-design.md) | **in progress**, first of three PRs done ([PR #29](https://github.com/mikebz/nfs-verification/pull/29)): the kubelet stats reader and OBS-06, red on the quota check ([F-009](findings.md)). Section 3.5 stays open either way: OBS-01's behavioral half needs a fault from step 10 |
 | 8 | Close out SEC: SEC-03 to SEC-09 | not started |
 | 9 | Close out SCALE: SCALE-01 to SCALE-07 | not started |
 | 10 | Close out CHAOS: CHAOS-03, CHAOS-04, CHAOS-08 to CHAOS-18, and OBS-01's behavioral half | not started |
