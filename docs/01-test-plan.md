@@ -137,6 +137,9 @@ Case ID scheme: `CATEGORY-NN`, matching the test category (`PROV`, `DATA`, `CHAO
 
 ### 3.1 Provisioning and lifecycle (PROV)
 
+How volume provisioning, lifecycle, expansion, snapshots, and reclaim policies are verified is in
+[`02-provisioning-design.md`](02-provisioning-design.md).
+
 | ID | Case | Expected |
 |---|---|---|
 | PROV-01 | ✅ Dynamic provision RWX PVC, bind, mount, write, delete | PV created and removed; backing directory or volume reclaimed |
@@ -468,12 +471,12 @@ doc, where it has one, is named in its row.
 
 | Step | Scope | Status |
 |---|---|---|
-| 1 | Approach, harness skeleton, preflight (Section 0), PROV-01, DATA-03, DATA-05 `flock` | done, [PR #1](https://github.com/mikebz/nfs-verification/pull/1) |
-| 2 | Cases needing nothing new from the harness: PROV-03, PROV-04, DATA-01, DATA-04, SEC-01 (SEC-01 documented in [doc 07](07-security-design.md)) | done, [PR #3](https://github.com/mikebz/nfs-verification/pull/3) |
+| 1 | Approach, harness skeleton, preflight (Section 0), PROV-01, DATA-03, DATA-05 `flock` | done, [PR #1](https://github.com/mikebz/nfs-verification/pull/1) (PROV-01 documented in [doc 02](02-provisioning-design.md)) |
+| 2 | Cases needing nothing new from the harness: PROV-03, PROV-04, DATA-01, DATA-04, SEC-01 (PROV cases documented in [doc 02](02-provisioning-design.md), SEC-01 in [doc 07](07-security-design.md)) | done, [PR #3](https://github.com/mikebz/nfs-verification/pull/3) |
 | 2b | The three held back from step 2: DATA-02, OBS-04, SEC-02 (SEC-02 documented in [doc 07](07-security-design.md), OBS-04 in [doc 06](06-observability-design.md)) | done, [PR #4](https://github.com/mikebz/nfs-verification/pull/4) |
 | 3 | `pkg/chaos`, CHAOS-01, CHAOS-02, the SLO measurement path, fault timelines. [Design](03-chaos-operations-design.md) (serves all CHAOS cases) | done, [PR #4](https://github.com/mikebz/nfs-verification/pull/4) |
 | 4 | Grace and lock reclaim: CHAOS-05, CHAOS-06, CHAOS-07. [Design](04-grace-and-lock-reclaim-design.md) (historical; consolidated in [doc 03](03-chaos-operations-design.md) and [doc 06](06-observability-design.md)) | done, [PR #8](https://github.com/mikebz/nfs-verification/pull/8) |
-| 5 | Close out PROV: PROV-02, PROV-05 to PROV-11 | done, [PR #10](https://github.com/mikebz/nfs-verification/pull/10) |
+| 5 | Close out PROV: PROV-02, PROV-05 to PROV-11. [Design](02-provisioning-design.md) (serves all PROV cases) | done, [PR #10](https://github.com/mikebz/nfs-verification/pull/10) |
 | 6 | Close out DATA: DATA-06 to DATA-13, `locktool`. [Design](05-data-path-and-locktool-design.md) (serves all DATA cases) | done except the soak, [PR #12](https://github.com/mikebz/nfs-verification/pull/12) onward. DATA-10 has now been run and passes (2026-09-13); DATA-14 is deferred (Section 3.2) |
 | 7 | OBS: OBS-01 through OBS-07. [Design](06-observability-design.md) | **in progress**, first of three PRs done ([PR #29](https://github.com/mikebz/nfs-verification/pull/29)): the kubelet stats reader and OBS-06, red on the quota check ([F-009](findings.md)). Section 3.5 stays open either way: OBS-01's behavioral half needs a fault from step 10 |
 | 8 | SEC: SEC-01 through SEC-09. [Design](07-security-design.md) | **in review**, [PR #57](https://github.com/mikebz/nfs-verification/pull/57): SEC-03 to SEC-09 are in the tree and the whole group was run against `gke-w1` (run `20260914-011748`, 2m45s). SEC-05 is red and stays red ([F-018](findings.md)), SEC-06 skips on a single-stack cluster, the rest pass. Review also rewrote three cases: SEC-04, which no longer reads the server at all and now asks a third node whether the locks survived; SEC-02, which probes a privileged operation rather than what `stat` prints ([F-021](findings.md)); and SEC-03, which now asks its question behind a gated directory, correcting [F-020](findings.md) |
