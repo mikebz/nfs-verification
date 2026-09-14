@@ -5,7 +5,7 @@ Created: 2026-09-10
 Updated: 2026-09-14
 Status: **in progress.** Serves the complete Resiliency and Chaos test group:
 CHAOS-01, CHAOS-02, CHAOS-05, CHAOS-06, and CHAOS-07 shipped (Steps 3, 4, 6);
-CHAOS-03, CHAOS-04, and CHAOS-08 through CHAOS-18 designed for Step 10.
+CHAOS-03, CHAOS-04, and CHAOS-08 through CHAOS-18 planned for delivery step 10.
 Serves: CHAOS-01 through CHAOS-18. Requirements in [`01-test-plan.md`](01-test-plan.md)
 Section 3.3, targets in Section 3.8, weighting in Section 2.4.
 Builds on [`01-test-plan.md`](01-test-plan.md). Consolidates chaos design ownership
@@ -149,26 +149,26 @@ Conventions shared across the suite (one clock per measurement, waiting past tar
 from `pkg/slo`) live in [`01-test-plan.md`](01-test-plan.md) Section 4.1. The table below lists
 the core assertions across the Resiliency & Chaos test group:
 
-| Case | Status | Assertion | Source & Basis |
-|---|---|---|---|
-| **CHAOS-01** | Shipped | Server process SIGKILL during write: recovery within SLO, 0 errors, post-COMMIT data intact | RFC 8881 Sec 18.3 (`COMMIT`), `nfs(5)` hard mount retry |
-| **CHAOS-02** | Shipped | Server pod graceful delete during write: recovery within SLO, locks reclaimed | Kubernetes graceful pod termination, RFC 8881 Sec 8.4.2 |
-| **CHAOS-03** | Step 10 | Hard-stop node hosting server: recovery within node-loss SLO, RWO volume re-attaches | Kubernetes out-of-service taint, non-graceful shutdown GA |
-| **CHAOS-04** | Step 10 | Network partition server from clients, then heal: I/O blocks then resumes, no corruption | CNI network isolation, TCP retransmit recovery |
-| **CHAOS-05** | Shipped | Repeated failover (5 cycles): each cycle recovers, no grace re-entry loop | RFC 8881 Sec 8.4.2, grace stability under churn |
-| **CHAOS-06** | Shipped | Failover with held locks: 100% whole-file locks reclaimed (disjoint byte ranges asserted if supported), conflicting clients blocked | RFC 8881 Sec 9 (LOCK) & Sec 8.4.2 (Reclaim), `locktool` |
-| **CHAOS-07** | Shipped | New lock attempt during grace: 0 grants inside grace window (blocked/refused), grant succeeded after grace | RFC 8881 Sec 8.4.2 (Grace state exclusivity) |
-| **CHAOS-08** | Step 10 | Client handles stale handles (`ESTALE`) after server restart with new state without permanent hang | RFC 8881 filehandle persistence |
-| **CHAOS-09** | Step 10 | Kubelet restart on client node with active mounts: mounts survive, I/O resumes | Kubelet volume manager mount tracking |
-| **CHAOS-10** | Step 10 | CSI node plugin eviction with active mounts: existing mounts unaffected, new mounts queue | CSI architecture, kernel mount independence |
-| **CHAOS-11** | Step 10 | CNI restart on client node: I/O blocks then resumes cleanly | CNI interface churn, kernel TCP recovery |
-| **CHAOS-12** | Step 10 | NetworkPolicy applied blocking NFS port 2049, then removed: clients recover | Kubernetes NetworkPolicy data path filtering |
-| **CHAOS-13** | Step 10 | Backing block volume disconnect during write: errors surface as retryable, no silent corruption | Underlying SDS / RWO attach stability |
-| **CHAOS-14** | Step 10 | Colocation deadlock: server pod scheduled on same node as clients under memory pressure | Hyperconverged topology page reclaim safety |
-| **CHAOS-15** | Step 10 | Client node OOM with dirty pages on NFS mount: bounded failure, no node-level hang | Linux VM dirty page throttling and OOM safety |
-| **CHAOS-16** | Step 10 | 24h chaos soak: randomized kills, partitions, evictions: 0 corruption, 0 unrecovered mounts | Systemic reliability under sustained chaos |
-| **CHAOS-17** | Step 10 | Recovery state store lost or corrupted: bounded honest failure, no conflicting locks | RFC 8881 recovery backend integrity |
-| **CHAOS-18** | Step 10 | Delegation recall under conflicting open: delegation recalled within timeout | RFC 8881 Sec 10.4 (Delegations); skipped if disabled |
+| Case | Assertion | Source & Basis |
+|---|---|---|
+| **CHAOS-01** | ✅ Server process SIGKILL during write: recovery within SLO, 0 errors, post-COMMIT data intact | RFC 8881 Sec 18.3 (`COMMIT`), `nfs(5)` hard mount retry |
+| **CHAOS-02** | ✅ Server pod graceful delete during write: recovery within SLO, locks reclaimed | Kubernetes graceful pod termination, RFC 8881 Sec 8.4.2 |
+| **CHAOS-03** | Hard-stop node hosting server: recovery within node-loss SLO, RWO volume re-attaches | Kubernetes out-of-service taint, non-graceful shutdown GA |
+| **CHAOS-04** | Network partition server from clients, then heal: I/O blocks then resumes, no corruption | CNI network isolation, TCP retransmit recovery |
+| **CHAOS-05** | ✅ Repeated failover (5 cycles): each cycle recovers, no grace re-entry loop | RFC 8881 Sec 8.4.2, grace stability under churn |
+| **CHAOS-06** | ✅ Failover with held locks: 100% whole-file locks reclaimed (disjoint byte ranges asserted if supported), conflicting clients blocked | RFC 8881 Sec 9 (LOCK) & Sec 8.4.2 (Reclaim), `locktool` |
+| **CHAOS-07** | ✅ New lock attempt during grace: 0 grants inside grace window (blocked/refused), grant succeeded after grace | RFC 8881 Sec 8.4.2 (Grace state exclusivity) |
+| **CHAOS-08** | Client handles stale handles (`ESTALE`) after server restart with new state without permanent hang | RFC 8881 filehandle persistence |
+| **CHAOS-09** | Kubelet restart on client node with active mounts: mounts survive, I/O resumes | Kubelet volume manager mount tracking |
+| **CHAOS-10** | CSI node plugin eviction with active mounts: existing mounts unaffected, new mounts queue | CSI architecture, kernel mount independence |
+| **CHAOS-11** | CNI restart on client node: I/O blocks then resumes cleanly | CNI interface churn, kernel TCP recovery |
+| **CHAOS-12** | NetworkPolicy applied blocking NFS port 2049, then removed: clients recover | Kubernetes NetworkPolicy data path filtering |
+| **CHAOS-13** | Backing block volume disconnect during write: errors surface as retryable, no silent corruption | Underlying SDS / RWO attach stability |
+| **CHAOS-14** | Colocation deadlock: server pod scheduled on same node as clients under memory pressure | Hyperconverged topology page reclaim safety |
+| **CHAOS-15** | Client node OOM with dirty pages on NFS mount: bounded failure, no node-level hang | Linux VM dirty page throttling and OOM safety |
+| **CHAOS-16** | 24h chaos soak: randomized kills, partitions, evictions: 0 corruption, 0 unrecovered mounts | Systemic reliability under sustained chaos |
+| **CHAOS-17** | Recovery state store lost or corrupted: bounded honest failure, no conflicting locks | RFC 8881 recovery backend integrity |
+| **CHAOS-18** | Delegation recall under conflicting open: delegation recalled within timeout | RFC 8881 Sec 10.4 (Delegations); skipped if disabled |
 
 ## 6. Detailed case walkthroughs (Shipped cases)
 
