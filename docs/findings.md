@@ -21,7 +21,7 @@ New entries go at the top, and take the next number.
 |---|---|---|---|
 | [F-022](#f-022-the-servers-grace-announcements-were-in-a-log-file-not-in-the-container-log-stream) | 2026-09-13 | The grace lines F-008 said do not exist do exist, in the NFS daemon's own log file inside the export volume; `kubectl logs` carries only the Go provisioner's output | F-008, doc 07 |
 | [F-021](#f-021-a-root-owned-file-reads-back-as-nobody-for-a-reason-that-is-not-squash) | 2026-09-13 | The server returns named owners as names, and the client's idmapper maps `root` to nobody while an unnamed uid survives numerically, so what `stat` shows cannot tell squash from a failed mapping; SEC-02 now probes whether a `chown` is permitted instead | SEC-02, doc 07 |
-| [F-020](#f-020-fsgroup-does-nothing-to-an-nfs-volume-here-in-either-direction) | 2026-09-13 | `fsGroup` reaches the pod's supplementary groups and nothing else: no chown storm, no ownership change, and the write that succeeds does so on the export's 0777 setgid root | SEC-03's record, `slo.FSGroupStartOverhead` |
+| [F-020](#f-020-fsgroup-does-nothing-to-an-nfs-volume-here-in-either-direction) | 2026-09-13 | `fsGroup` grants access through the AUTH_SYS gid list, which this export honours, but changes nothing about the volume: no chown storm, no ownership change, and new files keep the pod's primary gid. **Corrected 2026-09-14**: the original entry credited the world-writable root, from an assertion that could not fail | SEC-03, `slo.FSGroupStartOverhead` |
 | [F-019](#f-019-the-client-an-nfs-server-can-name-is-the-node-and-it-arrives-ipv4-mapped) | 2026-09-13 | The server sees node addresses, never pod addresses, and an IPv4 client on its IPv6 listener appears as `::ffff:a.b.c.d`, so `/proc/net/tcp` alone shows no NFS connections at all | `peers.go`, SEC-06, SEC-08 |
 | [F-018](#f-018-the-export-admits-any-client-that-can-reach-it-so-a-claims-access-control-ends-at-the-mount) | 2026-09-13 | A node with no claim mounted another claim's export and read its bytes; the exports carry no client rules and nothing in the network path restricts who may try | SEC-05's failure, SEC-08's record, doc 07 |
 | [F-017](#f-017-a-sleeping-workstation-understates-every-duration-the-suite-measures-about-itself) | 2026-09-13 | A Mac asleep mid-run freezes Go's monotonic clock but not the pods, so the suite under-reports its own durations while cluster-side measurements stay right | the README's note on long runs |
@@ -193,15 +193,40 @@ the storm it was written to catch. `slo.FSGroupStartOverhead` and
 `slo.FSGroupPopulatedEntries` are the bound and the population it measures
 against.
 
+### Corrected 2026-09-14, and why the first answer was wrong
+
+The paragraph below originally said the write had succeeded **only** because the
+export's root is world-writable, and that a workload relying on `fsGroup` here
+was relying on the mode rather than on the gid. That was not measured. SEC-03
+wrote into a 0777 directory, so the write could not have failed for lack of the
+group, and a pod that never received `fsGroup` would have passed the same
+assertion. Review caught it (PR #57), and the case now writes into a directory
+owned by the fsGroup gid with mode 0770, with the identical pod that declares no
+`fsGroup` as the control.
+
+The control is refused and the `fsGroup` pod succeeds. So the supplementary
+group **does** reach this server and **does** grant access: AUTH_SYS carries the
+gid list on every request and the export honours it. The world-writable root was
+never load-bearing; it was just the only thing being exercised.
+
+The ownership half stands, and is now measured without the setgid bit confusing
+it: the file the `fsGroup` pod writes lands `1234:1234`, its own primary gid.
+`fsGroup` is a supplementary group inside the pod and nothing more.
+
 ### What it means for the system under test
 
-**A workload that relies on `fsGroup` for access to an RWX NFS claim here is
-relying on the export being world-writable, not on the gid it declared.** That
-is a different guarantee, it is invisible in the pod spec, and it changes if
-anybody tightens the export's mode. The good news is the other half: no
-recursive chown runs on mount, so a large shared volume does not pay for a pod
-that declares a group, and one workload's `fsGroup` cannot rewrite another's
-ownership.
+**`fsGroup` works for access on an RWX NFS claim here, through the gid list
+rather than through volume ownership.** A workload can be granted a share by
+group, and the group it declares is the group the server sees. What `fsGroup`
+does *not* do is change the volume: no recursive chown runs on mount, so a large
+shared volume does not pay for a pod that declares a group, and one workload's
+`fsGroup` cannot rewrite another's ownership. A workload that expects the
+volume itself to be chowned to its gid — the second half of what Kubernetes
+documents — does not get it here, and files it creates keep its primary gid.
+
+The wider lesson is the one in the correction above: **an assertion made where
+it cannot fail produces a finding, and the finding is wrong.** This entry said
+something confident and false about the deployment for a day.
 
 ---
 

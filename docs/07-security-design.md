@@ -76,7 +76,7 @@ suite runs**; no case exists yet, and nothing here is a result.
 | An unrelated pod, no claim, mounting another claim's export | **Granted**, read-write, and the other tenant's bytes came back | SEC-05 has an outcome to report and the report is red |
 | The same mount with `CAP_SYS_ADMIN` only | Refused with `EACCES`, for a **client-side** reason | The trap this phase most needs to avoid: a probe that cannot mount reports a refusal that never happened |
 | Ownership of a root-written file, server side and client side | uid 0 on the server, **nobody** on the client | The export does not squash; the client cannot map the owner *name*. SEC-02 read this as squash, which was a finding against this suite; it now asks whether a `chown` is permitted, which the idmapper cannot answer wrongly. F-021 |
-| A pod with `fsGroup`, on a populated share | Supplementary gid granted, **volume ownership untouched**, new files take their group from the directory's setgid bit | SEC-03's two halves, and which of them can fail |
+| A pod with `fsGroup`, on a populated share | Supplementary gid granted, **volume ownership untouched** | SEC-03's two halves, and which of them can fail. The access half was probed in the export root, which is world-writable and setgid, so the write proved nothing about the gid and the group the new file inherited was the directory's, not the volume's. Both mistakes are corrected in F-020, and SEC-03 now asks the question behind a gate |
 | The server's grace announcements | Present in a log **file inside the export**, absent from the container's stdout | Refines F-008: the signal exists, the channel does not carry it |
 
 The last two rows are findings in their own right and are filed as such when the
@@ -182,8 +182,12 @@ able to fail and pointing opposite ways:
   write the share. This is the `runAsNonRoot` plus `fsGroup` pattern every
   restricted Pod Security profile pushes workloads towards, so a deployment where
   it cannot write is a deployment where the standard pattern does not work.
-  Failing names the mechanism that decided it: the volume's mode and owner, not
-  the gid.
+  **It has to be asked behind a directory the group actually gates**, mode 0770
+  owned by the fsGroup gid, with the identical pod that declares no `fsGroup` as
+  the control that must be refused. The populated directory the storm is measured
+  over is 0777 by necessity, and a write there succeeds on world permission: the
+  first version of this case asked the question there, could not have failed it,
+  and produced a wrong finding about the deployment (F-020).
 - *No chown storm.* The ownership of files that existed before the pod started
   must be **unchanged**, and the pod must reach Ready within a bound derived from
   a control pod on the same claim without `fsGroup`. A recursive chown on a
@@ -233,6 +237,15 @@ The fourth row is the control, and it is the reason the case can claim anything.
 Without it a server that discarded nothing at all would pass on node A's lock
 surviving.
 
+**Every lock query comes from a third node.** The Linux client answers `F_GETLK`
+out of its own lock table when the conflict is one it already knows about
+locally, without asking the server, so node A asking whether node A's lock
+survived returns held whatever the server thinks — which is precisely the
+failure this case hunts. A third pod on a third node, holding nothing, does the
+asking; its answers can only have come from the server. Node B cannot do it: node
+B is the client that had to leave. That makes three schedulable workers a
+precondition, and a smaller cluster skips.
+
 **What changed after this was written.** The first implementation asked a
 different question: it read the source addresses the server attributed to each
 node, from the server's own socket table, and later from each node's
@@ -243,6 +256,11 @@ SEC-05 already measures access control itself. The behaviour above is what
 distinguishable clients actually buy an application, and it is observable
 entirely through pods. The peer-table helpers survive because SEC-06 and SEC-08
 use them; SEC-04 no longer does.
+
+A third rewrite followed, in the same PR. The behavioural version above shipped
+asking node A whether node A's lock had survived, which the Linux client can
+answer without the server; automated review caught it. The observer described
+above is the fix, and the cost is the three-node precondition.
 
 **SEC-05: a client the export never named.** An owner pod writes a file with a
 known checksum. A stranger, with no claim and no relationship to that volume,
@@ -326,6 +344,11 @@ be refused must not be able to retry forever.
 **It always unmounts, and it never holds a claim.** The unmount is registered
 before the mount is attempted, the probe target is read from the PV rather than
 constructed, and the owner pod is torn down by the ordinary path, pods first.
+The script arms a trap the moment the mount succeeds and disarms it only once an
+unmount has been reported, so a probe killed between the two still unmounts —
+lazily if it must, since a mount left in a long-lived privileged container is a
+reference to an export the suite is about to delete. Review added the trap; the
+ordering above covers the script returning, not the script dying.
 
 ## 7. Decisions worth keeping
 
@@ -398,28 +421,42 @@ read-only code with unit tests of its own, so separating it bought review
 isolation that the hazard did not need. The probe mount's safety case is
 Section 6 either way, and it is the part to read first.
 
-Review then rewrote two cases, both for the same reason: they were reading
-something *about* the server instead of asking the server a question. SEC-04
-read the server's socket table, then each node's own `clientaddr`, and now reads
-nothing — it takes two clients' locks and removes one client. SEC-02 read what
-`stat` printed, and now asks whether a `chown` is permitted. The pattern is worth
-naming for the next phase: **where a case can perform the operation whose outcome
-it cares about, inspecting a precondition instead is the weaker test**, and on
-this deployment it was the wrong one.
+Review then rewrote three cases, all for the same reason: each was reading
+something *about* the server, or about a precondition, instead of asking the
+server the question it cared about. SEC-04 read the server's socket table, then
+each node's own `clientaddr`, and now reads nothing — it takes two clients' locks
+and removes one client. SEC-02 read what `stat` printed, and now asks whether a
+`chown` is permitted. SEC-03 wrote into the world-writable export root, where the
+write would have succeeded with no supplementary group at all, and now writes
+behind a gated directory with a control pod that must be refused. The pattern is
+worth naming for the next phase: **where a case can perform the operation whose
+outcome it cares about, inspecting a precondition instead is the weaker test**,
+and on this deployment it was the wrong one.
+
+A second review round, automated, found the cases could still pass without
+having tested anything, in two more places. SEC-04's lock queries came from the
+holder's own node, which the Linux client answers locally. SEC-03's gate arrived
+setgid, so the file inherited the gate's group and the case reported that the
+volume manages ownership, which it does not. Both are the same failure as the
+three above, one step further in: the case did the right operation and then
+asked the wrong witness. The SEC-03 fix also overturned F-020, which had been
+published from the ungated probe; the correction is recorded there rather than
+here.
 
 ## 10. What the runs returned
 
 `make test-sec FLAGS="-storage-class=nfs -lease-seconds=60 -grace-seconds=90"`,
-run `20260914-001604`, GKE cluster `gke-w1`, Kubernetes v1.37.0-gke.2941000,
+run `20260914-011748`, GKE cluster `gke-w1`, Kubernetes v1.37.0-gke.2941000,
 three `e2-standard` workers on Container-Optimized OS with kernel 6.12.94+,
 StorageClass `nfs` backed by `nfs-server-provisioner` v4.0.8, profile `default`
-(lease 60s, grace 90s). The whole category took 2m37s against a 30 minute budget.
+(lease 60s, grace 90s). The whole category took 2m45s against a 30 minute budget.
 
-This is the fourth run of the category, and the only one that describes the code
-as it stands. The three before it — `20260913-171950`, `20260913-231606` and
-`20260913-233438` — returned the same verdicts on the same cluster, but each
-exercised a case review has since replaced: SEC-04 twice, then SEC-02. The result
-of a case that has been rewritten is not a result for the case in the tree.
+This is the sixth run of the category, and the only one that describes the code
+as it stands. The five before it returned the same verdicts on the same cluster,
+but each exercised a case review has since replaced: SEC-04 twice, then SEC-02,
+then SEC-03 and SEC-04 again. The result of a case that has been rewritten is not
+a result for the case in the tree, and two of those rewrites changed what a green
+verdict means rather than only how it is reached.
 
 SEC-02 was also run once on its own with `-root-squash=off`, which is what this
 export is actually configured for, to exercise the branch that asserts rather
@@ -432,8 +469,8 @@ not.
 |---|---|---|
 | SEC-01 | pass | ownership survives the crossing |
 | SEC-02 | pass | an owner was refused a `chown` of its own file on both nodes; root was permitted it on both, so this export does not squash, whatever the ownership displays as (F-021) |
-| SEC-03 | pass | no chown storm, no ownership change, 1s against 1s, and the gid never reaches the volume (F-020) |
-| SEC-04 | pass | the server held both nodes' locks at once, discarded only the departing node's, and the survivor kept its lock and its I/O |
+| SEC-03 | pass | no chown storm, no ownership change, 1s against 1s, and the fsGroup gid grants access through the AUTH_SYS gid list while leaving the volume alone (F-020) |
+| SEC-04 | pass | the server held both nodes' locks at once, discarded only the departing node's, and the survivor kept its lock and its I/O — all read from a third node that held nothing |
 | SEC-05 | **fail** | a node with no claim mounted the owner's export and read its bytes (F-018) |
 | SEC-06 | skip | the cluster is single-stack IPv4 |
 | SEC-07 | pass | the survivor kept its lock, the vanished pod's range came back in 2s, the replacement was granted it |
