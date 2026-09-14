@@ -37,7 +37,7 @@ prerequisites.
 | Document | What it answers |
 |---|---|
 | [`docs/01-test-plan.md`](docs/01-test-plan.md) | What gets verified and why: the architecture under test, every case ID, the SLO table, and delivery order with shipped/remaining progress |
-| [`docs/findings.md`](docs/findings.md) | What running against a real cluster taught, `F-001` upward. **Read it before touching teardown, deletion, or anything that unmounts** |
+| [`docs/findings.md`](docs/findings.md) | What running against a real cluster taught, `F-001` upward: the index, with one file per finding in [`docs/findings/`](docs/findings/). **Read it before touching teardown, deletion, or anything that unmounts** |
 | [`AGENTS.md`](AGENTS.md) | How to work here: change size, case conventions, the sources every assertion cites, what to claim when you are done |
 
 One design doc per delivery group, in `docs/`. Each opens with a header saying
@@ -108,6 +108,17 @@ the run ID, so a result reported from a target is one anyone else can reproduce.
 the generated run ID. `make unit` needs no cluster, no network and no
 kubeconfig, and unit tests must stay that way: a test under `pkg/` that needs a
 cluster belongs in `test/e2e` behind a capability check.
+
+**Worker nodes need at least 4GB of memory**, which on GKE means `e2-medium` or
+larger. A 2GB node (`e2-small`) cannot host the suite: the platform's own system
+daemons already account for most of that, and the nodes then reboot mid-run,
+which from inside a case is indistinguishable from the storage failures the plan
+is hunting — I/O that stalls, a mount that does not come back, a lock that is not
+reclaimed. Nothing in the suite checks it. Section 0 of the test plan is the set
+of conditions preflight enforces and refuses to run without, and this is not one
+of them, so it is an operational prerequisite for whoever builds the cluster
+rather than a failure that names itself. Teaching preflight to read allocatable
+memory and say so is the open item on [F-002](docs/findings.md).
 
 `make test-data` injects faults. DATA-12 and DATA-13 kill the NFS server
 process, because the suite sorts strictly by category and they are DATA cases;

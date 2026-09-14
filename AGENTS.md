@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-10
-Updated: 2026-09-12
+Updated: 2026-09-14
 
 This repository is a test harness, not a product. It verifies NFS RWX
 persistent volumes on Kubernetes by driving a real cluster and asserting what a
@@ -335,10 +335,16 @@ Recurring review feedback, all of it from this repository:
 ## Record what a real run teaches
 
 The findings log in `docs/` is the memory of this project, and **the citation of
-record.** When a run against a real cluster teaches something worth keeping, add
-a dated `F-NNN` entry at the top saying what happened, why, what changed in the
-code, and what it implies for the system under test as opposed to the harness. A
-finding that lives only in a PR comment is lost by the next PR.
+record.** It is one file per finding under `docs/findings/`, named `F0NN-` and a
+slug of the title, with `docs/findings.md` as the index. When a run against a
+real cluster teaches something worth keeping, take the next number, write the
+entry as its own file saying what happened, why, what changed in the code, and
+what it implies for the system under test as opposed to the harness, and add its
+row at the top of the index table in the same change. An entry carries the
+`Author:`, `Created:` and `Updated:` block every document in `docs/` carries,
+and a `**Found:**` line for when the finding was actually made, which is not the
+same date as the file. A finding that lives only in a PR comment is lost by the
+next PR.
 
 Cite it afterwards rather than re-explaining it. A case that skips or reports
 blocked, a constant that is the value it is, a teardown step that looks like more
