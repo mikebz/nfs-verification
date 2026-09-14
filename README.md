@@ -28,8 +28,8 @@ cases it serves and whether it shipped:
 
 | Design doc | Step | Cases | Status |
 |---|---|---|---|
-| [`03-chaos-operations-design.md`](docs/03-chaos-operations-design.md) | 3 | CHAOS-01, CHAOS-02 | Shipped |
-| [`04-grace-and-lock-reclaim-design.md`](docs/04-grace-and-lock-reclaim-design.md) | 4 | CHAOS-05, CHAOS-06 (whole-file locks), CHAOS-07 (OBS-02, OBS-03 consolidated into doc 06) | Shipped |
+| [`03-chaos-operations-design.md`](docs/03-chaos-operations-design.md) | 3, 4, 6, 10 | CHAOS-01 through CHAOS-18 (full resiliency and chaos test group) | In progress: CHAOS-01, CHAOS-02, CHAOS-05, CHAOS-06, CHAOS-07 shipped |
+| [`04-grace-and-lock-reclaim-design.md`](docs/04-grace-and-lock-reclaim-design.md) | 4 | Step 4 historical record | Superseded by doc 03 (chaos) and doc 06 (obs) |
 | [`05-data-path-and-locktool-design.md`](docs/05-data-path-and-locktool-design.md) | 6 | DATA-06 to DATA-13, the byte-range half of DATA-05 and the disjoint-range half of CHAOS-06, plus `locktool` | Shipped, DATA-14 deferred |
 | [`06-observability-design.md`](docs/06-observability-design.md) | 7 | OBS-01 through OBS-07 (full observability test group) | In progress: OBS-02, OBS-03, OBS-04, OBS-06 shipped |
 
