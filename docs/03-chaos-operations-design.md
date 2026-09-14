@@ -1,186 +1,253 @@
-# 03: Chaos operations and the failover measurement path
+# 03: Resiliency and chaos: fault injection, failover recovery, and lock reclaim
 
 Author: mikebz@
 Created: 2026-09-10
-Updated: 2026-09-13
-Status: shipped, delivery step 3 ([PR #4](https://github.com/mikebz/nfs-verification/pull/4))
-Serves: CHAOS-01, CHAOS-02. Requirements in [`01-test-plan.md`](01-test-plan.md)
+Updated: 2026-09-14
+Status: **in progress.** Serves the complete Resiliency and Chaos test group:
+CHAOS-01, CHAOS-02, CHAOS-05, CHAOS-06, and CHAOS-07 shipped (Steps 3, 4, 6);
+CHAOS-03, CHAOS-04, and CHAOS-08 through CHAOS-18 designed for Step 10.
+Serves: CHAOS-01 through CHAOS-18. Requirements in [`01-test-plan.md`](01-test-plan.md)
 Section 3.3, targets in Section 3.8, weighting in Section 2.4.
-
-This document was written after the implementation rather than before it, which
-is the wrong order and is why [`../AGENTS.md`](../AGENTS.md) now requires the
-doc first. It records what was decided, not what would be decided.
+Builds on [`01-test-plan.md`](01-test-plan.md). Consolidates chaos design ownership
+across the repository, superseding the chaos sections of [`04-grace-and-lock-reclaim-design.md`](04-grace-and-lock-reclaim-design.md).
 
 ---
 
-## 1. Why this phase exists
+## 1. Why this domain exists
 
 The NFS server is the singleton in the data path (test plan Section 2.1): every
-RWX client serializes through one process, so what a client observes when that
-process dies is the heaviest-weighted question in the plan. Before this step the
-suite could assert steady state and nothing else. It had no way to injure the
-system and no way to measure what happened next.
+RWX client serializes through one server process, so what a client observes when that
+process dies, stalls, or relocates is the heaviest-weighted question in the plan.
+Before this test group was built, the suite could assert steady state and nothing else:
+it had no mechanism to injure the system and no way to measure what happened next.
 
-Done means three numbers a client can produce: how long until the next write
-committed, how many I/O errors were seen, and which acknowledged writes survived.
+Failover in this architecture is an opaque black box (test plan Section 2.3). No case
+asserts *how* failover happens (e.g. Pacemaker, Kubernetes StatefulSet controller,
+cloud volume re-attachment). Every chaos case asserts only client-observable behavior
+derived from the protocol:
+1. **Recovery**: time until client I/O resumes, measured against the pinned `pkg/slo` profile.
+2. **Error behavior**: zero I/O errors across failover on `hard` NFSv4.1 mounts.
+3. **Durability**: zero loss of data acknowledged as committed before the fault.
+4. **State preservation**: all advisory locks held before failover successfully reclaimed.
+5. **Grace period enforcement**: new locks refused during grace, preventing state corruption.
 
-## 2. What shipped
+Done means eighteen repeatable resiliency cases that drive real cluster and storage
+faults, with every recovery verified from client pods on independent worker nodes.
 
-- `pkg/chaos`: two fault operations, each recording itself on the fixture's
-  fault timeline, each refusing a target it cannot identify.
-  - `KillServerProcess` signals the server process on its node through the
-    privileged node agent. It lists matches first and errors when nothing
-    matched.
-  - `DeleteServerPod` deletes the server pod gracefully, and refuses a pod no
-    controller owns, because that pod would not come back.
-  - `ServerTarget` resolves the server pod live at case time, never from the
-    cached preflight record.
-- The measurement path: a workload in a client pod writing one 4KiB record per
-  second with `conv=fsync`, logging `OK|ERR <index> <epoch>` on the pod's own
-  filesystem, never on the share.
-- CHAOS-01 (SIGKILL the server process under active write) and CHAOS-02 (delete
-  the server pod under active write, with a lock held across the failover).
-- The category split in `make`: chaos cases carry a name prefix, the fast path
-  carries no fault injection.
+## 2. The fault injection framework (`pkg/chaos`)
 
-The same workload log yields all three assertions, which is the point: a
-separate poller, error probe and durability check could disagree with each
-other, and one log cannot.
+Fault injection operations live in `pkg/chaos`, isolated from the test fixtures so that
+every fault is explicitly enumerated, safe-guarded, and tracked:
 
-## 3. What these two cases assert
+- **Live target resolution (`ServerTarget`)**: Targets are resolved live at case execution
+  time via the Kubernetes API, never from cached preflight records. Chaos operations move
+  pods and change IPs; stale targets either act on the wrong pod or fail silently.
+- **Process signaling (`KillServerProcess`)**: Signals the NFS server process on its host
+  node through the privileged node agent (`nsenter` into the host PID namespace).
+  - *Safety check*: Lists matching PIDs first and errors if nothing matched.
+  - *Reject list*: Refuses generic process names (`sh`, `bash`, `wrapper`). Killing a shell
+    wrapper takes down unrelated node infrastructure, turning a targeted test into an
+    uncontrolled outage.
+- **Graceful pod deletion (`DeleteServerPod`)**: Deletes the server pod with a standard grace
+  period via the Kubernetes API.
+  - *Safety check*: Inspects `ownerReferences` and refuses any pod with no controller. An
+    unmanaged pod would never be recreated, turning a recovery test into a permanent outage.
+- **Fault timeline recording**: The test fixture automatically stamps the beginning and end
+  of every injected fault, saving the timeline into the run's artifact bundle (`artifacts/<run-id>/`)
+  for post-failure triage.
 
-The general conventions this phase settled, and which now hold for every case in
-every section, are in [`01-test-plan.md`](01-test-plan.md) Section 4.1: fault
-operations in their own package, live target resolution, a fault that was not
-injected is never measured, one clock per measurement, waiting past the target,
-and bounds from `pkg/slo`. What is specific to CHAOS-01 and CHAOS-02:
+### Platform and network fault roadmap (Step 10)
+The remaining operations close out the CHAOS matrix in Step 10:
+- **Node hard-stop (`CHAOS-03`)**: Executes node-level power-off (`-node-power-cmd` or cloud API).
+  Requires the server pod to set `tolerationSeconds: 30` on unreachable taints, and the harness
+  applies `node.kubernetes.io/out-of-service=nodeshutdown:NoExecute` to trigger immediate RWO
+  volume detach.
+- **Network partitioning (`CHAOS-04`, `CHAOS-12`)**: Injects bidirectional packet drops between
+  client nodes and server pods via node agent iptables rules or temporary `NetworkPolicy`.
+- **Component eviction and restarts (`CHAOS-09`, `CHAOS-10`, `CHAOS-11`)**: Restarts kubelet,
+  evicts the CSI node plugin daemonset pod, or restarts the CNI plugin while NFS mounts are active.
+- **Deadlock and resource exhaustion (`CHAOS-14`, `CHAOS-15`, `CHAOS-17`)**: Hyperconverged
+  colocation deadlock under memory pressure, client node OOM with dirty NFS pages, and recovery
+  state directory loss (`-recovery-state-path`).
 
-| # | Assertion | Where it comes from, and how it is checked |
-|---|---|---|
-| 1 | Recovery is time to first successful client I/O, never time to pod `Ready` | Ready is not serving, and that number would flatter every result. It comes from the workload log; pod readiness is a diagnostic only |
-| 2 | A logged success means the server committed the write | RFC 8881 Section 18.3: after `COMMIT` is acknowledged the data is on stable storage. The workload fsyncs before logging, and a unit test against a local directory asserts every logged success is a full-size file |
-| 3 | I/O errors across a failover are zero | A protocol statement, not a tolerance: a `hard` mount blocks and retries rather than returning an error ([`nfs(5)`](https://man7.org/linux/man-pages/man5/nfs.5.html)). Asserted separately from timing, and an unreadable log line fails the case rather than counting as a success |
-| 4 | Every write acknowledged before the fault is readable after it | Swept from a pod on another node, so the read crosses the server rather than the writer's own page cache |
-| 5 | A signal is never sent to a pattern that could match an unrelated process | Killing everything matching `sh` on a node is a worse outage than the one being measured. Unit tested both ways: shells and wrappers refused whether derived or passed by flag, real server names accepted |
-| 6 | A server pod no controller owns is never deleted | It would not come back, and the case would measure a permanent outage against a recovery target |
-| 7 | The workload never reports its progress through the filesystem under test | A stalled mount must not be able to stall the harness reading its own progress. Log and stop file are on the pod's own filesystem, stated in the script itself |
-| 8 | No case asserts how failover happens | The HA mechanism is a black box (test plan Section 2.3). Every assertion reads a client, a claim or a Kubernetes object |
+## 3. The measurement path and silence detection
 
-## 4. What the workload produces
+Every chaos case runs a dedicated workload in a client pod while the fault is injected:
 
-The shapes are in the code and are not repeated here:
-`pkg/framework/load.go` and `pkg/framework/scripts/write-load.sh` for the
-workload and its log, `pkg/framework/sweep.go` for the record sweep,
-`pkg/chaos/chaos.go` for the fault timeline.
+- **Workload cadence**: One 4KiB record written per second with `conv=fsync`, logging
+  `OK|ERR <index> <epoch>` on the pod's **own local filesystem**, never on the share.
+  - *Local logging*: A stalled NFS mount must never stall the harness's ability to read
+    workload progress.
+  - *Resolution*: 1 second. Sufficient for 60s+ SLO budgets without filling the volume.
+- **Outage detection as a silence (`StallAfter`)**:
+  - *The flaw in timestamp comparison (F-014)*: An earlier draft measured recovery from the
+    first write timestamped at or after the fault. Because deleted pods continue serving
+    during termination grace, and timestamps have 1-second granularity, this returned writes
+    committed *before* service was lost, falsely reporting 100s failovers as `0s`.
+  - *The silence rule*: On a hard mount, an outage is a silence. Recovery is measured by
+    finding the silence gap in the write log (`LoadReport.StallAfter`) against `slo.LoadStallFloor`.
+- **Zero I/O errors on hard mounts**:
+  - Under `hard` mount options (`nfs(5)`), the Linux client retries RPCs indefinitely when the
+    server is unreachable.
+  - Returning an I/O error (`EIO`) to an application during a server failover is a protocol
+    violation, not a slow recovery. Errors are asserted strictly to be zero.
+- **Durability content sweep**:
+  - Once client I/O resumes, a verifier pod on an **independent worker node** reads back every
+    record index acknowledged before the fault.
+  - Reading across worker nodes ensures the verification crosses the server and backing disk
+    rather than hitting the writer's local page cache.
+  - Records are verified for full content and length, returning exhaustive verdicts (`correct`,
+    `absent`, `short`, `wrong`).
 
-What matters about them, and what a later change must not break:
+## 4. Grace and lock reclaim across failover
 
-- The log line's time is when the attempt **finished**. It is not enough on its
-  own to say when an outage ended, which is what this document originally
-  claimed; see Section 7 and F-014 in [`findings.md`](findings.md).
-- Resolution is one second, against targets of 60 seconds and up. That is ample
-  for reporting a recovery and nowhere near enough for deciding, from a
-  timestamp alone, whether a write landed before or after a fault stamped in the
-  same second.
-- A line the harness cannot parse is kept and fails the case. Reporting zero
-  errors from a partly unreadable log is worse than reporting the problem.
-- The set a fault may not lose is every index logged as committed at or before
-  the fault time, and nothing weaker.
-- The fault timeline is triage only. Nothing asserts on it.
+Grace is the interval after a restart in which the server accepts reclaims of state that
+existed before the crash and refuses all new state acquisitions (RFC 8881 Section 8.4.2):
 
-The lock probe in step 4 reuses this log format unchanged, so one parser serves
-both. Moving the log onto the share would break assertion 7 above, which is why
-it is stated as an assertion rather than left to habit.
+```
+Fault Injected
+     │
+     ▼
+Server Down ──► Server Restart ──► Grace Window Starts ──► Grace Window Ends ──► Normal Operation
+(RPCs block)    (Grace Entry)     (Reclaims allowed;      (Grace Exit)          (New state allowed)
+                                   new locks rejected)
+```
 
-## 5. Decisions
+- **Why grace matters**: It is the dominant term in every recovery target. If an NFS server enters
+  grace repeatedly during address takeover, clients stall for hours—the single most common false
+  diagnosis in this architecture (triage runbook Section 4.3).
+- **Grace observation (`pkg/framework/grace.go`)**:
+  - Read from the server pod's container log stream using container runtime timestamps.
+  - Uses an exit-first keyword classification to avoid mistaking negative exit phrases for entries.
+  - If the server announces no grace in logs, `CHAOS-07` reports blocked and `OBS-03` fails (F-008).
+- **Lock reclaim verification (`CHAOS-06`)**:
+  - *Whole-file locks*: Taken using `flock -x`. The Linux kernel simulates `flock` via whole-file
+    POSIX locks on the wire (RFC 8881 Section 9).
+  - *Byte-range locks*: Taken using `cmd/locktool hold`, coordinating disjoint byte ranges across
+    pods on distinct nodes.
+  - *Dual-end assertion*: Verified both from the holder (descriptor remains valid and holding)
+    and from conflicting clients (refused by server during and after recovery). Client `/proc/locks`
+    is inspected via the privileged node agent.
+- **Rejection of new locks during grace (`CHAOS-07`)**:
+  - A probe client attempts a new lock once per second during failover.
+  - RFC 8881 bars new state acquisition during grace: any grant inside the grace window is a
+    protocol violation.
+  - *Un-reclaimed state requirement*: A server may lift grace early if no clients have state to
+    reclaim. CHAOS-07 deliberately holds one un-reclaimed lock across failover so that grace is
+    actively enforced when the probe runs; otherwise, the case passes vacuously.
+- **Multi-cycle repeated failovers (`CHAOS-05`)**:
+  - Injects five sequential failover cycles.
+  - *Cadence*: Each cycle is injected only after the previous cycle has fully recovered.
+  - *Per-cycle assertions*: Each cycle must recover within SLO and exit grace without a re-entry
+    loop. A cumulative wall-clock budget would hide an outage that took four minutes if others
+    were fast.
 
-**The process name comes from the flag, else the container command, and both are
-checked.** The container command is the only place a cluster states what the
-server runs as. A shell wrapper or an image entrypoint states nothing, and the
-case reports blocked rather than guessing. The reject list of generic names
-applies to operator input too: killing everything matching `sh` on a node takes
-the node out, which is a worse outage than the one being measured.
+## 5. What these cases assert
 
-**The pod delete is graceful.** The abrupt path is already CHAOS-01's signal, and
-a force delete removes the pod from the API before the server stops, which
-starts the measurement at the wrong moment.
+Conventions shared across the suite (one clock per measurement, waiting past target, bounds
+from `pkg/slo`) live in [`01-test-plan.md`](01-test-plan.md) Section 4.1. The table below lists
+the core assertions across the Resiliency & Chaos test group:
 
-**One write per second.** The targets are 60 to 120 seconds at one second of
-resolution. A tighter loop fills the share without sharpening anything.
+| Case | Status | Assertion | Source & Basis |
+|---|---|---|---|
+| **CHAOS-01** | Shipped | Server process SIGKILL during write: recovery within SLO, 0 errors, post-COMMIT data intact | RFC 8881 Sec 18.3 (`COMMIT`), `nfs(5)` hard mount retry |
+| **CHAOS-02** | Shipped | Server pod graceful delete during write: recovery within SLO, locks reclaimed | Kubernetes graceful pod termination, RFC 8881 Sec 8.4.2 |
+| **CHAOS-03** | Step 10 | Hard-stop node hosting server: recovery within node-loss SLO, RWO volume re-attaches | Kubernetes out-of-service taint, non-graceful shutdown GA |
+| **CHAOS-04** | Step 10 | Network partition server from clients, then heal: I/O blocks then resumes, no corruption | CNI network isolation, TCP retransmit recovery |
+| **CHAOS-05** | Shipped | Repeated failover (5 cycles): each cycle recovers, no grace re-entry loop | RFC 8881 Sec 8.4.2, grace stability under churn |
+| **CHAOS-06** | Shipped | Failover with held locks: 100% locks reclaimed, conflicting clients blocked | RFC 8881 Sec 9 (LOCK) & Sec 8.4.2 (Reclaim), `locktool` |
+| **CHAOS-07** | Shipped | New lock attempt during grace: rejected with retryable error, granted only after grace | RFC 8881 Sec 8.4.2 (Grace state exclusivity) |
+| **CHAOS-08** | Step 10 | Client handles stale handles (`ESTALE`) after server restart with new state without permanent hang | RFC 8881 filehandle persistence |
+| **CHAOS-09** | Step 10 | Kubelet restart on client node with active mounts: mounts survive, I/O resumes | Kubelet volume manager mount tracking |
+| **CHAOS-10** | Step 10 | CSI node plugin eviction with active mounts: existing mounts unaffected, new mounts queue | CSI architecture, kernel mount independence |
+| **CHAOS-11** | Step 10 | CNI restart on client node: I/O blocks then resumes cleanly | CNI interface churn, kernel TCP recovery |
+| **CHAOS-12** | Step 10 | NetworkPolicy applied blocking NFS port 2049, then removed: clients recover | Kubernetes NetworkPolicy data path filtering |
+| **CHAOS-13** | Step 10 | Backing block volume disconnect during write: errors surface as retryable, no silent corruption | Underlying SDS / RWO attach stability |
+| **CHAOS-14** | Step 10 | Colocation deadlock: server pod scheduled on same node as clients under memory pressure | Hyperconverged topology page reclaim safety |
+| **CHAOS-15** | Step 10 | Client node OOM with dirty pages on NFS mount: bounded failure, no node-level hang | Linux VM dirty page throttling and OOM safety |
+| **CHAOS-16** | Step 10 | 24h chaos soak: randomized kills, partitions, evictions: 0 corruption, 0 unrecovered mounts | Systemic reliability under sustained chaos |
+| **CHAOS-17** | Step 10 | Recovery state store lost or corrupted: bounded honest failure, no conflicting locks | RFC 8881 recovery backend integrity |
+| **CHAOS-18** | Step 10 | Delegation recall under conflicting open: delegation recalled within timeout | RFC 8881 Sec 10.4 (Delegations); skipped if disabled |
 
-**CHAOS-02 asserts lock exclusivity after the failover, not the reclaim
-mechanism.** A lock is taken before the fault and never released, so grace has
-outstanding state to reclaim and the case cannot pass vacuously. Whether the
-state survived is measured, never inferred from the recovery backend preflight
-recorded.
+## 6. Detailed case walkthroughs (Shipped cases)
 
-Alternatives rejected, each for one reason:
+### CHAOS-01: Server process SIGKILL under active write
+- **Steps**:
+  1. Start write load in client pod writing 1 record/s with `conv=fsync`.
+  2. Locate server process PID on host node via `ServerTarget`.
+  3. Send `SIGKILL` to server PID via privileged node agent (`KillServerProcess`).
+  4. Wait for client write silence to end (`StallAfter`) and assert recovery duration is within restart SLO.
+  5. Assert zero `ERR` lines in client workload log.
+  6. From an independent worker node, sweep all records acknowledged before the kill and verify SHA256 checksums.
 
-| Option | Why not |
-|---|---|
-| A per-platform chaos interface now | Both operations here are Kubernetes operations or a node-agent signal, and neither differs per platform. The interface arrives with node power, which does |
-| Measure recovery by polling from the harness | Starts the clock when the harness notices, not when the fault landed, and the client is where the outage is felt |
-| A workload without fsync | A success would mean the client accepted the write, which says nothing about durability |
-| Force delete the server pod | The measurement would start before the outage does |
+### CHAOS-02: Delete server pod under active write
+- **Steps**:
+  1. Acquire an exclusive lock on a shared file from client pod A.
+  2. Start active write load from client pod B.
+  3. Delete the server pod gracefully via `DeleteServerPod`.
+  4. Measure recovery to first successful post-outage write (`StallAfter`).
+  5. Verify that client pod A still holds its lock and can write through it.
+  6. Verify from client pod C that a conflicting lock attempt is refused.
+  7. Verify all pre-fault writes are intact.
 
-## 6. Configuration
+### CHAOS-05: Repeated failovers (5 cycles)
+- **Steps**:
+  1. Start write load and initialize grace observation.
+  2. For cycle = 1 to 5:
+     a. Delete server pod gracefully.
+     b. Wait for client workload to recover (`StallAfter` within restart SLO).
+     c. Read server log stream to verify grace was entered and exited.
+     d. Assert that grace was entered at most once during this cycle (no re-entry loops).
+     e. Allow short stabilization before the next injection.
+  3. Verify all committed writes across all 5 cycles survived on stable storage.
 
-Flags only, through the `make` targets. Server namespace and selector are
-discovered, with a recorded note when discovery had to guess; the server process
-is derived from the container command; lease and grace are discovered or
-preflight fails. Bad config fails loud: lease and grace outside the two profiles
-fail preflight rather than measuring against an unknown base.
+### CHAOS-06: Lock reclaim across failover (whole-file and byte-range)
+- **Steps**:
+  1. Client pod A acquires byte range [0, 1024]. Client pod B acquires byte range [2048, 4096] on the same file using `locktool`.
+  2. Client pod C attempts to acquire [0, 2048] and verifies it is blocked.
+  3. Delete server pod gracefully while locks are held.
+  4. Server recovers and enters grace.
+  5. Both client A and client B reclaim their respective ranges.
+  6. Verify via `locktool getlk` and `/proc/locks` that both clients still hold their ranges.
+  7. Client C attempts acquisition after grace exit and verifies exclusion holds.
 
-Not configurable, because each is a property of the measurement rather than of a
-deployment: the write rate, the record size, the SLO targets, and the reject list
-of process names.
+### CHAOS-07: New lock attempted during grace
+- **Steps**:
+  1. Client pod A acquires lock and keeps outstanding state.
+  2. Delete server pod to trigger restart and grace window.
+  3. Client pod B runs `lock-probe.sh`, attempting new lock acquisition once per second.
+  4. Kubelet server log stamps grace entry and exit.
+  5. Assert that no lock was granted to client B inside the narrowed grace window (`ClockSkewGuard`).
+  6. Assert that client B successfully acquires the lock after grace exit.
 
-## 7. What changed after this was written
+## 7. Key decisions
 
-- **Step numbering.** This doc originally called itself "phase 3" and later docs
-  referred to it as "phase 2" after its file number. Both are gone: this is
-  delivery step 3, designed in doc 03.
-- **The durability check was upgraded.** Step 6 replaced the existence check
-  these two cases used with a content-verifying sweep, so CHAOS-01 and CHAOS-02
-  now assert bytes rather than presence. See
-  [`05-data-path-and-locktool-design.md`](05-data-path-and-locktool-design.md).
-- **Grace is now observable.** This phase could not tell grace from a wedged
-  server. Step 4 added the observer; see
-  [`04-grace-and-lock-reclaim-design.md`](04-grace-and-lock-reclaim-design.md).
-- **The recovery measurement was wrong and has been replaced.** This phase
-  measured the end of an outage as the first committed write stamped at or after
-  the fault, stated in Section 4 above. It does not measure that: stamps are
-  whole seconds, the fault clock is read by exec before the fault, and a deleted
-  server keeps serving through its termination grace, so the reading returned a
-  write that committed before service was lost and reported failovers of about
-  1m43s as `0s`. Because `0s` passes any budget, the recovery assertion in
-  CHAOS-02, CHAOS-05, CHAOS-06 and CHAOS-07 could not fail, and every green
-  recovery result this suite produced before the fix was unearned. An outage on
-  a hard mount is a **silence**, and it is now found as one:
-  `LoadReport.StallAfter` against `slo.LoadStallFloor`. `FirstSuccessAfter`
-  remains for narrower questions and is documented as not being the recovery
-  measurement. F-014 in [`findings.md`](findings.md) has the runs.
-- **Node and network faults moved.** They were "a later phase" here and are now
-  step 10, after PROV, DATA, OBS, SEC and SCALE are closed out.
+- **Graceful pod deletion vs. process SIGKILL**: `CHAOS-01` tests abrupt process death; `CHAOS-02`
+  tests Kubernetes pod rescheduling. Both are necessary because an abrupt kill leaves host
+  page cache intact, while pod relocation unmounts the backing volume.
+- **Outage measured as silence, not timestamp subtraction**: Avoids F-014's false-zero recovery bug.
+- **Un-reclaimed state held throughout grace probe**: Prevents premature grace lifting, ensuring
+  the server actively enforces state protection.
+- **Multi-node guards (`requireCap(t, f.Caps.MultiNode)`)**: Every test reading back data or
+  testing locks across clients requires multiple schedulable workers; single-node clusters skip
+  honestly rather than failing.
+- **Blanket core dump rule**: Any server core dump during any chaos case fails the suite immediately.
 
-- **The conventions moved out.** What this phase settled about faults in
-  general (their package, live targets, one clock, waiting past the target, a
-  fault that was not injected is never measured) is in the test plan's Section
-  4.1, where every later phase inherits it rather than rediscovering it here.
+## 8. What real runs taught
 
-Open items this phase left, still open: the process name is not discoverable on
-every server, and server discovery without a selector remains a heuristic whose
-exclusion of the suite's own pods is unit tested, because getting it wrong points
-the chaos cases at the harness.
+- **[F-001](findings.md) (Unmount before PVC deletion)**: Hard mounts retry indefinitely when an
+  export is deleted while still mounted. The node agent and teardown ordering ensure pods leave
+  the API and mounts clear before claims are touched.
+- **[F-008](findings.md) (Unannounced grace)**: Some userspace provisioners never log grace entry
+  or exit. In that environment, `CHAOS-07` reports blocked because no window can be established,
+  and `OBS-03` reports the missing signal.
+- **[F-014](findings.md) (Silence measurement)**: Failover measurements must detect silence gaps
+  (`StallAfter`), not first write timestamps.
 
-## 8. Sources
+## 9. Sources
 
-- [RFC 8881](https://www.rfc-editor.org/rfc/rfc8881.html) Section 8.4.2 for what
-  a server does on restart, and Section 18.3 for what `COMMIT` guarantees.
-- [`nfs(5)`](https://man7.org/linux/man-pages/man5/nfs.5.html) for `hard` mount
-  retry behaviour, which is assertion 3.
-- Kubernetes [pod lifecycle and
-  eviction](https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/)
-  for what a graceful delete does, and the [API
-  reference](https://kubernetes.io/docs/reference/kubernetes-api/) for owner
-  references, which is how assertion 6 is enforced.
+- [RFC 8881](https://www.rfc-editor.org/rfc/rfc8881.html) Section 8 (State Management),
+  Section 8.4.2 (Server Failure and Recovery), Section 9 (File Locking), Section 18.3 (`COMMIT`).
+- [`nfs(5)`](https://man7.org/linux/man-pages/man5/nfs.5.html) for hard mount retry semantics.
+- Kubernetes [Non-graceful node shutdown](https://kubernetes.io/docs/concepts/architecture/nodes/#non-graceful-node-shutdown)
+  and [Taints and Tolerations](https://kubernetes.io/docs/concepts/scheduling-eviction/taint-and-toleration/).

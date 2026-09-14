@@ -1,14 +1,14 @@
-# 04: Grace, lock reclaim, and making a failover observable
+# 04: Grace, lock reclaim, and making a failover observable (Historical Step 4 Design)
 
 Author: mikebz@
 Created: 2026-09-10
 Updated: 2026-09-14
-Status: shipped, delivery step 4 ([PR #8](https://github.com/mikebz/nfs-verification/pull/8))
-Serves: CHAOS-05, CHAOS-06, CHAOS-07. (OBS-02 and OBS-03 design consolidated
-into [`06-observability-design.md`](06-observability-design.md)). Requirements in
-[`01-test-plan.md`](01-test-plan.md) Sections 3.3 and 3.8.
-Builds on [`03-chaos-operations-design.md`](03-chaos-operations-design.md), whose
-rules all still hold.
+Status: **superseded.** Serves as the historical record of delivery step 4 ([PR #8](https://github.com/mikebz/nfs-verification/pull/8)).
+Its ongoing design ownership has been consolidated: CHAOS-05, CHAOS-06, and CHAOS-07
+are maintained in [`03-chaos-operations-design.md`](03-chaos-operations-design.md),
+and OBS-02 and OBS-03 are maintained in [`06-observability-design.md`](06-observability-design.md).
+Serves: Step 4 historical record. Requirements in [`01-test-plan.md`](01-test-plan.md) Sections 3.3, 3.5 and 3.8.
+Builds on [`03-chaos-operations-design.md`](03-chaos-operations-design.md).
 
 ---
 
@@ -185,6 +185,14 @@ so a failing case does not leave a lock held by a pod that outlives it.
 
 ## 8. What changed after this was written
 
+- **Consolidation by test groups.** To align design documentation directly with the
+  test groups implemented in `test/e2e/`, the contents of this document have been
+  consolidated into single authoritative domain homes:
+  - The chaos cases (CHAOS-05, CHAOS-06, CHAOS-07) and lock reclaim architecture are
+    now authoritatively maintained in [`03-chaos-operations-design.md`](03-chaos-operations-design.md).
+  - The observability cases (OBS-02, OBS-03) and runtime grace log observation are
+    now authoritatively maintained in [`06-observability-design.md`](06-observability-design.md).
+  This document is preserved as the historical design record for delivery step 4.
 - **Observability design consolidated.** OBS-02 and OBS-03 were originally
   designed here alongside grace and failover. Design ownership of all
   observability cases (OBS-01 through OBS-07) was consolidated into
