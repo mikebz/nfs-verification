@@ -113,8 +113,11 @@ larger. A 2GB node (`e2-small`) cannot host the suite: the platform's own system
 daemons already account for most of that, and the nodes then reboot mid-run,
 which from inside a case is indistinguishable from the storage failures the plan
 is hunting — I/O that stalls, a mount that does not come back, a lock that is not
-reclaimed. Nothing checks this, so it is a precondition a person has to meet
-rather than a preflight failure that names itself. See [F-002](docs/findings.md).
+reclaimed. Nothing in the suite checks it. Section 0 of the test plan is the set
+of conditions preflight enforces and refuses to run without, and this is not one
+of them, so it is an operational prerequisite for whoever builds the cluster
+rather than a failure that names itself. Teaching preflight to read allocatable
+memory and say so is the open item on [F-002](docs/findings.md).
 
 `make test-data` injects faults. DATA-12 and DATA-13 kill the NFS server
 process, because the suite sorts strictly by category and they are DATA cases;
