@@ -24,6 +24,12 @@ const (
 	PodTerminateTimeout = 90 * time.Second
 	// ArtifactTimeout bounds one case's artifact collection.
 	ArtifactTimeout = 60 * time.Second
+	// EvidenceTimeout bounds the copy of the files a case named as its
+	// evidence. Shorter than the bundle because it runs on every case rather
+	// than only on failures, and because a file on a mount whose export is gone
+	// never answers at all: the per-file bound is what keeps one of those from
+	// spending this, and this is what keeps it from spending the cleanup.
+	EvidenceTimeout = 30 * time.Second
 	// ExpandTimeout bounds a volume expansion. Generous on purpose: expansion
 	// is a control plane round trip through the driver, and on a shared server
 	// it may be a quota change rather than a block resize.

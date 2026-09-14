@@ -93,6 +93,24 @@ test-sec:
 test-e2e:
 	go test $(PKG) -v -timeout=300m $(COMMON)
 
+# One case in isolation. This is triage step 1 of the runbook in Section 4.3 of
+# docs/01-test-plan.md -- flaky on its own means a harness bug -- and it is what
+# a reviewer runs to check a claim about one case without paying for its whole
+# category. The timeout covers the longest single case, CHAOS-05.
+#
+#   make test-case CASE=TestDataConcurrentAppendToOneFile FLAGS="-storage-class=nfs"
+#
+# CASE must be a plain test function name, and is anchored into the -run
+# expression. It is checked rather than passed through, because -run takes a
+# regular expression: CASE='TestData.*' would quietly run the whole data
+# category, and a triage step that reproduces a different set of tests from the
+# one asked for is worse than no triage step.
+.PHONY: test-case
+test-case:
+	@test -n "$(CASE)" || { echo "set CASE to a test function, e.g. CASE=TestDataConcurrentAppendToOneFile"; exit 1; }
+	@[[ "$(CASE)" =~ ^Test[A-Za-z0-9_]*$$ ]] || { echo "CASE must be one test function name, matching ^Test[A-Za-z0-9_]*$$, not a pattern: got '$(CASE)'"; exit 1; }
+	go test $(PKG) -v -timeout=120m -run '^$(CASE)$$' $(COMMON)
+
 .PHONY: clean
 clean:
 	rm -rf artifacts bin
