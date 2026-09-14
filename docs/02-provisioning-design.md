@@ -105,19 +105,19 @@ the provisioning test group adheres to strict architectural safety rules:
 
 Detailed requirements and profile-driven timing live in [`01-test-plan.md`](01-test-plan.md) Section 3.1.
 
-| Case | Status | Expected result | Citation / Basis |
-|---|---|---|---|
-| **PROV-01** | Shipped | Dynamic provision RWX claim, bind, mount on 2 nodes, write/read checksum, delete claim and verify PV removed | Kubernetes PV lifecycle, RFC 8881 Sec 10 |
-| **PROV-02** | Shipped | 20 RWX claims provisioned concurrently: all bind, unique export IDs and paths, zero server restarts | NFS server export concurrency |
-| **PROV-03** | Shipped | Delete PVC while pod still mounts: PVC stays Terminating with pvc-protection finalizer; I/O continues; deletes after pod departure | Kubernetes Storage Object In Use Protection, [F-001](findings.md) |
-| **PROV-04** | Shipped | Volume expansion: if supported, capacity grows, data intact, zero client restarts; if unsupported, API rejects cleanly | Kubernetes Volume Expansion, CSI `EXPAND_VOLUME` |
-| **PROV-05** | Shipped | Snapshot and restore: restored volume mounts RWX across two nodes, content matches source; if unsupported, clean rejection or stays unready | CSI snapshot creation and restore (VolumeSnapshot API) |
-| **PROV-06** | Shipped | Reclaim policy Retain: PV survives claim deletion in Released phase; after claimRef cleared, rebinds to new PVC with data intact | Kubernetes Reclaim Policies |
-| **PROV-07** | Shipped | Provision PVC while server pod is down: claim stays Pending during outage; binds, mounts, and verifies data after server recovery | Storage control plane resilience, Archetype A gateway |
-| **PROV-08** | Shipped | Delete PVC while server pod is down (pod unmounted first): PVC and PV complete deletion after server recovery | CSI controller unpublish/delete retry, [F-001](findings.md) |
-| **PROV-09** | Shipped | Rapid create/delete churn (100 cycles): zero export ID exhaustion, zero fd leaks, zero server restarts | Provisioner state machine stability under churn |
-| **PROV-10** | Shipped | Volume name edge cases: admission rejects 1000-char and uppercase names; 253-char boundary name provisions, binds, mounts, and passes cross-node I/O | RFC 1123 DNS subdomain syntax, export configuration parser |
-| **PROV-11** | Shipped | Two-stage expansion under active I/O: background write load runs without errors; capacity expands; all committed writes survive | CSI Online Expansion, active workload integrity |
+| Case | Expected result | Citation / Basis |
+|---|---|---|
+| **PROV-01** | ✅ Dynamic provision RWX claim, bind, mount on 2 nodes, write/read checksum, delete claim and verify PV removed | Kubernetes PV lifecycle, RFC 8881 Sec 10 |
+| **PROV-02** | ✅ 20 RWX claims provisioned concurrently: all bind, unique export IDs and paths, zero server restarts | NFS server export concurrency |
+| **PROV-03** | ✅ Delete PVC while pod still mounts: PVC stays Terminating with pvc-protection finalizer; I/O continues; deletes after pod departure | Kubernetes Storage Object In Use Protection, [F-001](findings.md) |
+| **PROV-04** | ✅ Volume expansion: if supported, capacity grows, data intact, zero client restarts; if unsupported, API rejects cleanly | Kubernetes Volume Expansion, CSI `EXPAND_VOLUME` |
+| **PROV-05** | ✅ Snapshot and restore: restored volume mounts RWX across two nodes, content matches source; if unsupported, clean rejection or stays unready | CSI snapshot creation and restore (VolumeSnapshot API) |
+| **PROV-06** | ✅ Reclaim policy Retain: PV survives claim deletion in Released phase; after claimRef cleared, rebinds to new PVC with data intact | Kubernetes Reclaim Policies |
+| **PROV-07** | ✅ Provision PVC while server pod is down: claim stays Pending during outage; binds, mounts, and verifies data after server recovery | Storage control plane resilience, Archetype A gateway |
+| **PROV-08** | ✅ Delete PVC while server pod is down (pod unmounted first): PVC and PV complete deletion after server recovery | CSI controller unpublish/delete retry, [F-001](findings.md) |
+| **PROV-09** | ✅ Rapid create/delete churn (100 cycles): zero export ID exhaustion, zero fd leaks, zero server restarts | Provisioner state machine stability under churn |
+| **PROV-10** | ✅ Volume name edge cases: admission rejects 1000-char and uppercase names; 253-char boundary name provisions, binds, mounts, and passes cross-node I/O | RFC 1123 DNS subdomain syntax, export configuration parser |
+| **PROV-11** | ✅ Two-stage expansion under active I/O: background write load runs without errors; capacity expands; all committed writes survive | CSI Online Expansion, active workload integrity |
 
 ---
 
