@@ -26,7 +26,7 @@ asserts *how* failover happens (e.g. Pacemaker, Kubernetes StatefulSet controlle
 cloud volume re-attachment). Every chaos case asserts only client-observable behavior
 derived from the protocol:
 1. **Recovery**: time until client I/O resumes, measured against the pinned `pkg/slo` profile.
-2. **Error behavior**: zero I/O errors across failover on `hard` NFSv4.1 mounts.
+2. **Error behavior**: zero I/O errors across server failovers on `hard` NFSv4.1 mounts (storage/network faults such as CHAOS-13 surface bounded retryable errors).
 3. **Durability**: zero loss of data acknowledged as committed before the fault.
 4. **State preservation**: all advisory locks held before failover successfully reclaimed given a healthy recovery store (with CHAOS-17 verifying an honest, non-conflicting failure when the store is corrupted).
 5. **Grace period enforcement**: new locks refused during grace, preventing state corruption.
@@ -52,16 +52,16 @@ every fault is explicitly enumerated, safe-guarded, and tracked:
   period via the Kubernetes API.
   - *Safety check*: Inspects `ownerReferences` and refuses any pod with no controller. An
     unmanaged pod would never be recreated, turning a recovery test into a permanent outage.
-- **Fault timeline recording**: The test fixture automatically stamps the beginning and end
-  of every injected fault, saving the timeline into the run's artifact bundle (`artifacts/<run-id>/`)
-  for post-failure triage.
+- **Fault timeline recording**: The framework records a timestamped `FaultEvent` for each
+  successful fault operation. On test failure, `CollectArtifacts` bundles the recorded faults
+  and cluster state into the run's artifact directory (`artifacts/<run-id>/`) for post-failure triage.
 
 ### Platform and network fault roadmap (Step 10)
 The remaining operations close out the CHAOS matrix in Step 10:
 - **Node hard-stop (`CHAOS-03`)**: Executes node-level power-off (`-node-power-cmd` or cloud API).
-  Requires the server pod to set `tolerationSeconds: 30` on unreachable taints, and the harness
-  applies `node.kubernetes.io/out-of-service=nodeshutdown:NoExecute` to trigger immediate RWO
-  volume detach.
+  Requires the server pod to set `tolerationSeconds: 30` on both `node.kubernetes.io/not-ready` and
+  `node.kubernetes.io/unreachable` taints, and the harness applies
+  `node.kubernetes.io/out-of-service=nodeshutdown:NoExecute` to trigger immediate RWO volume detach.
 - **Network partitioning (`CHAOS-04`, `CHAOS-12`)**: Injects bidirectional packet drops between
   client nodes and server pods via node agent iptables rules or temporary `NetworkPolicy`.
 - **Component eviction and restarts (`CHAOS-09`, `CHAOS-10`, `CHAOS-11`)**: Restarts kubelet,
@@ -156,7 +156,7 @@ the core assertions across the Resiliency & Chaos test group:
 | **CHAOS-03** | Step 10 | Hard-stop node hosting server: recovery within node-loss SLO, RWO volume re-attaches | Kubernetes out-of-service taint, non-graceful shutdown GA |
 | **CHAOS-04** | Step 10 | Network partition server from clients, then heal: I/O blocks then resumes, no corruption | CNI network isolation, TCP retransmit recovery |
 | **CHAOS-05** | Shipped | Repeated failover (5 cycles): each cycle recovers, no grace re-entry loop | RFC 8881 Sec 8.4.2, grace stability under churn |
-| **CHAOS-06** | Shipped | Failover with held locks: 100% locks reclaimed, conflicting clients blocked | RFC 8881 Sec 9 (LOCK) & Sec 8.4.2 (Reclaim), `locktool` |
+| **CHAOS-06** | Shipped | Failover with held locks: 100% whole-file locks reclaimed (disjoint byte ranges asserted if supported), conflicting clients blocked | RFC 8881 Sec 9 (LOCK) & Sec 8.4.2 (Reclaim), `locktool` |
 | **CHAOS-07** | Shipped | New lock attempt during grace: 0 grants inside grace window (blocked/refused), grant succeeded after grace | RFC 8881 Sec 8.4.2 (Grace state exclusivity) |
 | **CHAOS-08** | Step 10 | Client handles stale handles (`ESTALE`) after server restart with new state without permanent hang | RFC 8881 filehandle persistence |
 | **CHAOS-09** | Step 10 | Kubelet restart on client node with active mounts: mounts survive, I/O resumes | Kubelet volume manager mount tracking |
@@ -199,7 +199,7 @@ the core assertions across the Resiliency & Chaos test group:
      c. Read server container log stream through Kubernetes API to count grace entries.
      d. Assert that grace was entered at most once during this cycle (no re-entry loops; OBS-03 owns the entry/exit assertion).
      e. Allow short stabilization before the next injection.
-  3. Verify all committed writes across all 5 cycles survived on stable storage.
+  3. Verify all records committed before the first fault survived on stable storage.
 
 ### CHAOS-06: Lock reclaim across failover (whole-file and byte-range)
 - **Steps**:
@@ -232,7 +232,8 @@ the core assertions across the Resiliency & Chaos test group:
 - **Multi-node guards (`requireCap(t, f.Caps.MultiNode)`)**: Every test reading back data or
   testing locks across clients requires multiple schedulable workers; single-node clusters skip
   honestly rather than failing.
-- **Blanket core dump rule**: Any server core dump during any chaos case fails the suite immediately.
+- **Blanket core dump rule (Step 10 target)**: Any server core dump during any chaos case fails
+  the suite immediately; automated core sweep and artifact packaging will land in Step 10.
 
 ## 8. What real runs taught
 
