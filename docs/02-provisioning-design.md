@@ -39,7 +39,8 @@ NFS RWX volumes present unique lifecycle challenges that do not exist for single
    than leaving the claim permanently wedged in `Resizing`.
 5. **Snapshots and restoration (`PROV-05`)**: When advertised by a `VolumeSnapshotClass` targeting the
    CSI driver, snapshots must capture volume state consistently, reach `readyToUse`, and restore to a
-   working RWX volume matching the source data. When unsupported, requests must fail cleanly.
+   working RWX volume matching the source data. When unsupported, requests must either be rejected outright
+   or remain unready, never falsely reporting `readyToUse`.
 6. **Resilience during control plane outages (`PROV-07`, `PROV-08`)**: Creating or deleting claims
    while the NFS server pod is down must not cause orphaned exports, permanent API deadlocks, or leaked
    storage once the server recovers.
@@ -60,19 +61,20 @@ fixtures:
   Under `WaitForFirstConsumer`, an unbound claim never reaches `Bound` phase until a pod requesting it is
   scheduled onto a node ([F-002](findings.md)). The harness inspects the StorageClass binding mode and
   automatically schedules consumer pods prior to awaiting the `Bound` condition.
-- **Teardown ordering and claim retention (`pkg/framework/cleanup.go`)**:
-  To protect worker nodes from catastrophic NFS wedging, harness teardown enforces a strict invariant:
+- **Teardown ordering and claim retention (`pkg/framework/framework.go`)**:
+  To protect worker nodes from catastrophic NFS wedging, harness teardown (`DeleteCaseObjects`) enforces a strict invariant:
   pods are deleted gracefully first and awaited until completely gone from the API. Only then are claims
   deleted. If an unmount was never observed, the harness marks the claim unproven and preserves it on
   the cluster rather than risking node wedging ([F-001](findings.md), [F-003](findings.md)).
 - **CSI capability gating**:
   Expansion and snapshot capabilities are optional under the CSI specification. Preflight discovers
   whether the StorageClass advertises `allowVolumeExpansion` and whether `VolumeSnapshotClasses` target
-  the active CSI driver. Cases test clean rejection when capabilities are absent and assert end-to-end
+  the active CSI driver. Cases test clean rejection or persistent unready state when capabilities are absent and assert end-to-end
   workflows when they are present.
-- **Capacity measurement and quota detection (`pkg/framework/space.go`)**:
-  Pod filesystem space is evaluated via `statvfs` over exec. When evaluating expansion, the harness
-  distinguishes whether capacity growth is visible to client `df` (enforced per-volume quota) or whether
+- **Capacity measurement and quota detection (`pkg/framework/io.go`, `pkg/framework/probes.go`)**:
+  Pod filesystem space is evaluated via `MountCapacity` in `pkg/framework/io.go` (driving `stat -f` with a `df` fallback)
+  and `MountSpace` in `pkg/framework/probes.go` (reading byte and inode headroom). When evaluating expansion, the harness
+  distinguishes whether capacity growth is visible to client `df`/`stat -f` (enforced per-volume quota) or whether
   the export shares a backing filesystem without per-volume quota enforcement ([F-009](findings.md)).
 - **Fault-coordinated provisioning (`pkg/chaos`)**:
   Server process and pod outage cases (`PROV-07`, `PROV-08`) coordinate directly with `pkg/chaos` to
@@ -91,9 +93,9 @@ the provisioning test group adheres to strict architectural safety rules:
 2. **Sustained PVC protection observation**: In `PROV-03`, the harness asserts that the deleted PVC
    carries `kubernetes.io/pvc-protection` and remains in `Terminating` phase across a sustained 20-second
    polling window, rather than checking a single instantaneous API snapshot.
-3. **Reclaim policy restoration**: Any test mutating a PV reclaim policy to `Retain` (`PROV-06`) must
-   restore the policy to `Delete` before test conclusion, ensuring automated framework teardown reclaims
-   backing storage without manual operator intervention.
+3. **Reclaim policy restoration on success**: `PROV-06` mutates the PV reclaim policy to `Retain` to assert
+   PV preservation across claim deletion, and restores it to `Delete` at the conclusion of the test run to allow
+   automated framework teardown to reclaim backing storage (a mid-test failure before this point leaves the PV in `Retain` for manual triage).
 4. **Capability-guarded skips**: Tests requiring multi-node scheduling (`PROV-01`, `PROV-05`, `PROV-10`)
    guard execution via `requireCap(t, f.Caps.MultiNode, ...)`. A single-worker cluster skips cleanly
    rather than failing.
@@ -110,7 +112,7 @@ Detailed requirements and profile-driven timing live in [`01-test-plan.md`](01-t
 | **PROV-02** | Shipped | 20 RWX claims provisioned concurrently: all bind, unique export IDs and paths, zero server restarts | NFS server export concurrency |
 | **PROV-03** | Shipped | Delete PVC while pod still mounts: PVC stays Terminating with pvc-protection finalizer; I/O continues; deletes after pod departure | Kubernetes Storage Object In Use Protection, [F-001](findings.md) |
 | **PROV-04** | Shipped | Volume expansion: if supported, capacity grows, data intact, zero client restarts; if unsupported, API rejects cleanly | Kubernetes Volume Expansion, CSI `EXPAND_VOLUME` |
-| **PROV-05** | Shipped | Snapshot and restore: restored volume mounts RWX across two nodes, content matches source; if unsupported, clean rejection | CSI `CREATE_DELETE_SNAPSHOT`, VolumeSnapshot API |
+| **PROV-05** | Shipped | Snapshot and restore: restored volume mounts RWX across two nodes, content matches source; if unsupported, clean rejection or stays unready | CSI `CREATE_DELETE_SNAPSHOT`, VolumeSnapshot API |
 | **PROV-06** | Shipped | Reclaim policy Retain: PV survives claim deletion in Released phase; after claimRef cleared, rebinds to new PVC with data intact | Kubernetes Reclaim Policies |
 | **PROV-07** | Shipped | Provision PVC while server pod is down: claim stays Pending during outage; binds and mounts after recovery with zero orphaned exports | Storage control plane resilience, Archetype A gateway |
 | **PROV-08** | Shipped | Delete PVC while server pod is down (pod unmounted first): PVC and PV complete deletion after server recovery without storage leaks | CSI controller unpublish/delete retry, [F-001](findings.md) |
@@ -235,7 +237,7 @@ Detailed requirements and profile-driven timing live in [`01-test-plan.md`](01-t
   3. Construct maximum-length valid RFC 1123 name (exactly 253 characters) incorporating framework run prefix.
   4. Create claim with the 253-character name and mount across two nodes.
   5. Wait for claim to bind. Resolve PV and inspect CSI `volumeHandle`, export server, and export path:
-     - Assert neither server nor path contains newline or whitespace characters.
+     - Assert neither server nor path contains newline characters (`\r` or `\n`).
      - Report `blocked` if export configuration cannot be extracted (preventing false passes without export inspection).
   6. Write 1MiB payload from Node A and verify SHA-256 checksum from Node B.
   7. Gracefully delete pods and claim. Assert server remained healthy with zero restarts.
@@ -265,9 +267,9 @@ Detailed requirements and profile-driven timing live in [`01-test-plan.md`](01-t
 - **Unmount confirmation precedes deletion**: Storage Object in Use Protection prevents premature API
   deletion, but client kernel threads hang if the export disappears while mounted. Teardown waits for
   pod API departure and unmount confirmation before issuing claim deletion ([F-001](findings.md)).
-- **Rejection is an assertion, not a skip**: When a StorageClass lacks expansion or snapshot capabilities,
-  the harness does not skip the test; it actively asserts that the control plane rejects invalid requests cleanly,
-  ensuring claims do not enter unrecoverable error phases.
+- **Rejection or unready state is an assertion, not a skip**: When a StorageClass lacks expansion or snapshot capabilities,
+  the harness does not skip the test; it actively asserts that the control plane either rejects the request cleanly (expansion)
+  or leaves the object unready without falsely reporting `readyToUse` (snapshots), ensuring claims do not enter unrecoverable error phases.
 - **Fault cases live in category suites**: Fault injection during provisioning (`PROV-07`, `PROV-08`)
   is categorized under `TestProv` rather than `TestChaos` to preserve functional cohesion.
 
