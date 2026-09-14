@@ -37,7 +37,7 @@ prerequisites.
 | Document | What it answers |
 |---|---|
 | [`docs/01-test-plan.md`](docs/01-test-plan.md) | What gets verified and why: the architecture under test, every case ID, the SLO table, and delivery order with shipped/remaining progress |
-| [`docs/findings.md`](docs/findings.md) | What running against a real cluster taught, `F-001` upward. **Read it before touching teardown, deletion, or anything that unmounts** |
+| [`docs/findings.md`](docs/findings.md) | What running against a real cluster taught, `F-001` upward: the index, with one file per finding in [`docs/findings/`](docs/findings/). **Read it before touching teardown, deletion, or anything that unmounts** |
 | [`AGENTS.md`](AGENTS.md) | How to work here: change size, case conventions, the sources every assertion cites, what to claim when you are done |
 
 One design doc per delivery group, in `docs/`. Each opens with a header saying
