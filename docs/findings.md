@@ -1700,9 +1700,16 @@ restarting nodes underneath the run, chaos results are invalid.
 - The node agent now sets resource requests (10m CPU, 32Mi) so it is not
   BestEffort and not the first thing evicted. No limits: it must not be OOM
   killed while a case is reading the node it is inspecting.
-- Minimum node size is stated in the README: at least 4GB per worker
-  (`e2-medium`), and 8GB (`e2-standard-2`) for anything beyond the presubmit
-  cases.
+- Minimum node size is stated in the README: at least 4GB per worker,
+  `e2-medium` or larger on GKE.
+
+  **Corrected 2026-09-14.** This bullet claimed the README said so from the day
+  it was written, and the README did not say it until today; an audit found it,
+  not a reader who needed it, which is what being cited nowhere buys. The bullet
+  also asked for 8GB (`e2-standard-2`) for anything beyond the presubmit cases.
+  Nothing has ever measured that, and the whole suite has since run end to end
+  on three `e2-medium` workers, twice over, so the 8GB half is dropped rather
+  than written into the README on no evidence.
 
 ### Open
 

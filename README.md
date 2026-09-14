@@ -108,6 +108,14 @@ the generated run ID. `make unit` needs no cluster, no network and no
 kubeconfig, and unit tests must stay that way: a test under `pkg/` that needs a
 cluster belongs in `test/e2e` behind a capability check.
 
+**Worker nodes need at least 4GB of memory**, which on GKE means `e2-medium` or
+larger. A 2GB node (`e2-small`) cannot host the suite: the platform's own system
+daemons already account for most of that, and the nodes then reboot mid-run,
+which from inside a case is indistinguishable from the storage failures the plan
+is hunting — I/O that stalls, a mount that does not come back, a lock that is not
+reclaimed. Nothing checks this, so it is a precondition a person has to meet
+rather than a preflight failure that names itself. See [F-002](docs/findings.md).
+
 `make test-data` injects faults. DATA-12 and DATA-13 kill the NFS server
 process, because the suite sorts strictly by category and they are DATA cases;
 `test-prov` and `test-obs` are already in the same position. Only `make unit`
