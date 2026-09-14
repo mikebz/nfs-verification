@@ -203,12 +203,33 @@ func ServerStartedAfter(ctx context.Context, c *Client, t time.Time) (ServerStar
 	return best, found, nil
 }
 
-// ServerRestartCount sums container restarts across server pods. A chaos case
-// that expects no restart asserts on this rather than on log scraping.
+// ErrNoServerPods is the answer to a question about the server's pods asked on
+// a cluster where none were found. It is a blocked condition rather than a
+// plain error: a managed NFS server with nothing of itself in this cluster is a
+// fact about the deployment, not a defect in it, and the caller that reports it
+// as a failure sends whoever reads the run looking for a storage bug.
+//
+// Returned as a sentinel so a caller can tell it from a failed API call with
+// errors.Is, since only one of the two is fixed by passing a flag.
+var ErrNoServerPods error = &Blocked{Reason: "no NFS server pods were discovered, so nothing about the " +
+	"server's pods can be read here: pass -server-namespace and -server-selector where the heuristic " +
+	"cannot find them, and where the server runs outside this cluster there is nothing to find"}
+
+// ServerRestartCount sums container restarts across server pods. A case that
+// expects no restart asserts on this rather than on log scraping.
+//
+// An empty discovery is ErrNoServerPods, never zero. Every caller reads this
+// twice and compares the readings, so a zero for "no server was found" makes
+// the comparison 0 != 0: a cluster the suite never located a server on reports
+// that the server came through the load intact, which is worse than reporting
+// nothing, because it looks like it was measured.
 func ServerRestartCount(ctx context.Context, c *Client) (int32, error) {
 	pods, err := ServerPods(ctx, c)
 	if err != nil {
 		return 0, err
+	}
+	if len(pods) == 0 {
+		return 0, ErrNoServerPods
 	}
 	var total int32
 	for i := range pods {

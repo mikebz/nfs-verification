@@ -381,7 +381,7 @@ func TestChaosServerProcessKill(t *testing.T) {
 	s := startChaosCase(ctx, t, f, "chaos01")
 	restartsBefore, err := framework.ServerRestartCount(ctx, f.C)
 	if err != nil {
-		t.Fatalf("reading server restart counts: %v", err)
+		failOrBlock(t, err, "reading server restart counts")
 	}
 
 	// The fault reference comes from the writer's own clock, because the write
@@ -408,7 +408,7 @@ func TestChaosServerProcessKill(t *testing.T) {
 	// one serving NFS, and the recovery measured above means nothing.
 	restartsAfter, err := framework.ServerRestartCount(ctx, f.C)
 	if err != nil {
-		t.Fatalf("re-reading server restart counts: %v", err)
+		failOrBlock(t, err, "re-reading server restart counts")
 	}
 	if restartsAfter <= restartsBefore {
 		t.Errorf("server container restart count is still %d after SIGKILL, so the process that was killed "+

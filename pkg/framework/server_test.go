@@ -1,10 +1,14 @@
 package framework
 
 import (
+	"context"
+	"errors"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes/fake"
 )
 
 // Server discovery falls back to a name and port heuristic when no selector is
@@ -101,4 +105,91 @@ func TestPodReadyIgnoresTerminating(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestServerRestartCountRefusesEmptyDiscovery covers the answer
+// ServerRestartCount gives on a cluster where no server pod was found.
+//
+// This is the failure with no symptom. Every caller of this function reads it
+// twice and compares the two readings, so an empty discovery answering zero
+// makes the comparison 0 != 0: the case reports that the server survived its
+// load, on a cluster where the suite never located a server at all. Nothing
+// errors, nothing is logged, and PROV-02, PROV-09, PROV-10, PROV-11 and DATA-10
+// all go green on the strength of it.
+//
+// The answer is a blocked condition rather than a plain error, so that a case
+// reaching it reports blocked and names the flags: a managed NFS server with no
+// pod in this cluster is a fact about the deployment, not a defect in it.
+//
+// Steps:
+//  1. Ask a cluster whose only pods are the suite's own and an unrelated
+//     workload, which is what a managed NFS deployment looks like from here.
+//  2. Assert the answer is the sentinel, that it reads as blocked, and that it
+//     names the flags that fix it.
+//  3. Ask a cluster that does have a server pod, and assert the restart counts
+//     are summed across its pods and containers.
+func TestServerRestartCountRefusesEmptyDiscovery(t *testing.T) {
+	// Discovery reads the flags, and one of these subtests needs the heuristic
+	// rather than a selector. Restored so the order tests run in cannot matter.
+	restore := *Cfg()
+	t.Cleanup(func() { *Cfg() = restore })
+	Cfg().ServerNamespace, Cfg().ServerSelector = "", ""
+
+	server := func(name string, restarts ...int32) *corev1.Pod {
+		p := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "nfs"},
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{
+				Name:  "nfs",
+				Image: "registry/nfs-ganesha:5.7",
+				Ports: []corev1.ContainerPort{{ContainerPort: nfsPort}},
+			}}},
+			Status: corev1.PodStatus{Phase: corev1.PodRunning},
+		}
+		for i, r := range restarts {
+			p.Status.ContainerStatuses = append(p.Status.ContainerStatuses,
+				corev1.ContainerStatus{Name: p.Spec.Containers[0].Name + string(rune('a'+i)), RestartCount: r})
+		}
+		return p
+	}
+	harness := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "nfsv-prov-02-20260914-101500-consumer",
+			Namespace: Namespace,
+			Labels:    map[string]string{"nfs-verification/run": "20260914-101500"},
+		},
+		Spec:   corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "alpine:3.20"}}},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+
+	t.Run("no server was discovered", func(t *testing.T) {
+		c := &Client{Kube: fake.NewSimpleClientset(harness)}
+		got, err := ServerRestartCount(context.Background(), c)
+		if err == nil {
+			t.Fatalf("ServerRestartCount = (%d, nil) with no server discovered. A caller comparing this "+
+				"reading with a later one compares two zeros and reports a server it never saw as one "+
+				"that did not restart", got)
+		}
+		if !errors.Is(err, ErrNoServerPods) {
+			t.Errorf("ServerRestartCount returned %v, which callers cannot match with errors.Is against "+
+				"ErrNoServerPods", err)
+		}
+		if !IsBlocked(err) {
+			t.Errorf("the empty-discovery error does not read as blocked, so failOrBlock will file a "+
+				"managed NFS server that lives outside this cluster as a storage defect: %v", err)
+		}
+		if !strings.Contains(err.Error(), "-server-selector") {
+			t.Errorf("the empty-discovery error does not name the flags that fix it: %v", err)
+		}
+	})
+
+	t.Run("restarts are summed across pods and containers", func(t *testing.T) {
+		c := &Client{Kube: fake.NewSimpleClientset(harness, server("nfs-server-0", 2, 1), server("nfs-server-1", 3))}
+		got, err := ServerRestartCount(context.Background(), c)
+		if err != nil {
+			t.Fatalf("ServerRestartCount on a cluster with two server pods: %v", err)
+		}
+		if got != 6 {
+			t.Errorf("ServerRestartCount = %d, want 6", got)
+		}
+	})
 }

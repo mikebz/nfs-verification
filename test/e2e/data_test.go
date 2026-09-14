@@ -1179,8 +1179,10 @@ const dirEntries = 100000
 //  4. List the directory from a third pod, streamed, while the deletes run.
 //  5. Assert the listing completed, and that every name it returned is one the
 //     populate step created.
-//  6. Assert the server pod did not restart, and that no node logged an oops or
-//     an NFS error over the window. The counts go in the bundle.
+//  6. Assert the server pod did not restart, in a subtest of its own that
+//     reports blocked rather than passed where no server pod was discovered,
+//     and that no node logged an oops or an NFS error over the window. The
+//     counts go in the bundle.
 func TestDataLargeDirectoryReaddirUnderDeletes(t *testing.T) {
 	f := framework.New(t, "DATA-10")
 	requireCap(t, f.Caps.MultiNode, "listing from a pod that is not deleting needs two schedulable workers")
@@ -1214,7 +1216,7 @@ func TestDataLargeDirectoryReaddirUnderDeletes(t *testing.T) {
 	t.Logf("the export reports %d bytes free and %d free inodes (known %v) before %d entries",
 		space.FreeBytes, space.FreeInodes, space.InodesKnown, dirEntries)
 
-	restartsBefore := serverRestarts(ctx, t, f)
+	restarts := watchServerRestarts(ctx, f)
 	kernelBefore := readKernelLog(ctx, t, f, nodeA, nodeB)
 
 	created, err := f.PopulateDir(ctx, populator, dir, dirEntries, 16, 30*time.Minute)
@@ -1270,10 +1272,9 @@ func TestDataLargeDirectoryReaddirUnderDeletes(t *testing.T) {
 			listed, created, removed)
 	}
 
-	if after := serverRestarts(ctx, t, f); after != restartsBefore {
-		t.Errorf("the server pod restarted %d times during the listing (was %d): a readdir over a large "+
-			"directory must not be able to take the server down", after-restartsBefore, restartsBefore)
-	}
+	// A readdir over a large directory must not be able to take the server
+	// down, so the listing above is only half the answer.
+	restarts.assertNoRestart(ctx, t, f, "the listing of a directory being deleted from")
 	assertNoNewKernelErrors(ctx, t, f, kernelBefore, nodeA, nodeB)
 }
 
@@ -1418,31 +1419,6 @@ func countNonZero(ctx context.Context, t *testing.T, f *framework.Framework, pod
 			"as zeros, and this case must not report the second when it saw the first", index, path, err)
 	}
 	return n
-}
-
-// serverRestarts totals the restart counts of the NFS server pods, which is how
-// a case says the server did not fall over under what it was doing. A cluster
-// where the server was never discovered reports zero and the case's own
-// assertion becomes a comparison of two zeros, which is why it is logged.
-func serverRestarts(ctx context.Context, t *testing.T, f *framework.Framework) int32 {
-	t.Helper()
-	ns := f.Env.ServerNamespace()
-	if ns == "" {
-		t.Logf("the NFS server pods were never discovered, so a restart of one cannot be noticed here")
-		return 0
-	}
-	pods, err := f.C.Kube.CoreV1().Pods(ns).List(ctx, framework.ListOptions(framework.Cfg().ServerSelector))
-	if err != nil {
-		t.Logf("reading the server pods' restart counts: %v", err)
-		return 0
-	}
-	var total int32
-	for i := range pods.Items {
-		for _, cs := range pods.Items[i].Status.ContainerStatuses {
-			total += cs.RestartCount
-		}
-	}
-	return total
 }
 
 // kernelErrorMarkers are the lines worth failing a case over. A use-after-free
