@@ -46,6 +46,7 @@ the scope and the status are read there rather than mirrored here:
 
 | Design doc | Delivery group |
 |---|---|
+| [`02-provisioning-design.md`](docs/02-provisioning-design.md) | Provisioning and volume lifecycle |
 | [`03-chaos-operations-design.md`](docs/03-chaos-operations-design.md) | Node and pod faults |
 | [`04-grace-and-lock-reclaim-design.md`](docs/04-grace-and-lock-reclaim-design.md) | Server restart, grace and lock reclaim, since absorbed by docs 03 and 06 |
 | [`05-data-path-and-locktool-design.md`](docs/05-data-path-and-locktool-design.md) | Data path, byte-range locking and `locktool` |
