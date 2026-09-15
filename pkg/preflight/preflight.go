@@ -100,7 +100,8 @@ func Run(ctx context.Context) (*Result, error) {
 	caps.SharedServer = e.FanOut > 0 && sharesOneServer(e)
 	if e.FanOut == 0 {
 		e.AddNote("no NFS server pods discovered: set -server-namespace and -server-selector, " +
-			"otherwise every CHAOS case that kills the server will skip")
+			"otherwise every CHAOS case that kills the server will skip, and every case that asserts " +
+			"the server did not restart under its load will report blocked instead")
 	}
 
 	e.CSIDriverImages = csiImages(ctx, c, e.CSIDriver)

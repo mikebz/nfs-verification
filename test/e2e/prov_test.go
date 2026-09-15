@@ -309,16 +309,14 @@ func TestProvVolumeExpansion(t *testing.T) {
 //     a. Every PV has a unique name.
 //     b. No duplicate export IDs (from Export_Id annotation) across PVs.
 //     c. No duplicate export paths / volume handles across PVs.
-//  6. Assert server restart count did not increase.
+//  6. Assert server restart count did not increase. Its own subtest, and
+//     blocked rather than passed where no server pod was discovered.
 func TestProvConcurrentProvisioning(t *testing.T) {
 	f := framework.New(t, "PROV-02")
 	ctx, cancel := caseCtx(t, 25*time.Minute)
 	defer cancel()
 
-	restartsBefore, err := framework.ServerRestartCount(ctx, f.C)
-	if err != nil {
-		t.Fatalf("reading initial server restart count: %v", err)
-	}
+	restarts := watchServerRestarts(ctx, f)
 
 	mode, err := f.BindingMode(ctx, f.Env.StorageClass)
 	if err != nil {
@@ -403,14 +401,7 @@ func TestProvConcurrentProvisioning(t *testing.T) {
 		}
 	}
 
-	restartsAfter, err := framework.ServerRestartCount(ctx, f.C)
-	if err != nil {
-		t.Fatalf("reading final server restart count: %v", err)
-	}
-	if restartsAfter != restartsBefore {
-		t.Errorf("server restarted during concurrent provisioning: %d restarts, was %d",
-			restartsAfter, restartsBefore)
-	}
+	restarts.assertNoRestart(ctx, t, f, "the concurrent provisioning of 20 claims")
 }
 
 // PROV-05: snapshot and restore, if advertised. A restored volume must mount
@@ -911,7 +902,8 @@ func TestProvDeleteClaimServerDown(t *testing.T) {
 //  2. Record server restart count before churn.
 //  3. Execute 100 cycles of create PVC -> wait Bound -> delete PVC -> wait gone.
 //  4. Assert all cycles completed successfully.
-//  5. Assert server container restart count did not increase.
+//  5. Assert server container restart count did not increase. Its own subtest,
+//     and blocked rather than passed where no server pod was discovered.
 func TestProvRapidProvisionChurn(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping 100-cycle rapid provision churn in -short mode")
@@ -921,10 +913,7 @@ func TestProvRapidProvisionChurn(t *testing.T) {
 	ctx, cancel := caseCtx(t, 45*time.Minute)
 	defer cancel()
 
-	restartsBefore, err := framework.ServerRestartCount(ctx, f.C)
-	if err != nil {
-		t.Fatalf("reading initial server restart count: %v", err)
-	}
+	restarts := watchServerRestarts(ctx, f)
 
 	const cycles = 100
 	res, err := f.RunPVCLifecycleChurn(ctx, cycles, "prov09")
@@ -933,14 +922,7 @@ func TestProvRapidProvisionChurn(t *testing.T) {
 	}
 	t.Logf("completed %d of %d rapid churn cycles", res.Completed, cycles)
 
-	restartsAfter, err := framework.ServerRestartCount(ctx, f.C)
-	if err != nil {
-		t.Fatalf("reading final server restart count: %v", err)
-	}
-	if restartsAfter != restartsBefore {
-		t.Errorf("server restarted during rapid churn: %d restarts, was %d",
-			restartsAfter, restartsBefore)
-	}
+	restarts.assertNoRestart(ctx, t, f, fmt.Sprintf("%d create/delete cycles", cycles))
 }
 
 // PROV-10: volume name edge cases. Assert that Kubernetes admission cleanly rejects
@@ -965,7 +947,8 @@ func TestProvRapidProvisionChurn(t *testing.T) {
 //  6. Write a payload from the writer on node A and verify the SHA-256 checksum from
 //     the reader on node B across the wire.
 //  7. Delete both pods gracefully, await API departure, and delete the claim.
-//  8. Confirm server remains healthy with no restarts.
+//  8. Confirm server remains healthy with no restarts. Its own subtest, and
+//     blocked rather than passed where no server pod was discovered.
 func TestProvVolumeNameEdgeCases(t *testing.T) {
 	f := framework.New(t, "PROV-10")
 	requireCap(t, f.Caps.MultiNode, "cross-node verification needs two schedulable workers")
@@ -974,10 +957,7 @@ func TestProvVolumeNameEdgeCases(t *testing.T) {
 
 	nodeA, nodeB := f.TwoNodes(ctx)
 
-	restartsBefore, err := framework.ServerRestartCount(ctx, f.C)
-	if err != nil {
-		t.Fatalf("reading initial server restart count: %v", err)
-	}
+	restarts := watchServerRestarts(ctx, f)
 
 	// 1. Admission barrier: direct API call with 1000-character name.
 	// Must be rejected cleanly by kube-apiserver admission (RFC 1123 limit).
@@ -1114,14 +1094,7 @@ func TestProvVolumeNameEdgeCases(t *testing.T) {
 	}
 
 	// 8. Confirm server remained healthy.
-	restartsAfter, err := framework.ServerRestartCount(ctx, f.C)
-	if err != nil {
-		t.Fatalf("reading final server restart count: %v", err)
-	}
-	if restartsAfter != restartsBefore {
-		t.Errorf("server restarted during volume name edge case tests: %d restarts, was %d",
-			restartsAfter, restartsBefore)
-	}
+	restarts.assertNoRestart(ctx, t, f, "the 253-character claim's lifecycle")
 }
 
 // PROV-11: two-stage expansion under active I/O. Grows the backing volume while
@@ -1140,7 +1113,8 @@ func TestProvVolumeNameEdgeCases(t *testing.T) {
 //     f. Assert zero I/O errors (report.Errors() is empty).
 //     g. Assert all committed writes are readable on the share.
 //     h. Assert pod restart count did not increase.
-//     i. Assert server restart count did not increase.
+//     i. Assert server restart count did not increase. Its own subtest, and
+//     blocked rather than passed where no server pod was discovered.
 //     j. Compare df before and after: growth is logged, no change is explained.
 func TestProvTwoStageExpansionUnderIO(t *testing.T) {
 	f := framework.New(t, "PROV-11")
@@ -1175,10 +1149,7 @@ func TestProvTwoStageExpansionUnderIO(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading pod restarts: %v", err)
 	}
-	serverRestartsBefore, err := framework.ServerRestartCount(ctx, f.C)
-	if err != nil {
-		t.Fatalf("reading server restarts: %v", err)
-	}
+	serverRestarts := watchServerRestarts(ctx, f)
 
 	// Start background active I/O.
 	workload, err := f.StartWriteLoad(ctx, pod.Name, mountPath, "prov11")
@@ -1232,14 +1203,7 @@ func TestProvTwoStageExpansionUnderIO(t *testing.T) {
 			podRestartsAfter, podRestartsBefore)
 	}
 
-	serverRestartsAfter, err := framework.ServerRestartCount(ctx, f.C)
-	if err != nil {
-		t.Fatalf("re-reading server restarts: %v", err)
-	}
-	if serverRestartsAfter != serverRestartsBefore {
-		t.Errorf("server restarted during volume expansion: %d restarts, was %d",
-			serverRestartsAfter, serverRestartsBefore)
-	}
+	serverRestarts.assertNoRestart(ctx, t, f, "the expansion under active I/O")
 
 	seenAfter, err := f.MountCapacity(ctx, pod.Name, mountPath)
 	if err != nil {

@@ -1,10 +1,14 @@
 package framework
 
 import (
+	"context"
+	"errors"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes/fake"
 )
 
 // Server discovery falls back to a name and port heuristic when no selector is
@@ -101,4 +105,122 @@ func TestPodReadyIgnoresTerminating(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestServerRestartCount covers the two states in which the restart count
+// cannot be read, and the one in which it can.
+//
+// This is the failure with no symptom. Every caller of this function reads it
+// twice and compares the two readings, so an unreadable state answering zero
+// makes the comparison 0 != 0: the case reports that the server survived its
+// load, on a cluster where the suite never saw a server container at all.
+// Nothing errors, nothing is logged, and PROV-02, PROV-09, PROV-10, PROV-11 and
+// DATA-10 all go green on the strength of it.
+//
+// The answer is a blocked condition rather than a plain error, so that a case
+// reaching it reports blocked and says what would fix it: a managed NFS server
+// with no pod in this cluster is a fact about the deployment, not a defect in
+// it, and a server pod the kubelet has not admitted yet is a state to read
+// again rather than a flag to pass.
+//
+// Steps:
+//  1. Ask a cluster whose only pods are the suite's own and an unrelated
+//     workload, which is what a managed NFS deployment looks like from here.
+//  2. Assert the answer is ErrNoServerPods, that it reads as blocked, and that
+//     it names the flags that fix it.
+//  3. Ask a cluster whose only server pod is Pending, which is what discovery
+//     sees while the server is being rescheduled, and assert the answer is
+//     ErrNoServerContainerStatuses and reads as blocked.
+//  4. Ask a cluster that does have running server pods, and assert the restart
+//     counts are summed across its pods and containers, a Pending pod among
+//     them notwithstanding.
+func TestServerRestartCount(t *testing.T) {
+	// Discovery reads the flags, and one of these subtests needs the heuristic
+	// rather than a selector. Restored so the order tests run in cannot matter.
+	restore := *Cfg()
+	t.Cleanup(func() { *Cfg() = restore })
+	Cfg().ServerNamespace, Cfg().ServerSelector = "", ""
+
+	server := func(name string, restarts ...int32) *corev1.Pod {
+		p := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "nfs"},
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{
+				Name:  "nfs",
+				Image: "registry/nfs-ganesha:5.7",
+				Ports: []corev1.ContainerPort{{ContainerPort: nfsPort}},
+			}}},
+			Status: corev1.PodStatus{Phase: corev1.PodRunning},
+		}
+		for i, r := range restarts {
+			p.Status.ContainerStatuses = append(p.Status.ContainerStatuses,
+				corev1.ContainerStatus{Name: p.Spec.Containers[0].Name + string(rune('a'+i)), RestartCount: r})
+		}
+		return p
+	}
+	harness := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "nfsv-prov-02-20260914-101500-consumer",
+			Namespace: Namespace,
+			Labels:    map[string]string{"nfs-verification/run": "20260914-101500"},
+		},
+		Spec:   corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "alpine:3.20"}}},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+	// A server pod the kubelet has not admitted yet. Discovery keeps it, and it
+	// carries no container statuses, which is the second way a reading can come
+	// back as a zero that was never measured.
+	pending := server("nfs-server-2")
+	pending.Status.Phase = corev1.PodPending
+
+	t.Run("no server was discovered", func(t *testing.T) {
+		c := &Client{Kube: fake.NewSimpleClientset(harness)}
+		got, err := ServerRestartCount(context.Background(), c)
+		if err == nil {
+			t.Fatalf("ServerRestartCount = (%d, nil) with no server discovered. A caller comparing this "+
+				"reading with a later one compares two zeros and reports a server it never saw as one "+
+				"that did not restart", got)
+		}
+		if !errors.Is(err, ErrNoServerPods) {
+			t.Errorf("ServerRestartCount returned %v, which callers cannot match with errors.Is against "+
+				"ErrNoServerPods", err)
+		}
+		if !IsBlocked(err) {
+			t.Errorf("the empty-discovery error does not read as blocked, so failOrBlock will file a "+
+				"managed NFS server that lives outside this cluster as a storage defect: %v", err)
+		}
+		if !strings.Contains(err.Error(), "-server-selector") {
+			t.Errorf("the empty-discovery error does not name the flags that fix it: %v", err)
+		}
+	})
+
+	t.Run("the discovered pod has no container status", func(t *testing.T) {
+		c := &Client{Kube: fake.NewSimpleClientset(harness, pending)}
+		got, err := ServerRestartCount(context.Background(), c)
+		if err == nil {
+			t.Fatalf("ServerRestartCount = (%d, nil) with the only server pod Pending. Discovery found a "+
+				"pod, but nothing has reported a container yet, so this reading and the next one are "+
+				"both zero and the case passes without having watched anything", got)
+		}
+		if !errors.Is(err, ErrNoServerContainerStatuses) {
+			t.Errorf("ServerRestartCount returned %v, which callers cannot match with errors.Is against "+
+				"ErrNoServerContainerStatuses", err)
+		}
+		if !IsBlocked(err) {
+			t.Errorf("the unadmitted-pod error does not read as blocked, so a server that was being "+
+				"rescheduled when the case started is filed as a storage defect: %v", err)
+		}
+	})
+
+	t.Run("restarts are summed across pods and containers", func(t *testing.T) {
+		c := &Client{Kube: fake.NewSimpleClientset(
+			harness, server("nfs-server-0", 2, 1), server("nfs-server-1", 3), pending)}
+		got, err := ServerRestartCount(context.Background(), c)
+		if err != nil {
+			t.Fatalf("ServerRestartCount on a cluster with two running server pods and one Pending: %v", err)
+		}
+		if got != 6 {
+			t.Errorf("ServerRestartCount = %d, want 6. A pod that reports no container status yet is not "+
+				"a reason to refuse a reading the other pods can answer", got)
+		}
+	})
 }
