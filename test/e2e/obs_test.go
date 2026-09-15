@@ -10,6 +10,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/mikebz/nfs-verification/pkg/chaos"
 	"github.com/mikebz/nfs-verification/pkg/framework"
@@ -497,8 +498,9 @@ func csiDriver(f *framework.Framework) string {
 // publish metrics, so every failure below says it is reporting what the test
 // plan requires of a deployment, not a defect in NFS.
 //
-// This case has never got past step 2 on a real cluster. Both deployments it
-// has been run against declare no endpoint at all, which is F-023 in
+// This case has never got past step 2 on a real cluster: no endpoint was ever
+// discovered, so nothing below it has run outside a unit test. Both deployments
+// it has been run against declare no endpoint at all, which is F-023 in
 // docs/findings.md; the scrape, the restart and the classification are covered
 // by unit tests and not yet by a run. The red stays red: see F-023 for what is
 // and is not being claimed by an absent verdict.
@@ -509,14 +511,17 @@ func csiDriver(f *framework.Framework) string {
 // metric family, which is what a dashboard or an alert names.
 //
 // Steps:
-//  1. Find the server pod and where it says its metrics are: the prometheus.io
-//     annotations a scraper reads, or a container port named for metrics.
-//  2. Scrape it. No endpoint, an endpoint that does not answer, or a body that
+//  1. Find the server pod, and register the bundle against it before anything
+//     else, since every exit below leaves a result worth the evidence and the
+//     pod is gone by teardown.
+//  2. Read where it says its metrics are: the prometheus.io annotations a
+//     scraper reads, or a container port named for metrics.
+//  3. Scrape it. No endpoint, an endpoint that does not answer, or a body that
 //     is not the exposition format all fail here, each saying which it was.
-//  3. Delete the server pod and wait for a replacement to be ready.
-//  4. Scrape the replacement until it answers, inside the restart budget.
-//  5. Record both scrapes in the bundle whatever the verdict: neither endpoint
-//     can be asked again once the run is over.
+//  4. Record which server pods exist, then delete the target and wait for a
+//     replacement to be ready.
+//  5. Scrape the replacement, which is a pod that was not in step 4's set,
+//     until it answers, inside the restart budget.
 //  6. Fail on a family published before the restart and not after. Pass on
 //     counters reset and on counters carried across, saying which happened.
 func TestObsMetricsSurviveServerRestart(t *testing.T) {
@@ -538,8 +543,29 @@ func TestObsMetricsSurviveServerRestart(t *testing.T) {
 			target.Namespace, target.Pod, err)
 	}
 
+	// The bundle is registered here, before anything can end the case, and not
+	// after the first scrape. Every exit below this line is a result somebody
+	// will want the evidence for, and the two that need it most are the ones
+	// that have no scrape to carry it: the endpoint is gone by teardown, and an
+	// absent verdict's whole content is what the pod declared instead. Writing
+	// it only once there was a scrape meant the one outcome this case has
+	// actually produced on real hardware, F-023, recorded nothing at all.
+	// Reported as a review finding on PR #74.
+	var report framework.MetricsComparison
+	source := framework.DescribePodPorts(pod)
+	t.Cleanup(func() {
+		report.Source = source
+		if err := f.WriteArtifact("server-metrics.txt", []byte(report.Table())); err != nil {
+			t.Logf("writing the metrics comparison: %v", err)
+		}
+	})
+
 	endpoint, ok := framework.MetricsEndpointOf(pod)
 	if !ok {
+		// Named rather than left as "not reached". This is the outcome F-023
+		// and the design doc both call absent, and a bundle that declined to
+		// name it would be the only place in the run that did not.
+		report.Verdict = framework.MetricsAbsent
 		t.Fatalf("the NFS server publishes no metrics endpoint, so nothing it knows about NFS leaves "+
 			"the process: %s. An operator on this deployment can see that a container restarted and "+
 			"not that a server failed over, cannot see operation or error rates, and cannot see which "+
@@ -549,8 +575,9 @@ func TestObsMetricsSurviveServerRestart(t *testing.T) {
 			"other annotation name, it is in the list above and this verdict is wrong; otherwise no "+
 			"scraper following the convention would find an endpoint here either. This is what the "+
 			"test plan requires of a deployment (Section 3.5), not an NFS protocol guarantee",
-			framework.DescribePodPorts(pod))
+			source)
 	}
+	source = fmt.Sprintf("%s, declared by %s", endpoint, framework.DescribePodPorts(pod))
 	t.Logf("server pod %s on %s says its metrics are at %s", target.Pod, target.Node, endpoint)
 
 	before, err := framework.ScrapeMetrics(ctx, f.C, endpoint)
@@ -562,27 +589,29 @@ func TestObsMetricsSurviveServerRestart(t *testing.T) {
 			"injected: %v. A declared endpoint nothing can reach is the same gap as no endpoint, and "+
 			"the scraper an operator runs here would record the same thing", err)
 	}
+	report.Before = before
 	if before.Len() == 0 {
 		t.Fatalf("the metrics endpoint answered and published no series: %s. Nothing was restarted yet, "+
 			"so this is what an operator's scraper collects from this deployment at rest", before.Describe())
 	}
 	t.Logf("before the restart: %s", before.Describe())
 
-	// The table goes in the bundle on every result, including the ones that
-	// end below without a verdict: the endpoint is gone by teardown, and a pass
-	// where every counter reset is a different run from one where they all
-	// carried across.
-	report := framework.MetricsComparison{Before: before}
-	t.Cleanup(func() {
-		if err := f.WriteArtifact("server-metrics.txt", []byte(report.Table())); err != nil {
-			t.Logf("writing the metrics comparison: %v", err)
-		}
-	})
-
 	budget, err := slo.Recovery(profile(t), slo.EventServerRestart)
 	if err != nil {
 		t.Fatalf("%v", err)
 	}
+
+	// Every server pod that exists before the fault, not just the target. On a
+	// deployment serving this class from more than one pod, a sibling that was
+	// already up satisfies "ready and not the pod we deleted", and scraping it
+	// would report metrics as having survived a restart that was never
+	// observed: the case would pass without reading the thing it is about.
+	// Reported as a review finding on PR #74.
+	preFault, err := serverPodUIDs(ctx, f)
+	if err != nil {
+		t.Fatalf("listing the server pods before the fault: %v", err)
+	}
+
 	if err := chaos.DeleteServerPod(ctx, f, target); err != nil {
 		t.Skipf("blocked: %v", err)
 	}
@@ -596,7 +625,7 @@ func TestObsMetricsSurviveServerRestart(t *testing.T) {
 			within, target.Pod, err)
 	}
 
-	after, afterPod, resumed := waitMetricsBack(ctx, t, f, target, within)
+	after, afterPod, resumed := waitMetricsBack(ctx, t, f, preFault, within)
 	var scraped *framework.MetricSet
 	if resumed {
 		scraped = &after
@@ -645,20 +674,40 @@ func TestObsMetricsSurviveServerRestart(t *testing.T) {
 	}
 }
 
+// serverPodUIDs is the set of server pods that exist right now, taken before a
+// fault so that afterwards a replacement can be told from a pod that was there
+// all along. UIDs rather than names, because a StatefulSet reuses the name.
+func serverPodUIDs(ctx context.Context, f *framework.Framework) (map[types.UID]bool, error) {
+	pods, err := framework.ServerPods(ctx, f.C)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[types.UID]bool, len(pods))
+	for i := range pods {
+		out[pods[i].UID] = true
+	}
+	return out, nil
+}
+
 // waitMetricsBack scrapes the replacement server pod until its metrics endpoint
 // answers with something, and reports whether it ever did.
 //
-// The old pod is excluded by UID rather than by name, because a StatefulSet's
-// replacement carries the same name: scraping the pod that is on its way out
-// would report metrics as having survived a restart the suite had not yet
-// observed. Same confusion as F-013 in docs/findings.md.
+// The replacement is identified as a pod that did not exist before the fault,
+// by UID, which is two exclusions at once. A StatefulSet's replacement carries
+// the same name as the pod it replaces, so matching by name would scrape the one
+// on its way out and report metrics as having survived a restart the suite had
+// not yet observed: the same confusion as F-013 in docs/findings.md. And on a
+// deployment serving this class from several pods, a sibling that was up the
+// whole time is ready and is not the deleted pod, so excluding only the target
+// would scrape a pod that was never restarted and pass the case without reading
+// the thing it is about.
 //
 // A replacement that declares no endpoint, or one that answers with a body that
 // is not the exposition format, keeps the loop going rather than ending it: the
 // kubelet reports a pod ready before the process inside it has opened its
 // listener, and giving up on the first refused connection would report a
 // healthy server as one whose metrics never came back.
-func waitMetricsBack(ctx context.Context, t *testing.T, f *framework.Framework, old chaos.Target,
+func waitMetricsBack(ctx context.Context, t *testing.T, f *framework.Framework, preFault map[types.UID]bool,
 	within time.Duration) (framework.MetricSet, string, bool) {
 	t.Helper()
 	var set framework.MetricSet
@@ -671,9 +720,10 @@ func waitMetricsBack(ctx context.Context, t *testing.T, f *framework.Framework, 
 		}
 		for i := range pods {
 			p := &pods[i]
-			if p.UID == old.UID || !framework.PodReady(p) {
+			if preFault[p.UID] || !framework.PodReady(p) {
 				continue
 			}
+
 			e, ok := framework.MetricsEndpointOf(p)
 			if !ok {
 				return false, fmt.Errorf("the replacement %s declares no metrics endpoint: %s",

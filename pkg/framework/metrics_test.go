@@ -4,6 +4,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -232,16 +233,39 @@ func TestMetricsEndpointDiscovery(t *testing.T) {
 // case fails a deployment for publishing no metrics, so the message has to show
 // what the pod did declare.
 //
+// The second half is the one that matters. An absent verdict is wrong exactly
+// when the deployment marks its scrape target under an annotation this package
+// does not read, and a message that printed only the names it already looked
+// for would leave the reader no way to notice. Reported as a review finding on
+// PR #74.
+//
 // Steps:
 //  1. Describe a pod with no annotations and one NFS port.
 //  2. Assert the description names the port and says the annotations are absent.
+//  3. Describe a pod carrying an annotation under some other vendor's name, and
+//     assert it is shown rather than dropped.
+//  4. Assert a value too long to print is bounded rather than reproduced whole.
 func TestDescribePodPortsNamesWhatWasLooked(t *testing.T) {
 	got := DescribePodPorts(serverPodWith(nil, corev1.ContainerPort{Name: "nfs", ContainerPort: 2049}))
-	for _, want := range []string{"no prometheus.io annotations", "nfs/2049", "server"} {
+	for _, want := range []string{"no annotations at all", "nfs/2049", "server"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("the description omits %q, so the failure would not say what was looked at: %s",
 				want, got)
 		}
+	}
+
+	other := map[string]string{
+		"monitoring.example.io/port":                       "9100",
+		"kubectl.kubernetes.io/last-applied-configuration": strings.Repeat("x", 4096),
+	}
+	got = DescribePodPorts(serverPodWith(other, corev1.ContainerPort{Name: "nfs", ContainerPort: 2049}))
+	if !strings.Contains(got, "monitoring.example.io/port") {
+		t.Errorf("an annotation under another vendor's name is dropped, so the evidence that would "+
+			"disprove an absent verdict never reaches the reader: %s", got)
+	}
+	if len(got) > 1024 {
+		t.Errorf("an annotation value was reproduced whole, so the failure message is unreadable (%d bytes)",
+			len(got))
 	}
 }
 
@@ -335,6 +359,52 @@ func TestMetricsComparisonTableHoldsBothScrapes(t *testing.T) {
 			t.Errorf("the table omits %q, so the run keeps no record of what the endpoint said:\n%s",
 				want, table)
 		}
+	}
+}
+
+// TestMetricSetDescribeSeparatesNoScrapeFromNoMetrics is the other failure with
+// no symptom: Describe is only ever read out of a failure message or the
+// artifact bundle, so a wrong sentence here is never noticed by a test, only by
+// the person triaging the run it misled. The zero value is what the case holds
+// when the endpoint never answered, and described as a real reading it says the
+// server was asked and published nothing, which is a different finding about a
+// different deployment.
+//
+// Steps:
+//  1. Describe the zero value and assert it says no scrape happened.
+//  2. Describe a real scrape of a live endpoint that published nothing, and
+//     assert it says so instead, naming the endpoint.
+func TestMetricSetDescribeSeparatesNoScrapeFromNoMetrics(t *testing.T) {
+	if got := (MetricSet{}).Describe(); got != "no scrape was taken" {
+		t.Errorf("a scrape that never happened describes itself as one that did: %q", got)
+	}
+
+	live := ParseExposition([]byte("# a live endpoint with nothing on it\n"))
+	live.Endpoint = "http://10.0.0.1:9100/metrics"
+	got := live.Describe()
+	if !strings.Contains(got, live.Endpoint) || strings.Contains(got, "no scrape was taken") {
+		t.Errorf("an endpoint that answered with no metrics is not distinguishable from one that was never asked: %q", got)
+	}
+}
+
+// TestParseExpositionExcerptStaysValidUTF8 guards the quoted body. An error page
+// is whatever the server felt like sending, and a byte cut through a multi-byte
+// character puts mojibake in the failure message, which reads as the harness
+// having mangled the body it is judging.
+//
+// Steps:
+//  1. Parse a non-exposition body, longer than the excerpt bound, whose
+//     characters straddle the cut.
+//  2. Assert the excerpt was taken and is still valid UTF-8.
+func TestParseExpositionExcerptStaysValidUTF8(t *testing.T) {
+	body := strings.Repeat("パ", 200)
+	m := ParseExposition([]byte(body))
+
+	if m.Excerpt == "" || !strings.HasSuffix(m.Excerpt, "...") {
+		t.Fatalf("the body was not excerpted, so the cut is untested: %q", m.Excerpt)
+	}
+	if !utf8.ValidString(m.Excerpt) {
+		t.Errorf("the excerpt was cut mid-character and reads as a harness bug rather than a server body: %q", m.Excerpt)
 	}
 }
 

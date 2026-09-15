@@ -277,6 +277,19 @@ specific to the Observability test group:
   - **No workload.** Nothing here writes through the export: the case asserts survival and counter
     direction, not movement, and the movement cases are OBS-05 and OBS-06. A counter that is equal
     on both sides is reported as continuous rather than as evidence of anything.
+  - **The bundle is registered before the endpoint is looked for, not after the first scrape.** The
+    outcome that most needs the evidence is `absent`, and `absent` has no scrape to carry it: its
+    entire content is what the pod declared instead, and the pod is gone by the time anyone reads
+    the run. Registering on the first successful scrape meant the only verdict this case has ever
+    produced against real hardware left no artifact at all. The bundle therefore records what was
+    read, or what was found when there was nothing to read, and names the verdict rather than
+    reporting it as not reached.
+  - **The pod scraped after the restart must be one that did not exist before it.** Identified by
+    UID against the set taken before the fault, which excludes two different wrong pods: the
+    terminating original, whose name a StatefulSet replacement reuses (the F-013 confusion), and, on
+    a deployment serving the class from more than one pod, a sibling that was up the whole time.
+    Excluding only the deleted pod would let the case pass by scraping something that never
+    restarted.
 
 ## 7. Decisions worth keeping
 

@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -144,16 +145,28 @@ func looksLikeMetricsPort(name string) bool {
 // DescribePodPorts says what a pod declares about being scraped, which is what
 // a failure that reports no metrics endpoint has to say next to the claim: "no
 // metrics endpoint" is actionable only alongside the ports that were there.
+//
+// Every annotation is listed, not only the prometheus.io ones this package
+// reads. The verdict this message accompanies is that no scraper following the
+// convention would find an endpoint, and the way that verdict is wrong is a
+// deployment marking its targets under some other name. Printing only the names
+// already looked for would hide the one line that disproves the finding. Values
+// are bounded because an annotation holds whatever was applied to the object,
+// last-applied-configuration included.
 func DescribePodPorts(p *corev1.Pod) string {
 	var parts []string
-	for _, key := range []string{scrapeAnnotation, portAnnotation, pathAnnotation, schemeAnnotation} {
-		if v, ok := p.Annotations[key]; ok {
-			parts = append(parts, fmt.Sprintf("%s=%q", key, v))
-		}
+	keys := make([]string, 0, len(p.Annotations))
+	for key := range p.Annotations {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		parts = append(parts, fmt.Sprintf("%s=%q", key, excerpt([]byte(p.Annotations[key]))))
 	}
 	if len(parts) == 0 {
-		parts = append(parts, "no prometheus.io annotations")
+		parts = append(parts, "no annotations at all")
 	}
+
 	var ports []string
 	for _, c := range p.Spec.Containers {
 		for _, port := range c.Ports {
@@ -219,7 +232,16 @@ func (m MetricSet) Families() []string {
 }
 
 // Describe renders a scrape for a log line or a failure message.
+//
+// The zero value is a scrape that never happened, and it has to say so. Read as
+// an empty-but-real reading it would describe a server that was never asked as
+// one that answered with nothing, and that sentence lands in the artifact
+// bundle for every never-resumed verdict, which is precisely the case where
+// somebody is trying to work out what was and was not observed.
 func (m MetricSet) Describe() string {
+	if m.Endpoint == "" && m.Len() == 0 && m.Lines == 0 {
+		return "no scrape was taken"
+	}
 	if m.Len() == 0 {
 		excerpt := m.Excerpt
 		if excerpt == "" {
@@ -262,6 +284,16 @@ func ScrapeMetrics(ctx context.Context, c *Client, e MetricsEndpoint) (MetricSet
 	}
 	var attempts []string
 	for _, scheme := range schemes {
+		// The proxy subresource name is "<scheme>:<name>:<port>", not the pod
+		// name with something prepended: the apiserver splits it with
+		// apimachinery's util/net.SplitSchemeNamePort, whose doc comment gives
+		// exactly these three forms. Worth stating because it reads as a
+		// name-mangling bug to anyone who has not looked, and it was raised as
+		// one in review on PR #74. Checked against a live apiserver, which
+		// distinguishes all three cases: "http:<pod>:9999" dials the pod and is
+		// refused, "ftp:<pod>:9999" is rejected as an invalid pod request
+		// because the scheme is parsed and validated, and "http:no-such-pod"
+		// reports pods "no-such-pod" not found, with the scheme stripped.
 		raw, err := c.Kube.CoreV1().RESTClient().Get().
 			Namespace(e.Namespace).Resource("pods").
 			Name(fmt.Sprintf("%s:%s:%d", scheme, e.Pod, e.Port)).
@@ -348,8 +380,17 @@ func excerpt(raw []byte) string {
 	const max = 120
 	s := strings.TrimSpace(string(raw))
 	s = strings.ReplaceAll(s, "\n", " ")
+	// Cut on a rune boundary. The bodies worth quoting here are the ones that
+	// are not the exposition format, which means error pages, and those carry
+	// whatever the server felt like sending; a byte slice through a multi-byte
+	// character puts mojibake in the failure message and makes the reader
+	// wonder whether the harness mangled the body it was judging.
 	if len(s) > max {
-		return s[:max] + "..."
+		cut := max
+		for cut > 0 && !utf8.RuneStart(s[cut]) {
+			cut--
+		}
+		return s[:cut] + "..."
 	}
 	return s
 }
@@ -528,8 +569,15 @@ type CounterChange struct {
 // MetricsComparison is what the two scrapes say together.
 type MetricsComparison struct {
 	Verdict MetricsVerdict
-	Before  MetricSet
-	After   MetricSet
+	// Source is what was read, or what was found when there was nothing to
+	// read. It is set by the caller rather than derived, because the paths that
+	// most need the record are the ones that end before a scrape exists to
+	// carry the endpoint: an absent verdict has no MetricSet at all, and the
+	// pod is gone by the time anybody reads the bundle.
+	Source string
+	Before MetricSet
+	After  MetricSet
+
 	// LostFamilies are families published before the restart and not after.
 	// This is the assertion: a family is what a dashboard names.
 	LostFamilies []string
@@ -655,6 +703,9 @@ func (c MetricsComparison) Table() string {
 		verdict = "not reached: the case ended before it had both scrapes"
 	}
 	fmt.Fprintf(&b, "verdict: %s\n", verdict)
+	if c.Source != "" {
+		fmt.Fprintf(&b, "source:  %s\n", c.Source)
+	}
 	fmt.Fprintf(&b, "before:  %s at %s\n", c.Before.Describe(), stampOf(c.Before))
 	fmt.Fprintf(&b, "after:   %s at %s\n", c.After.Describe(), stampOf(c.After))
 	writeList(&b, "families lost", c.LostFamilies)
