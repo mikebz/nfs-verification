@@ -192,9 +192,10 @@ func watchServerRestarts(ctx context.Context, f *framework.Framework) serverRest
 	return serverRestartWatch{before: before, err: err}
 }
 
-// assertNoRestart re-reads the counts and asserts the server did not restart
-// while during was happening. during names what the case was doing, and lands
-// in the message.
+// assertNoRestart re-reads the counts and asserts that the server did not
+// restart while the case was doing the thing it is about. The during argument
+// names that operation, in a form that reads after "during", and lands in the
+// failure message.
 //
 // The assertion is its own subtest so that an unanswerable question reports
 // blocked by itself, leaving the verdict on the rest of the case intact. Same
