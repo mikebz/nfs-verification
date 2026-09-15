@@ -575,7 +575,10 @@ func TestObsMetricsSurviveServerRestart(t *testing.T) {
 			"a container port named for metrics. If this server marks its scrape targets under some "+
 			"other annotation name, it is in the list above and this verdict is wrong; otherwise no "+
 			"scraper following the convention would find an endpoint here either. This is what the "+
-			"test plan requires of a deployment (Section 3.5), not an NFS protocol guarantee",
+			"test plan requires of a deployment (Section 3.5), not an NFS protocol guarantee. If this "+
+			"is an NFS-Ganesha deployment, F-023 in docs/findings.md has the two gates and how to "+
+			"check them: the build needs USE_MONITORING, and Enable_Metrics defaults to false even "+
+			"when it is present, so an endpoint can be one config line away rather than absent",
 			source)
 	}
 	source = fmt.Sprintf("%s, declared by %s", endpoint, framework.DescribePodPorts(pod))
@@ -632,6 +635,15 @@ func TestObsMetricsSurviveServerRestart(t *testing.T) {
 		scraped = &after
 		t.Logf("after the restart, %s: %s", afterPod, after.Describe())
 	}
+	// Which process each scrape came from, by UID, in the bundle. A
+	// StatefulSet's replacement reuses the pod's name, so the name alone cannot
+	// show that the second scrape read a different process, and that is the
+	// first thing anyone doubting the verdict will want. F-024 was diagnosed by
+	// going back to the cluster for this, which only worked because the pod was
+	// still there; after teardown it would not have been.
+	source = fmt.Sprintf("%s. Scraped before from %s/%s, after from %s",
+		source, pod.Name, pod.UID, afterPod)
+
 	report = framework.ClassifyMetrics(&before, scraped)
 	t.Logf("%s", report)
 
@@ -715,6 +727,10 @@ func serverPodUIDs(ctx context.Context, f *framework.Framework) (map[types.UID]b
 // kubelet reports a pod ready before the process inside it has opened its
 // listener, and giving up on the first refused connection would report a
 // healthy server as one whose metrics never came back.
+//
+// The pod it settled on is returned as "name/uid", because the name alone is
+// the same on both sides of a StatefulSet restart and so cannot evidence the
+// replacement it just went to the trouble of identifying.
 func waitMetricsBack(ctx context.Context, t *testing.T, f *framework.Framework, preFault map[types.UID]bool,
 	within time.Duration) (framework.MetricSet, string, bool) {
 	t.Helper()
@@ -751,7 +767,7 @@ func waitMetricsBack(ctx context.Context, t *testing.T, f *framework.Framework, 
 			if m.Len() == 0 {
 				return false, fmt.Errorf("%s", m.Describe())
 			}
-			set, pod = m, p.Name
+			set, pod = m, fmt.Sprintf("%s/%s", p.Name, p.UID)
 			return true, nil
 		}
 		return false, fmt.Errorf("no replacement server pod is ready to scrape yet")
