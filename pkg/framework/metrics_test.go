@@ -283,10 +283,13 @@ func TestDescribePodPortsNamesWhatWasLooked(t *testing.T) {
 //  3. Both scrapes, with a family missing from the second.
 //  4. Both scrapes, with a counter lower afterwards.
 //  5. Both scrapes, with the counters carried across.
+//  6. Both scrapes, with every counter identical, which is the one that must
+//     not read as continuity. See F-024.
 func TestClassifyMetricsVerdicts(t *testing.T) {
 	before := ParseExposition([]byte(serverExposition))
 	reset := ParseExposition([]byte(strings.ReplaceAll(serverExposition, "1024", "7")))
 	continued := ParseExposition([]byte(strings.ReplaceAll(serverExposition, "1024", "2048")))
+	identical := ParseExposition([]byte(serverExposition))
 	lostFamily := ParseExposition([]byte("# TYPE nfsd_clients gauge\nnfsd_clients 1\n"))
 	nothing := ParseExposition([]byte("<html>404</html>"))
 
@@ -302,6 +305,7 @@ func TestClassifyMetricsVerdicts(t *testing.T) {
 		{"came back short a family", &before, &lostFamily, MetricsNeverResumed},
 		{"counters reset", &before, &reset, MetricsResumedReset},
 		{"counters carried across", &before, &continued, MetricsResumedContinuous},
+		{"counters identical", &before, &identical, MetricsResumedIndeterminate},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := ClassifyMetrics(tc.before, tc.after)
@@ -309,6 +313,51 @@ func TestClassifyMetricsVerdicts(t *testing.T) {
 				t.Errorf("verdict %s, want %s: %s", got.Verdict, tc.want, got)
 			}
 		})
+	}
+}
+
+// TestClassifyMetricsEqualityIsNotContinuity is the regression test for a green
+// that was not earned.
+//
+// The first end-to-end run of OBS-07, against gke-w2, restarted the server and
+// came back with every counter identical: rpcs_received_total 68 before and 68
+// after, on a process whose uptime proved it was seconds old. Ganesha's startup
+// is deterministic and the server had no clients, so a brand new process
+// re-derives the same numbers. Reported as resumed-continuous, the case claimed
+// the deployment carries counts across a restart, which is the opposite of what
+// happened: they reset and were recomputed. See F-024.
+//
+// Steps:
+//  1. Classify a pair where one counter advanced and the rest are identical,
+//     and assert only the advanced one is counted as such.
+//  2. Classify a pair where every counter is identical, and assert nothing
+//     lands in Advanced and the verdict makes no continuity claim.
+func TestClassifyMetricsEqualityIsNotContinuity(t *testing.T) {
+	const body = "# TYPE a counter\na 5\n# TYPE b counter\nb 7\n"
+	before := ParseExposition([]byte(body))
+
+	advanced := ParseExposition([]byte("# TYPE a counter\na 6\n# TYPE b counter\nb 7\n"))
+	got := ClassifyMetrics(&before, &advanced)
+	if len(got.Advanced) != 1 || len(got.Unchanged) != 1 {
+		t.Errorf("a counter that moved and one that did not were not separated: %s", got)
+	}
+	if got.Verdict != MetricsResumedContinuous {
+		t.Errorf("verdict %s, want %s when a counter genuinely advanced", got.Verdict,
+			MetricsResumedContinuous)
+	}
+
+	same := ParseExposition([]byte(body))
+	got = ClassifyMetrics(&before, &same)
+	if len(got.Advanced) != 0 {
+		t.Errorf("identical counters were recorded as having advanced, which is the F-024 "+
+			"false pass: %s", got)
+	}
+	if got.Verdict == MetricsResumedContinuous {
+		t.Errorf("identical counters produced %s, so the case would claim the server kept counts "+
+			"a restarted process actually recomputed", got.Verdict)
+	}
+	if got.Verdict != MetricsResumedIndeterminate {
+		t.Errorf("verdict %s, want %s", got.Verdict, MetricsResumedIndeterminate)
 	}
 }
 
@@ -324,16 +373,21 @@ func TestClassifyMetricsVerdicts(t *testing.T) {
 //
 // Steps:
 //  1. Classify a pair whose family survives with a different client label.
-//  2. Assert the verdict passes and the changed series is recorded as a
-//     diagnostic rather than as a lost family.
+//  2. Assert the verdict is not a failure and the changed series is recorded as
+//     a diagnostic rather than as a lost family.
+//
+// The verdict is checked as "not never-resumed" rather than pinned to one of
+// the passing verdicts on purpose. When every series is relabelled there is no
+// counter present on both sides, so there is nothing to say about continuity,
+// and which passing verdict comes back is not what this test is about.
 func TestClassifyMetricsSeparatesFamiliesFromLabels(t *testing.T) {
 	before := ParseExposition([]byte("# TYPE nfsd_ops counter\nnfsd_ops{client=\"10.0.0.1\"} 5\n"))
 	after := ParseExposition([]byte("# TYPE nfsd_ops counter\nnfsd_ops{client=\"10.0.0.2\"} 1\n"))
 
 	got := ClassifyMetrics(&before, &after)
-	if got.Verdict != MetricsResumedContinuous {
-		t.Errorf("verdict %s, want %s: a client label that changed across the restart is not a "+
-			"family the server stopped publishing", got.Verdict, MetricsResumedContinuous)
+	if got.Verdict == MetricsNeverResumed || got.Verdict == MetricsAbsent {
+		t.Errorf("verdict %s: a client label that changed across the restart is not a "+
+			"family the server stopped publishing", got.Verdict)
 	}
 	if len(got.LostFamilies) != 0 {
 		t.Errorf("families reported lost: %v", got.LostFamilies)

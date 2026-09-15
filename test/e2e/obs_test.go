@@ -498,12 +498,13 @@ func csiDriver(f *framework.Framework) string {
 // publish metrics, so every failure below says it is reporting what the test
 // plan requires of a deployment, not a defect in NFS.
 //
-// This case has never got past step 2 on a real cluster: no endpoint was ever
-// discovered, so nothing below it has run outside a unit test. Both deployments
-// it has been run against declare no endpoint at all, which is F-023 in
-// docs/findings.md; the scrape, the restart and the classification are covered
-// by unit tests and not yet by a run. The red stays red: see F-023 for what is
-// and is not being claimed by an absent verdict.
+// Both deployments this has been run against publish nothing as shipped, which
+// is F-023 in docs/findings.md, and on those the case stops at step 2 with the
+// absent verdict. It has been run end to end once, against gke-w2 with
+// Ganesha's exposer switched on by hand: see F-023 for what that took and
+// F-024 for the false pass the first such run produced. The red stays red on an
+// unconfigured deployment; see F-023 for what is and is not being claimed by an
+// absent verdict.
 //
 // The gap in the series across the outage is not a defect and is not asserted
 // on. Neither is the exact label set: per-client and per-export labels come and
@@ -651,12 +652,19 @@ func TestObsMetricsSurviveServerRestart(t *testing.T) {
 			len(after.Families()), len(before.Families()), len(report.LostFamilies), report.LostFamilies,
 			afterPod)
 	case framework.MetricsResumedReset:
-		t.Logf("the endpoint came back with %d counters reset and %d carried across, which is what a "+
-			"restarted process is supposed to look like and what every monitoring system knows how to "+
-			"read", len(report.Reset), len(report.Continued))
+		t.Logf("the endpoint came back with %d counters reset, %d advanced and %d unchanged, which is "+
+			"what a restarted process is supposed to look like and what every monitoring system knows "+
+			"how to read", len(report.Reset), len(report.Advanced), len(report.Unchanged))
 	case framework.MetricsResumedContinuous:
-		t.Logf("the endpoint came back with all %d comparable counters at or above where they were, so "+
-			"this server keeps its counts across a restart", len(report.Continued))
+		t.Logf("the endpoint came back with %d counters strictly higher than before and none lower, so "+
+			"this server carries counts across a restart (%d more were unchanged)",
+			len(report.Advanced), len(report.Unchanged))
+	case framework.MetricsResumedIndeterminate:
+		t.Logf("the endpoint came back publishing the same %d families, and all %d comparable counters "+
+			"are identical to before. No claim is made about continuity: on an idle server a restarted "+
+			"process re-derives the same values, so this reading is equally consistent with a reset. "+
+			"See F-024. To distinguish them the server would have to be doing work across the restart, "+
+			"which is not what this case drives", len(after.Families()), len(report.Unchanged))
 	default:
 		t.Errorf("the comparison produced the verdict %q, which this case has no reading for", report.Verdict)
 	}

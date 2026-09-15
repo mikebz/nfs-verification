@@ -230,9 +230,12 @@ specific to the Observability test group:
   restarts or reset predictably so monitoring pipelines do not break during failover.
 - **Design**:
   - Scrapes the server's metrics endpoint before a pod deletion and again after the server recovers.
-  - Categorizes the series behavior into four mutually exclusive verdicts:
+  - Categorizes the series behavior into five mutually exclusive verdicts:
     - `resumed-reset`: series present before and after, counter reset lower (passes).
-    - `resumed-continuous`: series present before and after, counter continuous (passes).
+    - `resumed-continuous`: series present before and after, at least one counter strictly higher
+      and none lower (passes).
+    - `resumed-indeterminate`: series present before and after, every comparable counter identical
+      (passes, and claims nothing about continuity — see F-024).
     - `never-resumed`: series answered before but failed after restart (fails).
     - `absent`: no metrics endpoint published by server (fails).
   - Fails if the server exposes no metrics endpoint.
@@ -290,6 +293,13 @@ specific to the Observability test group:
     a deployment serving the class from more than one pod, a sibling that was up the whole time.
     Excluding only the deleted pod would let the case pass by scraping something that never
     restarted.
+  - **Counter equality is not continuity, and is not reported as it.** Counters are split three ways:
+    strictly lower is a reset, strictly higher is an advance, and equal is its own bucket that grounds
+    no claim. `resumed-continuous` requires an advance; all-equal reports `resumed-indeterminate` and
+    still passes, because the assertion is family survival and that is independent of counter
+    direction. This was two-way until a real run showed why it cannot be: on an idle server with a
+    deterministic startup, a genuinely restarted process re-derives identical counters, and lumping
+    equality in with advances inverted the verdict. See F-024.
 
 ## 7. Decisions worth keeping
 
@@ -325,12 +335,21 @@ specific to the Observability test group:
 - **[F-009](findings.md) (Missing per-volume quota)**: On shared exports without filesystem quotas,
   both kubelet and `df` report the host's 10 GiB disk for a 1 GiB claim. OBS-06 fails on its quota check,
   proving that percentage-based capacity alerts on this deployment would be alerting on the wrong volume.
-- **[F-023](findings.md) (No metrics endpoint on either deployment)**: OBS-07's first runs, against two
-  independent clusters running different provisioner images, both reported `absent`: no `prometheus.io`
-  annotations and twelve container ports, every one an NFS protocol port. The case never reached its
-  restart. Read next to F-008 and F-022, both channels this plan allows for NFS-level observability are
-  empty as configured — grace announced only to a log file inside the export, metrics not published at
-  all — and neither gap needs a different NFS server to close.
+- **[F-023](findings.md) (No metrics published as shipped, for two different reasons)**: OBS-07's first
+  runs, against two clusters running different provisioner images, both reported `absent`. The cause is
+  not the same on each. `gke-w1` is built without `USE_MONITORING` and cannot publish. `gke-w2` has
+  `libganesha_monitoring` linked into the running process and publishes nothing only because Ganesha's
+  `Enable_Metrics` defaults to false; setting it served 39 families including lease, lock and
+  client-state metrics. Enabling it is still not enough, because the chart declares no port and no
+  annotation, so nothing can discover the endpoint. Read next to F-008 and F-022, both channels this
+  plan allows for NFS-level observability are empty as configured, and in both cases the content exists
+  and is sent somewhere nobody is looking.
+- **[F-024](findings.md) (Identical counters are not continuity)**: the first end-to-end run of OBS-07
+  passed with `resumed-continuous` and claimed the server keeps its counts across a restart, on a
+  process whose `ganesha_uptime_seconds` read 1. Ganesha's startup is deterministic and the server was
+  idle, so a genuinely restarted process re-derived exactly the same counters. Counters are now split
+  three ways, continuity requires a strict advance, and all-equal reports `resumed-indeterminate`. The
+  deployment's real counter behaviour across a restart remains unmeasured, which is the honest state.
 
 ## 10. Sources
 

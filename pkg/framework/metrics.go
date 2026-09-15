@@ -535,8 +535,9 @@ func isLabelNameChar(c byte) bool {
 }
 
 // MetricsVerdict is what a pair of scrapes taken either side of a restart says
-// about the endpoint. The four are mutually exclusive and ordered: absent wins
-// over never-resumed, which wins over either resumed verdict.
+// about the endpoint. The five are mutually exclusive and ordered: absent wins
+// over never-resumed, which wins over reset, which wins over continuous, which
+// wins over indeterminate.
 type MetricsVerdict string
 
 const (
@@ -553,10 +554,20 @@ const (
 	// a lower value. A pass: a counter reset is what a restarted process is
 	// supposed to look like, and every monitoring system knows how to read one.
 	MetricsResumedReset MetricsVerdict = "resumed-reset"
-	// MetricsResumedContinuous is the endpoint back with its counters carried
-	// across. Also a pass: state kept over a restart is not a defect, and the
-	// gap in the series that shows the outage is not one either.
+	// MetricsResumedContinuous is the endpoint back with at least one counter
+	// strictly higher than before and none lower. A pass: state kept over a
+	// restart is not a defect, and the gap in the series that shows the outage
+	// is not one either. Requires a counter to have actually advanced, since a
+	// counter that merely matches proves nothing.
 	MetricsResumedContinuous MetricsVerdict = "resumed-continuous"
+	// MetricsResumedIndeterminate is the endpoint back with every comparable
+	// counter identical to before. Also a pass, because the assertion is that
+	// the families survived and they did, but it deliberately claims nothing
+	// about continuity: an idle server with a deterministic startup re-derives
+	// the same numbers after a genuine restart, so equality is consistent with
+	// both a reset and a carry-across. See F-024, which is the run that
+	// produced exactly this and was nearly reported as continuity.
+	MetricsResumedIndeterminate MetricsVerdict = "resumed-indeterminate"
 )
 
 // CounterChange is one counter series either side of the restart.
@@ -590,10 +601,14 @@ type MetricsComparison struct {
 	// come and go with the clients and exports themselves, so asserting on them
 	// would fail a healthy server for having no clients reconnected yet.
 	LostSeries []string
-	// Reset and Continued are the counter series present on both sides, split
-	// by which way they moved.
+	// Reset, Advanced and Unchanged are the counter series present on both
+	// sides, split by which way they moved. The split is three-way rather than
+	// two because equality is not continuity: a restarted process on an idle
+	// server re-derives the same values, so Unchanged is a diagnostic and never
+	// grounds for claiming the counts survived. See F-024.
 	Reset     []CounterChange
-	Continued []CounterChange
+	Advanced  []CounterChange
+	Unchanged []CounterChange
 }
 
 // ClassifyMetrics turns a pair of scrapes into the verdict OBS-07 reports.
@@ -656,10 +671,13 @@ func ClassifyMetrics(before, after *MetricSet) MetricsComparison {
 			continue
 		}
 		change := CounterChange{Series: key, Before: was, After: now}
-		if now < was {
+		switch {
+		case now < was:
 			c.Reset = append(c.Reset, change)
-		} else {
-			c.Continued = append(c.Continued, change)
+		case now > was:
+			c.Advanced = append(c.Advanced, change)
+		default:
+			c.Unchanged = append(c.Unchanged, change)
 		}
 	}
 
@@ -668,8 +686,15 @@ func ClassifyMetrics(before, after *MetricSet) MetricsComparison {
 		c.Verdict = MetricsNeverResumed
 	case len(c.Reset) > 0:
 		c.Verdict = MetricsResumedReset
-	default:
+	case len(c.Advanced) > 0:
 		c.Verdict = MetricsResumedContinuous
+	default:
+		// Every comparable counter is identical, which is not evidence of
+		// anything. See F-024: on an idle server whose startup is
+		// deterministic, a genuinely restarted process re-derives the same
+		// values, and reading that as continuity claims the server kept counts
+		// it actually recomputed.
+		c.Verdict = MetricsResumedIndeterminate
 	}
 	return c
 }
@@ -685,9 +710,10 @@ func setOf(names []string) map[string]bool {
 // String renders the comparison for a log line or a failure message.
 func (c MetricsComparison) String() string {
 	return fmt.Sprintf("%s: %d series in %d families before, %d in %d after; %d families lost, "+
-		"%d new; %d counters reset, %d continuous, %d series lost within a surviving family",
+		"%d new; %d counters reset, %d advanced, %d unchanged, %d series lost within a surviving family",
 		c.Verdict, c.Before.Len(), len(c.Before.Families()), c.After.Len(), len(c.After.Families()),
-		len(c.LostFamilies), len(c.NewFamilies), len(c.Reset), len(c.Continued), len(c.LostSeries))
+		len(c.LostFamilies), len(c.NewFamilies), len(c.Reset), len(c.Advanced), len(c.Unchanged),
+		len(c.LostSeries))
 }
 
 // Table renders both scrapes into the bundle. Written whether the case passed
@@ -715,9 +741,14 @@ func (c MetricsComparison) Table() string {
 	for _, ch := range c.Reset {
 		fmt.Fprintf(&b, "  %s: %g -> %g\n", ch.Series, ch.Before, ch.After)
 	}
-	fmt.Fprintf(&b, "\ncounters continuous (%d)\n", len(c.Continued))
-	for _, ch := range c.Continued {
+	fmt.Fprintf(&b, "\ncounters advanced (%d)\n", len(c.Advanced))
+	for _, ch := range c.Advanced {
 		fmt.Fprintf(&b, "  %s: %g -> %g\n", ch.Series, ch.Before, ch.After)
+	}
+	fmt.Fprintf(&b, "\ncounters unchanged, which is not evidence of continuity, see F-024 (%d)\n",
+		len(c.Unchanged))
+	for _, ch := range c.Unchanged {
+		fmt.Fprintf(&b, "  %s: %g\n", ch.Series, ch.Before)
 	}
 	return b.String()
 }
