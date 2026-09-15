@@ -203,18 +203,62 @@ func ServerStartedAfter(ctx context.Context, c *Client, t time.Time) (ServerStar
 	return best, found, nil
 }
 
-// ServerRestartCount sums container restarts across server pods. A chaos case
-// that expects no restart asserts on this rather than on log scraping.
+// ErrNoServerPods is the answer to a question about the server's pods asked on
+// a cluster where none were found. It is a blocked condition rather than a
+// plain error: a managed NFS server with nothing of itself in this cluster is a
+// fact about the deployment, not a defect in it, and the caller that reports it
+// as a failure sends whoever reads the run looking for a storage bug.
+//
+// Returned as a sentinel so a caller can tell it from a failed API call with
+// errors.Is, since only one of the two is fixed by passing a flag.
+var ErrNoServerPods error = &Blocked{Reason: "no NFS server pods were discovered, so nothing about the " +
+	"server's pods can be read here: pass -server-namespace and -server-selector where the heuristic " +
+	"cannot find them, and where the server runs outside this cluster there is nothing to find"}
+
+// ErrNoServerContainerStatuses is the answer where server pods were discovered
+// but not one of them reports a container status: the kubelet has not admitted
+// them yet, which is what every discovered pod looks like while the server is
+// being rescheduled. Blocked for the same reason as ErrNoServerPods, and a
+// separate sentinel because the flags do not fix this one; waiting does.
+var ErrNoServerContainerStatuses error = &Blocked{Reason: "the NFS server pods that were discovered report " +
+	"no container statuses, so a restart of one cannot be noticed: they are Pending, and the reading has to " +
+	"be taken again once the kubelet has admitted them"}
+
+// ServerRestartCount sums container restarts across server pods. A case that
+// expects no restart asserts on this rather than on log scraping.
+//
+// An empty discovery is ErrNoServerPods, never zero. Every caller reads this
+// twice and compares the readings, so a zero for "no server was found" makes
+// the comparison 0 != 0: a cluster the suite never located a server on reports
+// that the server came through the load intact, which is worse than reporting
+// nothing, because it looks like it was measured.
+//
+// The same is true one step further in. ServerPods deliberately keeps Pending
+// pods, because a replacement that has not started yet is still the server, and
+// a discovery that drops it answers that there is no server at all, which is
+// the shape of F-013. A Pending pod carries no container statuses, and pods
+// that report nothing sum to zero as surely as no pods do, so a reading with no
+// container behind it is ErrNoServerContainerStatuses rather than a number. A
+// pod that has statuses is still counted where another has none: the reading is
+// then about containers the API actually described.
 func ServerRestartCount(ctx context.Context, c *Client) (int32, error) {
 	pods, err := ServerPods(ctx, c)
 	if err != nil {
 		return 0, err
 	}
+	if len(pods) == 0 {
+		return 0, ErrNoServerPods
+	}
 	var total int32
+	var containers int
 	for i := range pods {
 		for _, cs := range pods[i].Status.ContainerStatuses {
 			total += cs.RestartCount
+			containers++
 		}
+	}
+	if containers == 0 {
+		return 0, ErrNoServerContainerStatuses
 	}
 	return total, nil
 }

@@ -169,3 +169,53 @@ func writeRawSweep(t *testing.T, f *framework.Framework, sweep framework.RecordS
 		t.Logf("writing the raw sweep output: %v", err)
 	}
 }
+
+// serverRestartWatch is the first of the two readings behind "the server did
+// not fall over under this", taken before a case does the thing it is about.
+//
+// It carries the error from that reading instead of acting on it, because the
+// two halves are far apart: the reading is the first thing a case does and the
+// assertion the last. A cluster whose NFS server is managed and has no pod here
+// cannot answer the question at all (framework.ErrNoServerPods), and blocking
+// at the top of the case would throw away everything else it asserts -- PROV-02's
+// export IDs, PROV-11's writes across an expansion, DATA-10's invented names --
+// on a cluster where those assertions are perfectly meaningful.
+type serverRestartWatch struct {
+	before int32
+	err    error
+}
+
+// watchServerRestarts reads the server's container restart counts, to be
+// compared by assertNoRestart against a second reading later.
+func watchServerRestarts(ctx context.Context, f *framework.Framework) serverRestartWatch {
+	before, err := framework.ServerRestartCount(ctx, f.C)
+	return serverRestartWatch{before: before, err: err}
+}
+
+// assertNoRestart re-reads the counts and asserts that the server did not
+// restart while the case was doing the thing it is about. The during argument
+// names that operation, in a form that reads after "during", and lands in the
+// failure message.
+//
+// The assertion is its own subtest so that an unanswerable question reports
+// blocked by itself, leaving the verdict on the rest of the case intact. Same
+// reason DATA-11 splits its halves: reported as one case, a blocked answer to
+// half of it makes the half that ran and passed invisible.
+func (w serverRestartWatch) assertNoRestart(ctx context.Context, t *testing.T, f *framework.Framework, during string) {
+	t.Helper()
+	t.Run("server-did-not-restart", func(t *testing.T) {
+		f := f.SubTest(t)
+		if w.err != nil {
+			failOrBlock(t, w.err, "reading the server's restart count before %s", during)
+		}
+		after, err := framework.ServerRestartCount(ctx, f.C)
+		if err != nil {
+			failOrBlock(t, err, "re-reading the server's restart count after %s", during)
+		}
+		if after != w.before {
+			t.Errorf("the server restarted %d time(s) during %s: %d container restarts across the "+
+				"discovered server pods, was %d. The work a case does through the Kubernetes API must "+
+				"not be able to take the server down", after-w.before, during, after, w.before)
+		}
+	})
+}
