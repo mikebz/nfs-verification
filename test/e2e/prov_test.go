@@ -1034,10 +1034,21 @@ func TestProvVolumeNameEdgeCases(t *testing.T) {
 	writer := f.MustPod(ctx, toolsPod("writer", boundPVC.Name, nodeA))
 	reader := f.MustPod(ctx, toolsPod("reader", boundPVC.Name, nodeB))
 
-	// 5. Confirm the claim reached Bound, resolve the PV, and inspect export configuration.
+	// 5. Confirm the claim reached Bound and record what the provisioner minted.
+	//
+	// Never binding is the failure this case exists to report, not an outcome to
+	// tolerate: Kubernetes stored the name, so a user who picked it is entitled
+	// to a volume. Where the reason is a provisioner that cannot build a path
+	// out of a name this long, that is a finding against the provisioner and the
+	// message says so, because the claim's events will name the directory it
+	// could not create and nothing else in the run will.
 	bound, err := f.WaitPVCBound(ctx, boundPVC.Name, framework.BindTimeout)
 	if err != nil {
-		t.Fatalf("boundary claim %s did not reach Bound once pods consumed it: %v", boundPVC.Name, err)
+		t.Fatalf("the %d-character claim %s never bound on StorageClass %s, though Kubernetes accepted "+
+			"the name and both pods consumed it: the provisioner took a name the API stores and "+
+			"produced no volume, which is a finding against it rather than against the NFS server. "+
+			"Check the claim's events for the export path or directory it could not create: %v",
+			len(boundPVC.Name), boundPVC.Name, f.Env.StorageClass, err)
 	}
 	pv, err := f.C.Kube.CoreV1().PersistentVolumes().Get(ctx, bound.Spec.VolumeName, metav1.GetOptions{})
 	if err != nil {
