@@ -324,32 +324,98 @@ can only cite the boundary.
 
 ---
 
-## 4. What should stay local
+## 4. The rule, and the exceptions to it
 
-So this audit is not read as an argument for deleting unit tests. These are
-correctly local and should not move:
+The rule this audit argues for: **a local test may test what the harness does.
+Only a cluster may test what the server does.** Utilities and file parsing are
+the common case of the first half, not the whole of it. Four classes sit outside
+"utilities and parsing" and still belong on the workstation, because no healthy
+server can be asked to demonstrate them.
 
-- `manifest_test.go`, `pvc_test.go`'s name checks, `evidence_test.go`: the
-  harness's own objects and its own file handling. No server involved.
-- `chaos_test.go`'s process-pattern rules: which process a SIGKILL is aimed at.
-  Getting this wrong kills the wrong process on a real cluster, so a workstation
-  test is strictly better than a cluster one.
-- `env/environment_test.go`, `slo/slo_test.go`: the environment record round trip
-  and the SLO table's own arithmetic. The SLO tests are close to tautological, in
-  that they assert constants against constants, but the table is the one place a
-  wrong number silently invalidates every chaos result, so restating it in a
-  second form is worth the line count.
-- `scripts_test.go`, `dirscripts_test.go`, `load_test.go`'s script halves,
-  `peers_test.go`'s shell halves: scripts run under a real shell against real
-  busybox applets. This is the F-006 lesson and it is the right shape.
-- `io_parse_test.go` and `volumeusage_test.go`'s `stat`/`df` halves: parsers run
-  against the real binaries on the test machine.
+### 4.1 Exception: guards on destructive actions
 
-The line to hold is narrow: a local test that proves the harness reads correctly
-is right. A local test standing behind a claim about what the server did is not
-a substitute for asking the server.
+The rules that decide what the harness is about to break. `ProcessPattern`
+(`pkg/chaos/chaos.go`, tested at `pkg/chaos/chaos_test.go:103`) decides which PID
+takes a SIGKILL and refuses generic names like `sh` and `env`. `FirstInjurable`
+(`chaos_test.go:157`) refuses to aim a fault at a terminating or Pending pod,
+which is F-013 one level up. `checkProbePath` (`peers_test.go:430`) rejects path
+escapes. `probeMountOptions` is soft where every other mount in the suite is hard
+(`pkg/framework/probemount.go:41`), which is the F-003 and F-005 safety case.
 
----
+A cluster test of any of these has two outcomes: it does the right thing, proving
+nothing, or it does the wrong thing and damages the system under test. The
+workstation is not a compromise here, it is the only safe place.
+
+### 4.2 Exception: guards against a case passing without measuring anything
+
+F-007, F-011, F-014 and F-015 are one bug in four places: a reader returned a
+zero or an empty string where it should have returned an error, two nothings
+compared equal, and a case passed having measured nothing. One of them had been
+passing for months.
+
+The guards are local and have to be: a healthy server produces good input by
+definition, so a server-anchored test never reaches the path. `parseSum` rejects
+an empty digest (`io_parse_test.go:298`, F-015). `shortSweepError` fires on a
+sweep that answered for 0 of 14 records (`sweep_test.go:216`, F-011).
+`LastRecord` refuses to name one from an empty log (`load_test.go:483`, F-014).
+`MovementFloor` refuses a reading that never moved (`volumeusage_test.go:99`).
+
+This is the local test class the findings log says actually catches things, and
+it is neither a utility nor a parser.
+
+### 4.3 Exception: preconditions for anchoring on the server at all
+
+`TestNodeAgentManifestRenders` asserts the agent container is privileged
+(`manifest_test.go:182`). If that regresses, every node-level assertion degrades
+to **blocked** rather than failing, which under R4 is currently invisible. A
+local test makes the loss loud at `make unit` instead of quiet on a cluster. The
+locktool cross-compile in CI is the same argument: the alternative is finding an
+arm64 mistake during a cluster run.
+
+### 4.4 Exception: the suite's own policy, which has no external referent
+
+`pkg/slo/slo_test.go` restates constants in a second form. Close to tautological,
+and worth the lines: no server can tell you your own SLO table is wrong, and a
+wrong number there silently invalidates every chaos result.
+
+### 4.5 What does not qualify, which is where the rule bites
+
+Four unit tests render a **verdict about the server** from hand-written input.
+That is outside "utilities and parsing" and outside all four exceptions above:
+
+| Test | Verdict it renders | What to do |
+|---|---|---|
+| `grace_test.go` | a server entered or left grace | split: keep the wording rule's edge cases, add a captured fixture, and make OBS-03 able to run (R3) |
+| `metrics_test.go`, the `ClassifyMetrics` half | counters survived a restart | F-024 is the proof: it passed its unit tests and still reported `resumed-continuous` for a process whose uptime was one second. Needs a captured scrape (R6) |
+| `kubeletstats_test.go` | the control plane reports this volume's usage | hand-built summary objects; capture one (R6) |
+| `lockmount_test.go` | which client holds which range | the parse half is parsing and is fine. The device-matching rule (F-010) is a claim about how the NFS client assigns `st_dev`, which is a kernel property and needs a captured fixture |
+
+Split each one: the parse stays local, the verdict becomes either
+captured-fixture-backed or server-anchored.
+
+### 4.6 The other direction: what must not be turned into an assertion
+
+A few results are correctly unanchorable, and the rule should not push them into
+assertions. SEC-08 records whether the data path is cleartext rather than failing
+on it. SEC-02 records which root rule is in force when `-root-squash` was not
+stated. OBS-07 reports `resumed-indeterminate` rather than claiming continuity
+(F-024). These are not local validation; they are the suite declining to invent
+an expectation it was never given, which is the right answer.
+
+### 4.7 One correction to the framing
+
+"Anchor on the server and NFS operations" is slightly too narrow for this suite.
+Roughly a third of the shipped cases are about the **Kubernetes storage
+contract**, not the NFS protocol: PROV-03's `pvc-protection` finalizer, OBS-04's
+Event on a pod whose volume never mounted, PROV-04's requirement that a class not
+advertising expansion reject the request, PROV-06's Retain behaviour. None of
+them makes an NFS operation claim, and none should.
+
+The plan already splits defect routing on exactly this line (Section 4.3:
+provisioning failures to the CSI driver owner, data path failures to the server
+owner). So the rule is best stated as **anchor on the system under test**, where
+the system is the NFS server and the Kubernetes storage API, and each case names
+which of the two it is asking.
 
 ## 5. Summary
 
