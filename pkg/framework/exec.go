@@ -141,9 +141,10 @@ func CheckObjectName(kind, name string) error {
 	switch {
 	case name == "":
 		return fmt.Errorf("%s name is empty", kind)
-	case len(name) > 253:
-		return fmt.Errorf("%s name %q is %d characters, over the 253 Kubernetes allows; "+
-			"shorten -run-id, which is carried whole so that two runs cannot collide", kind, name, len(name))
+	case len(name) > MaxObjectNameLength:
+		return fmt.Errorf("%s name %q is %d characters, over the %d Kubernetes allows; "+
+			"shorten -run-id, which is carried whole so that two runs cannot collide",
+			kind, name, len(name), MaxObjectNameLength)
 	case !rfc1123Subdomain.MatchString(name):
 		return fmt.Errorf("%s name %q is not a valid Kubernetes name: it must hold only lowercase letters, "+
 			"digits, dashes and dots, and start and end with a letter or digit. Names are lowercased for you; "+

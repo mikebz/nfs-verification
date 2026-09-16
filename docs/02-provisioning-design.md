@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-14
-Updated: 2026-09-14
+Updated: 2026-09-16
 Status: shipped, delivery steps 1 ([PR #1](https://github.com/mikebz/nfs-verification/pull/1)),
 2 ([PR #3](https://github.com/mikebz/nfs-verification/pull/3)),
 and 5 ([PR #10](https://github.com/mikebz/nfs-verification/pull/10)).
@@ -45,8 +45,10 @@ NFS RWX volumes present unique lifecycle challenges that do not exist for single
    while the NFS server pod is down must not cause permanent API deadlocks or leaked claim/PV objects once the server recovers.
 7. **Concurrency, churn, and boundary naming (`PROV-02`, `PROV-09`, `PROV-10`)**: Rapid creation and
    deletion cycles (100 cycles) must not leak file descriptors or export IDs; 20 concurrent claims must
-   receive unique export paths and IDs; and maximum-length RFC 1123 resource names (253 characters)
-   must produce valid, uncorrupted export configurations.
+   receive unique export paths and IDs; and a maximum-length RFC 1123 resource name (253 characters of
+   dotted, dashed labels) must produce a well-formed export that carries no altered copy of the claim
+   name, since a name cut to fit `NAME_MAX`, or with a character replaced, gives two claims one export
+   between them.
 
 ---
 
@@ -116,7 +118,7 @@ Detailed requirements and profile-driven timing live in [`01-test-plan.md`](01-t
 | **PROV-07** | ✅ Provision PVC while server pod is down: claim stays Pending during outage; binds, mounts, and verifies data after server recovery | Storage control plane resilience, Archetype A gateway |
 | **PROV-08** | ✅ Delete PVC while server pod is down (pod unmounted first): PVC and PV complete deletion after server recovery | CSI controller unpublish/delete retry, [F-001](findings.md) |
 | **PROV-09** | ✅ Rapid create/delete churn (100 cycles): zero export ID exhaustion, zero fd leaks, zero server restarts | Provisioner state machine stability under churn |
-| **PROV-10** | ✅ Volume name edge cases: admission rejects 1000-char and uppercase names; 253-char boundary name provisions, binds, mounts, and passes cross-node I/O | RFC 1123 DNS subdomain syntax, export configuration parser |
+| **PROV-10** | ✅ Volume name edge cases: admission rejects 1000-char and uppercase names; a 253-char name of dotted, dashed RFC 1123 labels provisions, binds, mounts, passes cross-node I/O, and mints an export that is well formed and carries no altered copy of the claim name | RFC 1123 DNS subdomain syntax, `NAME_MAX` (255 bytes per path component), export configuration parser |
 | **PROV-11** | ✅ Two-stage expansion under active I/O: background write load runs without errors; capacity expands; all committed writes survive | CSI Online Expansion, active workload integrity |
 
 ---
@@ -230,13 +232,35 @@ Detailed requirements and profile-driven timing live in [`01-test-plan.md`](01-t
   5. Assert server container restart count did not increase (verifying absence of server memory crashes or leaks).
 
 ### PROV-10: Volume name boundary cases (253-character RFC 1123 limit)
+
+The two halves sit at different layers, and the case reports them as such. A 1000-character or
+uppercase name is rejected by `kube-apiserver` and never reaches the driver, so it is evidence about
+Kubernetes admission and none about NFS. Characters the API will not store cannot be the storage
+assertion; the name driven through the provisioner is therefore the longest one Kubernetes will
+store, built from the characters it will store.
+
+The defect under test is acceptance with an alteration. A provisioner that derives an export
+directory from the claim name meets `NAME_MAX`, 255 bytes per path component, and a 253-character
+name with anything prepended is already past it. Failing to provision is a legitimate answer.
+Carrying the name only part of the way is not, whether it was cut to fit or had a character replaced:
+two claims agreeing that far then share one export, and the resulting leak reads as an application
+bug. A driver that names exports by UID is a different design, not a defect,
+and is logged rather than failed.
+
 - **Steps**:
   1. Verify admission barriers: attempt creating PVC with 1000-character name; assert apiserver rejection with `Invalid` or `BadRequest`.
   2. Verify character set barriers: attempt creating PVC with uppercase characters; assert apiserver rejection.
-  3. Construct maximum-length valid RFC 1123 name (exactly 253 characters) incorporating framework run prefix.
-  4. Create claim with the 253-character name and mount across two nodes.
-  5. Wait for claim to bind. Resolve PV and inspect CSI `volumeHandle`, export server, and export path:
-     - Assert neither server nor path contains newline characters (`\r` or `\n`).
+  3. Build the boundary name with `framework.BoundaryVolumeName`: exactly 253 characters on top of the
+     run prefix, made of dotted, dashed RFC 1123 labels rather than one repeated letter, since dots and
+     dashes are what a driver has to carry into a path, a config file or a command line.
+  4. Create the claim with that name and mount it across two nodes.
+  5. Wait for the claim to bind. Resolve the PV and inspect the minted export server, export path and CSI `volumeHandle`:
+     - Assert each is non-empty and free of whitespace and control characters (`framework.CheckExportSyntax`),
+       because both an export line and a mount command line are whitespace-separated.
+     - Assert the export path is absolute.
+     - Assert neither the path nor the handle carries an altered copy of the claim name (`framework.InspectExportName`). The
+       failure names the provisioner and the StorageClass, and says the assertion is this deployment's
+       naming behaviour rather than an NFSv4.1 guarantee.
      - Report `blocked` if export configuration cannot be extracted (preventing false passes without export inspection).
   6. Write 1MiB payload from Node A and verify SHA-256 checksum from Node B.
   7. Gracefully delete pods and claim. Assert server remained healthy with zero restarts.
@@ -301,6 +325,13 @@ Detailed requirements and profile-driven timing live in [`01-test-plan.md`](01-t
   `nfs-server-provisioner` v4.0.8, nine of the eleven cases passed cleanly. `PROV-04` and `PROV-11` failed
   because the provisioner advertises expansion without implementing it ([F-004](findings.md)). These failures
   accurately reflect deployment limitations and are not test defects.
+- **`PROV-10` moved off the apiserver (2026-09-16, [issue #20](https://github.com/mikebz/nfs-verification/issues/20))**:
+  the case as first written asserted RFC 1123 validation of PVC object names, which `kube-apiserver`
+  performs for every resource and which no NFS deployment can influence. [PR #34](https://github.com/mikebz/nfs-verification/pull/34)
+  added the boundary claim's bind, mount and cross-node I/O; this revision made the name itself carry
+  the RFC 1123 character set that reaches a driver, and turned the export inspection from a newline
+  scan into a check for whitespace and control characters, an absolute path, and an altered copy of
+  the claim name. The admission rejections stay, labelled as the platform barrier they are.
 
 ---
 
