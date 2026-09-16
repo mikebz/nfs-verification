@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-14
-Updated: 2026-09-14
+Updated: 2026-09-16
 Status: shipped, delivery steps 1 ([PR #1](https://github.com/mikebz/nfs-verification/pull/1)),
 2 ([PR #3](https://github.com/mikebz/nfs-verification/pull/3)),
 and 5 ([PR #10](https://github.com/mikebz/nfs-verification/pull/10)).
@@ -45,8 +45,10 @@ NFS RWX volumes present unique lifecycle challenges that do not exist for single
    while the NFS server pod is down must not cause permanent API deadlocks or leaked claim/PV objects once the server recovers.
 7. **Concurrency, churn, and boundary naming (`PROV-02`, `PROV-09`, `PROV-10`)**: Rapid creation and
    deletion cycles (100 cycles) must not leak file descriptors or export IDs; 20 concurrent claims must
-   receive unique export paths and IDs; and maximum-length RFC 1123 resource names (253 characters)
-   must produce valid, uncorrupted export configurations.
+   receive unique export paths and IDs; a resource name RFC 1123 forbids must be refused as an invalid
+   name rather than failing some other way; and a name it permits, up to the 253-character maximum,
+   must produce a volume that binds, mounts on two nodes and carries data, since 253 characters is
+   where a provisioner that builds paths out of claim names meets `NAME_MAX`.
 
 ---
 
@@ -116,7 +118,7 @@ Detailed requirements and profile-driven timing live in [`01-test-plan.md`](01-t
 | **PROV-07** | ✅ Provision PVC while server pod is down: claim stays Pending during outage; binds, mounts, and verifies data after server recovery | Storage control plane resilience, Archetype A gateway |
 | **PROV-08** | ✅ Delete PVC while server pod is down (pod unmounted first): PVC and PV complete deletion after server recovery | CSI controller unpublish/delete retry, [F-001](findings.md) |
 | **PROV-09** | ✅ Rapid create/delete churn (100 cycles): zero export ID exhaustion, zero fd leaks, zero server restarts | Provisioner state machine stability under churn |
-| **PROV-10** | ✅ Volume name edge cases: admission rejects 1000-char and uppercase names; 253-char boundary name provisions, binds, mounts, and passes cross-node I/O | RFC 1123 DNS subdomain syntax, export configuration parser |
+| **PROV-10** | ✅ Volume name edge cases: names RFC 1123 forbids (1000 chars, 254 chars, uppercase, underscore) are refused as invalid; names it permits (253 chars, and a short dotted one) provision, bind, mount and pass cross-node I/O | RFC 1123 DNS subdomain syntax, `NAME_MAX` (255 bytes per path component) |
 | **PROV-11** | ✅ Two-stage expansion under active I/O: background write load runs without errors; capacity expands; all committed writes survive | CSI Online Expansion, active workload integrity |
 
 ---
@@ -229,17 +231,56 @@ Detailed requirements and profile-driven timing live in [`01-test-plan.md`](01-t
   4. Assert all 100 cycles complete successfully without timeouts or export allocation errors.
   5. Assert server container restart count did not increase (verifying absence of server memory crashes or leaks).
 
-### PROV-10: Volume name boundary cases (253-character RFC 1123 limit)
+### PROV-10: Volume name edge cases (RFC 1123 and the 253-character limit)
+
+Two things a user can observe, and the case is limited to them: a name Kubernetes will not store is
+rejected cleanly, and a name it will store produces a volume that works. Each is a table of names.
+
+**Nothing about a name is judged by the harness.** Every name in both tables is posted to the API
+exactly as written and the cluster's answer is the result. This is why the case builds its own claim
+objects instead of calling `framework.CreatePVC`: that helper runs `CheckObjectName` first, and would
+refuse the first table on the workstation, turning a verdict that belongs to `kube-apiserver` into one
+made by the test. `CheckObjectName` keeps its job everywhere else, which is catching a name the
+*harness* rendered wrong before a run spends minutes discovering it; it is not a judge of the names
+this case is here to submit.
+
+The rejections belong to `kube-apiserver`, which refuses an over-long, uppercase or underscored name
+against RFC 1123 before any storage component sees it. That is evidence about Kubernetes admission and
+none about NFS, and the case labels it so rather than presenting it as a provisioner result. The
+assertion is narrow: the refusal must come back as `Invalid` or `BadRequest`, because a user has to be
+able to tell a name they must fix from a cluster that is unwell.
+
+Characters the API will not store therefore cannot be the storage assertion. What can is the other end
+of the same rule: names it will store. The longest one, because 253 characters is where a provisioner
+that builds paths out of claim names meets `NAME_MAX`, 255 bytes per path component; and a short one
+carrying dots and digits, because those are the characters a driver has to carry into a path, a config
+file or a command line. What both have to do is work.
+
+The export the provisioner mints is recorded as evidence and not asserted on: how a driver names an
+export is its own business, a single volume cannot demonstrate a naming collision, and an export
+malformed enough to matter cannot be mounted, which the case already requires.
+
 - **Steps**:
-  1. Verify admission barriers: attempt creating PVC with 1000-character name; assert apiserver rejection with `Invalid` or `BadRequest`.
-  2. Verify character set barriers: attempt creating PVC with uppercase characters; assert apiserver rejection.
-  3. Construct maximum-length valid RFC 1123 name (exactly 253 characters) incorporating framework run prefix.
-  4. Create claim with the 253-character name and mount across two nodes.
-  5. Wait for claim to bind. Resolve PV and inspect CSI `volumeHandle`, export server, and export path:
-     - Assert neither server nor path contains newline characters (`\r` or `\n`).
-     - Report `blocked` if export configuration cannot be extracted (preventing false passes without export inspection).
-  6. Write 1MiB payload from Node A and verify SHA-256 checksum from Node B.
-  7. Gracefully delete pods and claim. Assert server remained healthy with zero restarts.
+  1. For each name RFC 1123 forbids (1000 characters, one character past the limit, uppercase,
+     underscore), post it raw and assert the API refuses it with `Invalid` or `BadRequest`, logging the
+     reason it gave. A name that is somehow stored is deleted before the subtest fails, so a surprise
+     does not leak a claim.
+  2. For each name RFC 1123 permits, post it raw. The boundary name is the run prefix padded out to 253
+     characters; that arithmetic is not checked locally, because the length is asserted against the
+     object the apiserver stored, which is the stronger check. A name built short would otherwise pass
+     every later step while testing nothing.
+  3. Start a writer and a reader on two nodes **without waiting for either**. The claim needs a
+     consumer before a `WaitForFirstConsumer` class will bind it ([F-002](findings.md)), but waiting
+     for the pods here would spend the pod-ready timeout on a claim that never bound and report a pod
+     failure instead of the provisioning verdict in step 4.
+  4. Wait for the claim to bind. A claim that never binds is the failure the case exists to report:
+     Kubernetes stored the name, so the provisioner owes a volume, and the message says the finding
+     is against the provisioner rather than the NFS server and points at the claim's events. Resolve
+     the PV and log the export server, export path and CSI `volumeHandle` it was given, as the run's
+     record of what the name produced here. Only then wait for both pods, so a provisioning failure
+     and a mount failure are reported as different things.
+  5. Write 1MiB payload from Node A and verify SHA-256 checksum from Node B.
+  6. Gracefully delete pods and claim. Assert server remained healthy with zero restarts.
 
 ### PROV-11: Two-stage expansion under active write load
 - **Steps**:
@@ -301,6 +342,32 @@ Detailed requirements and profile-driven timing live in [`01-test-plan.md`](01-t
   `nfs-server-provisioner` v4.0.8, nine of the eleven cases passed cleanly. `PROV-04` and `PROV-11` failed
   because the provisioner advertises expansion without implementing it ([F-004](findings.md)). These failures
   accurately reflect deployment limitations and are not test defects.
+- **`PROV-10` moved off the apiserver (2026-09-16, [issue #20](https://github.com/mikebz/nfs-verification/issues/20))**:
+  the case as first written asserted RFC 1123 validation of PVC object names, which `kube-apiserver`
+  performs for every resource and which no NFS deployment can influence. [PR #34](https://github.com/mikebz/nfs-verification/pull/34)
+  added the boundary claim's bind, mount and cross-node I/O; this revision made the name itself carry
+  the RFC 1123 character set that reaches a driver. A first draft of the same change also asserted on
+  the shape of the minted export, failing a path that looked like a truncated copy of the claim name.
+  That was dropped in review: it inferred a provisioner's naming algorithm from one volume rather than
+  observing anything a user can see, and the export is now recorded rather than asserted on. Runs on
+  `gke-w1` and `gke-w2` bore the reasoning out: `nfs-server-provisioner` names its exports
+  `/export/pvc-<PV UID>`, carrying no part of the claim name, so the dropped check would have
+  asserted nothing there while still being able to misfire on a driver that shortens names
+  deliberately. The admission rejections stay, labelled as the platform barrier they are.
+- **`PROV-10` stopped validating names locally (2026-09-16, same issue)**: the revision above still had
+  the harness deciding things about names before the cluster saw them. It called `CreatePVC`, which
+  gates on `CheckObjectName`, and it built the boundary name with a `framework.BoundaryVolumeName`
+  helper that re-checked its own output and was covered by a unit test asserting the generated name was
+  a valid RFC 1123 subdomain. All of that was removed in review. Whether a name is legal is the
+  apiserver's answer and the case exists to collect it; a harness that pre-judges either refuses names
+  the cluster would have taken, or passes on its own opinion rather than the cluster's. The case now
+  posts every name raw, through claim objects it builds itself, and both tables are read off the API's
+  response. The helper and its test file were deleted rather than trimmed: the one failure worth
+  catching, a boundary name accidentally built short, is caught better against the object the apiserver
+  stored, so the assertion moved into the case. The generator's dotted, dashed filler went with it,
+  since the runs above showed the claim name never reaches the export path; a short name carrying dots
+  and digits was added to the accepted table instead, which covers the character set without pretending
+  the padding does.
 
 ---
 

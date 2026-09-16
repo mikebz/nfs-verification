@@ -125,6 +125,13 @@ func CheckScriptID(id string) error {
 	return nil
 }
 
+// MaxObjectNameLength is the longest name Kubernetes will store for an object.
+// It caps the name as a whole and says nothing about the labels between the
+// dots: a single 253-character label is stored, as a server-side dry run
+// confirms. See
+// https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#dns-subdomain-names.
+const MaxObjectNameLength = 253
+
 // rfc1123Subdomain matches a Kubernetes object name: lowercase alphanumerics,
 // dashes and dots, starting and ending alphanumeric.
 var rfc1123Subdomain = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`)
@@ -141,9 +148,10 @@ func CheckObjectName(kind, name string) error {
 	switch {
 	case name == "":
 		return fmt.Errorf("%s name is empty", kind)
-	case len(name) > 253:
-		return fmt.Errorf("%s name %q is %d characters, over the 253 Kubernetes allows; "+
-			"shorten -run-id, which is carried whole so that two runs cannot collide", kind, name, len(name))
+	case len(name) > MaxObjectNameLength:
+		return fmt.Errorf("%s name %q is %d characters, over the %d Kubernetes allows; "+
+			"shorten -run-id, which is carried whole so that two runs cannot collide",
+			kind, name, len(name), MaxObjectNameLength)
 	case !rfc1123Subdomain.MatchString(name):
 		return fmt.Errorf("%s name %q is not a valid Kubernetes name: it must hold only lowercase letters, "+
 			"digits, dashes and dots, and start and end with a letter or digit. Names are lowercased for you; "+
