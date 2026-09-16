@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-10
-Updated: 2026-09-14
+Updated: 2026-09-15
 
 Things learned by running the suite against a real cluster that are worth
 remembering. Each entry is dated, and says what happened, why, what changed in
@@ -28,6 +28,8 @@ that is the one that means anything.
 
 | # | Found | What it says | Cited by |
 |---|---|---|---|
+| [F-024](findings/F024-identical-counters-after-a-restart-are-not-continuity.md) | 2026-09-15 | OBS-07's first end-to-end run passed with `resumed-continuous` and claimed the server keeps its counts, on a process whose uptime was 1 second: Ganesha's startup is deterministic and the server idle, so a restart re-derives identical counters. Classification now splits advanced from unchanged and reports `resumed-indeterminate` | OBS-07, `ClassifyMetrics`, doc 06 |
+| [F-023](findings/F023-neither-nfs-deployment-declares-a-metrics-endpoint.md) | 2026-09-15 | Neither deployment publishes metrics as shipped, but for different reasons: `gke-w1` is built without `USE_MONITORING`, while `gke-w2` has `libganesha_monitoring` linked and is off only because `Enable_Metrics` defaults to false. Turning it on served 39 families including lease, lock and client-state metrics; the chart still declares no port or annotation, so a scraper finds nothing either way | OBS-07, doc 06 |
 | [F-022](findings/F022-the-servers-grace-announcements-were-in-a-log-file.md) | 2026-09-13 | The grace lines F-008 said do not exist do exist, in the NFS daemon's own log file inside the export volume; `kubectl logs` carries only the Go provisioner's output | F-008, doc 07 |
 | [F-021](findings/F021-a-root-owned-file-reads-back-as-nobody-for-a-reason.md) | 2026-09-13 | The server returns named owners as names, and the client's idmapper maps `root` to nobody while an unnamed uid survives numerically, so what `stat` shows cannot tell squash from a failed mapping; SEC-02 now probes whether a `chown` is permitted instead | SEC-02, doc 07 |
 | [F-020](findings/F020-fsgroup-does-nothing-to-an-nfs-volume-here-in.md) | 2026-09-13 | `fsGroup` grants access through the AUTH_SYS gid list, which this export honours, but changes nothing about the volume: no chown storm, no ownership change, and new files keep the pod's primary gid. **Corrected 2026-09-14**: the original entry credited the world-writable root, from an assertion that could not fail | SEC-03, `slo.FSGroupStartOverhead` |

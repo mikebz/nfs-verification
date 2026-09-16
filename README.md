@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-10
-Updated: 2026-09-14
+Updated: 2026-09-15
 
 End-to-end verification of NFS RWX persistent volumes on Kubernetes.
 
@@ -73,7 +73,7 @@ capability the case needs, discovered at preflight.
 |---|---|
 | `pkg/slo` | Timing and correctness targets, and the two lease/grace profiles |
 | `pkg/env` | The environment record written to `artifacts/<run-id>/environment.json` |
-| `pkg/framework` | Clients, per-case fixture, pods and PVCs from embedded manifests, exec, locks and the lock probe, locktool delivery, the grace observer, the kubelet stats reader, the privileged node agent, artifact and evidence collection |
+| `pkg/framework` | Clients, per-case fixture, pods and PVCs from embedded manifests, exec, locks and the lock probe, locktool delivery, the grace observer, the kubelet stats reader, the server metrics reader, the privileged node agent, artifact and evidence collection |
 | `pkg/framework/manifests` | The YAML the suite applies, rendered and decoded into typed objects so it can be diffed against what was applied: the client pod and the node agent DaemonSet |
 | `pkg/framework/scripts` | The shell the suite runs inside pods, as scripts rather than as Go strings |
 | `pkg/chaos` | The fault operations the CHAOS cases inject |
@@ -149,11 +149,23 @@ restricted Pod Security level on `default` cannot run the suite as it stands.
 
 OBS-06 reads the kubelet's stats summary through the API server's node proxy,
 which is the control plane's own view of how full a volume is. That needs `get`
-on `nodes/proxy` in the kubeconfig the suite runs with. Nothing is deployed for
-it and no monitoring stack is involved: it is an ordinary `GET` on the client
-the suite already holds. A kubeconfig without that verb reports the case blocked
-and names it, rather than reporting the deployment as one that publishes
-nothing.
+on `nodes/proxy` in the kubeconfig the suite runs with. OBS-07 reads the NFS
+server's own metrics endpoint the same way, through the API server's pod proxy,
+which needs `get` on `pods/proxy`. Nothing is deployed for either and no
+monitoring stack is involved: both are ordinary `GET`s on the client the suite
+already holds. A kubeconfig without those verbs reports the case blocked and
+names it, rather than reporting the deployment as one that publishes nothing.
+
+Where the metrics endpoint is comes from the server pod itself, either the
+`prometheus.io/scrape`, `prometheus.io/port` and `prometheus.io/path`
+annotations or a container port named for metrics. No flag: a port the pod does
+not declare is one no scraper on the cluster would find either, so probing for
+it would credit the deployment with telemetry its own monitoring cannot see.
+Those annotation names are a widely-used convention rather than a specification
+— Prometheus documents that any pod annotation becomes a discovery meta label,
+not which one to use — so a server marking its scrape targets under some other
+name reads here as publishing nothing. The failure lists every annotation and
+port the pod does carry, so that case is visible rather than silent.
 
 `make locktool` cross-compiles `cmd/locktool` into `bin/locktool-linux-<arch>`
 with `CGO_ENABLED=0`, one per node architecture. `make all` runs it, so a
@@ -216,6 +228,7 @@ claims.
 | `nodeInspectTimeout` | 10s | One node's inspection, per node |
 | `evidenceReadTimeout` | 10s | One named file's copy, per file |
 | `kubeletReadTimeout` | 30s | One kubelet stats read, per node |
+| `metricsReadTimeout` | 30s | One scrape of the server's metrics endpoint |
 
 Two of these are not round numbers by accident. Test pods carry a 5 second
 termination grace period, so a pod still in the API after
@@ -365,7 +378,11 @@ chaos workload and the lock probe are run under a real shell against a real
 read as an entry reports a healthy server as looping through grace, the rules
 that decide which process a SIGKILL is aimed at are tested directly, because
 getting that wrong kills the wrong process on a real cluster rather than
-failing a test, and the socket-table parser is run against rows copied from a
+failing a test, the socket-table parser is run against rows copied from a
 real server, because a byte order read backwards produces plausible addresses
-belonging to nobody rather than an error. What none of them can tell you is
-whether NFS behaves; that needs a cluster.
+belonging to nobody rather than an error, and the metrics exposition parser is
+run against bodies in the shape a server serves them, because a label set cut
+in half by a comma inside a value, or an order that differs between two
+scrapes, reports a series as lost and fails a deployment whose metrics survived
+a restart intact. What none of them can tell you is whether NFS behaves; that
+needs a cluster.

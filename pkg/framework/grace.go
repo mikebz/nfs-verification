@@ -30,8 +30,11 @@ import (
 // the only one guaranteed present, timestamped by something other than the
 // process under test, and readable without knowing anything about the server's
 // deployment beyond which pods it runs. Metrics are the other channel the plan
-// allows; nothing in the Kubernetes API states which port serves them or what
-// the metric is called, so that stays open rather than being guessed at.
+// allows, and OBS-07 reads them where the pod declares an endpoint; grace is
+// not read from there, because nothing in the Kubernetes API or in any metrics
+// convention states what a grace series would be called, and a name guessed at
+// here would report a server that publishes one under another name as a server
+// that never entered grace.
 
 // GraceSignal is one observed transition.
 type GraceSignal struct {
