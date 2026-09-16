@@ -728,6 +728,15 @@ func serverPodUIDs(ctx context.Context, f *framework.Framework) (map[types.UID]b
 // listener, and giving up on the first refused connection would report a
 // healthy server as one whose metrics never came back.
 //
+// Every post-fault pod is tried in each round, not just the first one found.
+// A candidate that declares no endpoint, or that is not answering yet, only
+// rules itself out: on a deployment that brings up more than one pod, or during
+// a rollout, the first candidate the list returns may be a sibling with nothing
+// to scrape while the replacement next to it is already serving. Stopping the
+// round there would spend the whole budget on the wrong pod and report the
+// metrics as never having come back. What each candidate said is kept, so the
+// message on a real timeout names them rather than only the last one.
+//
 // The pod it settled on is returned as "name/uid", because the name alone is
 // the same on both sides of a StatefulSet restart and so cannot evidence the
 // replacement it just went to the trouble of identifying.
@@ -742,6 +751,7 @@ func waitMetricsBack(ctx context.Context, t *testing.T, f *framework.Framework, 
 		if err != nil {
 			return false, err
 		}
+		var why []string
 		for i := range pods {
 			p := &pods[i]
 			if preFault[p.UID] || !framework.PodReady(p) {
@@ -750,8 +760,9 @@ func waitMetricsBack(ctx context.Context, t *testing.T, f *framework.Framework, 
 
 			e, ok := framework.MetricsEndpointOf(p)
 			if !ok {
-				return false, fmt.Errorf("the replacement %s declares no metrics endpoint: %s",
-					p.Name, framework.DescribePodPorts(p))
+				why = append(why, fmt.Sprintf("%s declares no metrics endpoint: %s",
+					p.Name, framework.DescribePodPorts(p)))
+				continue
 			}
 			m, err := framework.ScrapeMetrics(ctx, f.C, e)
 			if framework.IsBlocked(err) {
@@ -762,15 +773,20 @@ func waitMetricsBack(ctx context.Context, t *testing.T, f *framework.Framework, 
 				return true, nil
 			}
 			if err != nil {
-				return false, err
+				why = append(why, fmt.Sprintf("%s: %v", p.Name, err))
+				continue
 			}
 			if m.Len() == 0 {
-				return false, fmt.Errorf("%s", m.Describe())
+				why = append(why, fmt.Sprintf("%s: %s", p.Name, m.Describe()))
+				continue
 			}
 			set, pod = m, fmt.Sprintf("%s/%s", p.Name, p.UID)
 			return true, nil
 		}
-		return false, fmt.Errorf("no replacement server pod is ready to scrape yet")
+		if len(why) == 0 {
+			return false, fmt.Errorf("no replacement server pod is ready to scrape yet")
+		}
+		return false, fmt.Errorf("no replacement server pod answered: %s", strings.Join(why, "; "))
 	})
 	if refused != nil {
 		blocked(t, "%v", refused)

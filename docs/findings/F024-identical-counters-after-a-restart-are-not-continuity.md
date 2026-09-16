@@ -81,6 +81,33 @@ it is.
 Re-run on `gke-w2` afterwards: `resumed-indeterminate`, 0 reset, 0 advanced, 14
 unchanged. Still a pass, and now it says what it actually observed.
 
+### The same false pass had a second cause, found in review
+
+Fourteen counters out of 367 series is the number that should have been
+questioned at the time, and was not. Review asked why `Families()` splits a
+histogram into `_bucket`, `_sum` and `_count`, and the answer turned up the
+larger half of the problem: the `# TYPE` line names the parent, nothing declares
+a type for the three components, and the direction check looked up the exact
+name. Every histogram and summary series in the scrape was therefore classified
+as neither counter nor gauge and skipped.
+
+The consequence is the same shape as the original finding, reached from the
+other side. A server whose histogram counts restarted at zero — the single
+clearest evidence of a process that did not carry its counts — produced no
+`Reset` entry and the case reported a passing verdict. On this deployment the
+unchecked series were the bulk of what the server publishes.
+
+`isCounter` now resolves a component back through its parent's declared type.
+`_sum` stays out: it is monotonic only when every observation is non-negative,
+which holds for these latencies but is not something the exposition format
+promises, and a series that may legitimately fall must not be read as a reset.
+
+Re-run on `gke-w2` with that in place: **306 comparable counters instead of 14**,
+all still identical, so the verdict is unchanged at `resumed-indeterminate`. The
+conclusion did not move; what moved is how much of the scrape was capable of
+contradicting it. A verdict that only 4% of the data could have overturned was
+weaker than it read, and it read no differently.
+
 ### What it means for the system under test
 
 Nothing yet, which is the point. The deployment's counter behaviour across a

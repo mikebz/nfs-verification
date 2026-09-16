@@ -218,6 +218,21 @@ func (m MetricSet) Len() int { return len(m.Samples) }
 
 // Families returns the metric family names, sorted. A family is the series
 // name without its labels, which is the level a dashboard or an alert names.
+//
+// A histogram or a summary therefore contributes its _bucket, _sum and _count
+// as separate entries rather than the single parent its # TYPE line names, and
+// this count will exceed the number of TYPE lines the server published for that
+// reason: 66 against 39 on the deployment in F-023. Grouping them under the
+// parent instead was considered and rejected. It is the coarser assertion: a
+// server that comes back having stopped publishing _sum, while still publishing
+// _bucket, would read as having lost nothing, and _sum is what a dashboard
+// divides by _count to get an average. PromQL names these series directly, so
+// losing one of them breaks a query whatever the exposition format calls it.
+//
+// The cost of the choice is that the word here is looser than the exposition
+// format's, and the direction check compensates for it separately: see
+// isCounter, which resolves a component back to the parent's TYPE so that a
+// histogram that restarts is still seen to have reset.
 func (m MetricSet) Families() []string {
 	seen := map[string]bool{}
 	for key := range m.Samples {
@@ -229,6 +244,40 @@ func (m MetricSet) Families() []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// isCounter reports whether a series is monotonic, so that a lower reading
+// afterwards is a reset rather than an ordinary fluctuation.
+//
+// The lookup goes through the parent family for a histogram or a summary
+// component, because the # TYPE line names the parent and nothing declares a
+// type for the _bucket, _sum and _count series that carry the data. Reading
+// only the exact name left every one of those series unclassified: on the
+// deployment in F-023 that meant 14 of 367 series were checked for direction,
+// and a histogram whose counts restarted at zero could not produce
+// resumed-reset. That is the false-pass shape F-024 is about, arrived at from
+// the other end.
+//
+// _sum is deliberately not included. It is monotonic only when every
+// observation is non-negative, which holds for the latencies this server
+// happens to publish but is not something the exposition format promises, and
+// a series that may legitimately fall must not be read as a reset.
+func (m MetricSet) isCounter(key string) bool {
+	name := familyOf(key)
+	if t, ok := m.Types[name]; ok {
+		return t == "counter"
+	}
+	for _, suffix := range []string{"_bucket", "_count"} {
+		parent := strings.TrimSuffix(name, suffix)
+		if parent == name {
+			continue
+		}
+		switch m.Types[parent] {
+		case "histogram", "summary":
+			return true
+		}
+	}
+	return false
 }
 
 // Describe renders a scrape for a log line or a failure message.
@@ -338,10 +387,9 @@ func pathSegments(path string) []string {
 // Minimal on purpose: names, labels, values and the TYPE lines, which is all
 // any assertion here reads. Histograms and summaries arrive as their underlying
 // _bucket, _sum and _count series and are compared as those, since that is what
-// they are on the wire. The TYPE line names the parent family rather than any
-// of those three, so they are compared for presence and not for direction,
-// which is the conservative half: a bucket that went backwards is reported as
-// having survived rather than as a reset.
+// they are on the wire. The TYPE line names the parent rather than any of the
+// three, so the type of a component is resolved back through the parent; see
+// isCounter for which of them are treated as monotonic and why _sum is not.
 //
 // It never returns an error. A body that is not the exposition format at all,
 // which is what an error page served with a 200 looks like, parses into no
@@ -667,7 +715,7 @@ func ClassifyMetrics(before, after *MetricSet) MetricsComparison {
 			}
 			continue
 		}
-		if before.Types[familyOf(key)] != "counter" {
+		if !before.isCounter(key) {
 			continue
 		}
 		change := CounterChange{Series: key, Before: was, After: now}

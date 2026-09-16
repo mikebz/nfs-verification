@@ -279,8 +279,17 @@ specific to the Observability test group:
   - **The restart is not timed here.** The case waits past the restart budget from `pkg/slo` for the
     endpoint to come back, and asserts only that it does. How long a restart takes belongs to CHAOS.
   - **No workload.** Nothing here writes through the export: the case asserts survival and counter
-    direction, not movement, and the movement cases are OBS-05 and OBS-06. A counter that is equal
-    on both sides is reported as continuous rather than as evidence of anything.
+    direction, not movement, and the movement cases are OBS-05 and OBS-06. A counter equal on both
+    sides is therefore the expected reading on an idle server, and it is reported as claiming
+    nothing rather than as continuity, which is [F-024](findings.md).
+  - **A histogram's components are compared as separate names but typed through their parent.**
+    `_bucket`, `_sum` and `_count` are what a PromQL query names, so each is checked for presence in
+    its own right; grouping them under the parent the `# TYPE` line names would let a server drop
+    `_sum` and still read as intact. Their direction, though, has to come from the parent, because
+    nothing declares a type for a component. Reading only the exact name left 14 of 367 series
+    direction-checked on the deployment in [F-023](findings.md), so a histogram whose counts
+    restarted at zero could not produce `resumed-reset`. `_sum` stays out of the direction check: it
+    is monotonic only for non-negative observations, which the format does not promise.
   - **The bundle is registered before the endpoint is looked for, not after the first scrape.** The
     outcome that most needs the evidence is `absent`, and `absent` has no scrape to carry it: its
     entire content is what the pod declared instead, and the pod is gone by the time anyone reads

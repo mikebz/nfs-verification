@@ -397,6 +397,55 @@ func TestClassifyMetricsSeparatesFamiliesFromLabels(t *testing.T) {
 	}
 }
 
+// TestClassifyMetricsTypesHistogramComponents covers the direction check on the
+// series a histogram is actually made of.
+//
+// Nothing declares a type for _bucket, _sum or _count: the # TYPE line names
+// the parent. Looking up only the exact name therefore classified none of them
+// as counters, and on the deployment in F-023 that left 14 of 367 series
+// checked for direction. A histogram whose counts restarted at zero produced no
+// Reset entry and the case reported a passing verdict, which is the false pass
+// F-024 is about reached from the other side. The exclusion of _sum is the
+// other half: a sum may legitimately fall, so reading it as a reset would
+// invent a defect.
+//
+// Steps:
+//  1. Take a histogram scrape and one where every component restarted at zero.
+//  2. Assert the verdict is resumed-reset and that _bucket and _count are named.
+//  3. Assert _sum is not among them.
+//  4. Drop only _sum and assert that alone does not read as a reset.
+func TestClassifyMetricsTypesHistogramComponents(t *testing.T) {
+	const before = "# TYPE nfsd_op_seconds histogram\n" +
+		"nfsd_op_seconds_bucket{le=\"0.1\"} 7\nnfsd_op_seconds_sum 0.42\nnfsd_op_seconds_count 9\n"
+	const restarted = "# TYPE nfsd_op_seconds histogram\n" +
+		"nfsd_op_seconds_bucket{le=\"0.1\"} 0\nnfsd_op_seconds_sum 0\nnfsd_op_seconds_count 0\n"
+
+	was := ParseExposition([]byte(before))
+	now := ParseExposition([]byte(restarted))
+	got := ClassifyMetrics(&was, &now)
+	if got.Verdict != MetricsResumedReset {
+		t.Errorf("verdict %s: a histogram whose counts went back to zero across a restart is a "+
+			"reset, and a verdict that does not say so passes a server that lost its counts (%s)",
+			got.Verdict, got)
+	}
+	var reset []string
+	for _, c := range got.Reset {
+		reset = append(reset, c.Series)
+	}
+	sort.Strings(reset)
+	if want := `nfsd_op_seconds_bucket{le="0.1"} nfsd_op_seconds_count`; strings.Join(reset, " ") != want {
+		t.Errorf("counters reported reset are %v, want the bucket and the count and not the sum", reset)
+	}
+
+	// A sum is monotonic only for non-negative observations, which the
+	// exposition format does not promise, so it stays out of the check.
+	sumFell := ParseExposition([]byte("# TYPE nfsd_op_seconds histogram\n" +
+		"nfsd_op_seconds_bucket{le=\"0.1\"} 7\nnfsd_op_seconds_sum 0.1\nnfsd_op_seconds_count 9\n"))
+	if got := ClassifyMetrics(&was, &sumFell); got.Verdict == MetricsResumedReset {
+		t.Errorf("a _sum that fell on its own was read as a counter reset: %s", got)
+	}
+}
+
 // TestMetricsComparisonTableHoldsBothScrapes checks the artifact, which is the
 // only copy: the endpoint is gone by teardown and cannot be asked again.
 //
