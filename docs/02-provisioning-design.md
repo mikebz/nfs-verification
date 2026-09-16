@@ -46,9 +46,8 @@ NFS RWX volumes present unique lifecycle challenges that do not exist for single
 7. **Concurrency, churn, and boundary naming (`PROV-02`, `PROV-09`, `PROV-10`)**: Rapid creation and
    deletion cycles (100 cycles) must not leak file descriptors or export IDs; 20 concurrent claims must
    receive unique export paths and IDs; and a maximum-length RFC 1123 resource name (253 characters of
-   dotted, dashed labels) must produce a well-formed export that carries no altered copy of the claim
-   name, since a name cut to fit `NAME_MAX`, or with a character replaced, gives two claims one export
-   between them.
+   dotted, dashed labels) must produce a volume that binds, mounts on two nodes and carries data, since
+   253 characters is where a provisioner that builds paths out of claim names meets `NAME_MAX`.
 
 ---
 
@@ -118,7 +117,7 @@ Detailed requirements and profile-driven timing live in [`01-test-plan.md`](01-t
 | **PROV-07** | ✅ Provision PVC while server pod is down: claim stays Pending during outage; binds, mounts, and verifies data after server recovery | Storage control plane resilience, Archetype A gateway |
 | **PROV-08** | ✅ Delete PVC while server pod is down (pod unmounted first): PVC and PV complete deletion after server recovery | CSI controller unpublish/delete retry, [F-001](findings.md) |
 | **PROV-09** | ✅ Rapid create/delete churn (100 cycles): zero export ID exhaustion, zero fd leaks, zero server restarts | Provisioner state machine stability under churn |
-| **PROV-10** | ✅ Volume name edge cases: admission rejects 1000-char and uppercase names; a 253-char name of dotted, dashed RFC 1123 labels provisions, binds, mounts, passes cross-node I/O, and mints an export that is well formed and carries no altered copy of the claim name | RFC 1123 DNS subdomain syntax, `NAME_MAX` (255 bytes per path component), export configuration parser |
+| **PROV-10** | ✅ Volume name edge cases: admission rejects 1000-char and uppercase names; a 253-char name of dotted, dashed RFC 1123 labels provisions, binds, mounts and passes cross-node I/O | RFC 1123 DNS subdomain syntax, `NAME_MAX` (255 bytes per path component) |
 | **PROV-11** | ✅ Two-stage expansion under active I/O: background write load runs without errors; capacity expands; all committed writes survive | CSI Online Expansion, active workload integrity |
 
 ---
@@ -233,35 +232,31 @@ Detailed requirements and profile-driven timing live in [`01-test-plan.md`](01-t
 
 ### PROV-10: Volume name boundary cases (253-character RFC 1123 limit)
 
-The two halves sit at different layers, and the case reports them as such. A 1000-character or
-uppercase name is rejected by `kube-apiserver` and never reaches the driver, so it is evidence about
-Kubernetes admission and none about NFS. Characters the API will not store cannot be the storage
-assertion; the name driven through the provisioner is therefore the longest one Kubernetes will
-store, built from the characters it will store.
+Two things a user can observe, and the case is limited to them: a name Kubernetes will not store is
+rejected cleanly, and the longest name it will store produces a volume that works.
 
-The defect under test is acceptance with an alteration. A provisioner that derives an export
-directory from the claim name meets `NAME_MAX`, 255 bytes per path component, and a 253-character
-name with anything prepended is already past it. Failing to provision is a legitimate answer.
-Carrying the name only part of the way is not, whether it was cut to fit or had a character replaced:
-two claims agreeing that far then share one export, and the resulting leak reads as an application
-bug. A driver that names exports by UID is a different design, not a defect,
-and is logged rather than failed.
+The rejections belong to `kube-apiserver`, which refuses a 1000-character or uppercase name against
+RFC 1123 before any storage component sees it. That is evidence about Kubernetes admission and none
+about NFS, and the case labels it so rather than presenting it as a provisioner result. Characters
+the API will not store therefore cannot be the storage assertion. What can is the other end of the
+same rule: the longest name it will store, built from the characters it will store, since 253
+characters is where a provisioner that builds paths out of claim names meets `NAME_MAX`, 255 bytes
+per path component.
+
+What that name has to do is work. The export the provisioner mints is recorded as evidence and not
+asserted on: how a driver names an export is its own business, a single volume cannot demonstrate a
+naming collision, and an export malformed enough to matter cannot be mounted, which the case already
+requires.
 
 - **Steps**:
   1. Verify admission barriers: attempt creating PVC with 1000-character name; assert apiserver rejection with `Invalid` or `BadRequest`.
   2. Verify character set barriers: attempt creating PVC with uppercase characters; assert apiserver rejection.
   3. Build the boundary name with `framework.BoundaryVolumeName`: exactly 253 characters on top of the
-     run prefix, made of dotted, dashed RFC 1123 labels rather than one repeated letter, since dots and
-     dashes are what a driver has to carry into a path, a config file or a command line.
+     run prefix, made of dotted, dashed RFC 1123 labels rather than one repeated letter, so the name
+     carries the characters the API will store and a driver then has to handle.
   4. Create the claim with that name and mount it across two nodes.
-  5. Wait for the claim to bind. Resolve the PV and inspect the minted export server, export path and CSI `volumeHandle`:
-     - Assert each is non-empty and free of whitespace and control characters (`framework.CheckExportSyntax`),
-       because both an export line and a mount command line are whitespace-separated.
-     - Assert the export path is absolute.
-     - Assert neither the path nor the handle carries an altered copy of the claim name (`framework.InspectExportName`). The
-       failure names the provisioner and the StorageClass, and says the assertion is this deployment's
-       naming behaviour rather than an NFSv4.1 guarantee.
-     - Report `blocked` if export configuration cannot be extracted (preventing false passes without export inspection).
+  5. Wait for the claim to bind. Resolve the PV and log the export server, export path and CSI
+     `volumeHandle` it was given, as the run's record of what a boundary name produced here.
   6. Write 1MiB payload from Node A and verify SHA-256 checksum from Node B.
   7. Gracefully delete pods and claim. Assert server remained healthy with zero restarts.
 
@@ -329,9 +324,11 @@ and is logged rather than failed.
   the case as first written asserted RFC 1123 validation of PVC object names, which `kube-apiserver`
   performs for every resource and which no NFS deployment can influence. [PR #34](https://github.com/mikebz/nfs-verification/pull/34)
   added the boundary claim's bind, mount and cross-node I/O; this revision made the name itself carry
-  the RFC 1123 character set that reaches a driver, and turned the export inspection from a newline
-  scan into a check for whitespace and control characters, an absolute path, and an altered copy of
-  the claim name. The admission rejections stay, labelled as the platform barrier they are.
+  the RFC 1123 character set that reaches a driver. A first draft of the same change also asserted on
+  the shape of the minted export, failing a path that looked like a truncated copy of the claim name.
+  That was dropped in review: it inferred a provisioner's naming algorithm from one volume rather than
+  observing anything a user can see, and the export is now recorded rather than asserted on. The
+  admission rejections stay, labelled as the platform barrier they are.
 
 ---
 

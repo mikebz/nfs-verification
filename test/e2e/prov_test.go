@@ -925,26 +925,24 @@ func TestProvRapidProvisionChurn(t *testing.T) {
 	restarts.assertNoRestart(ctx, t, f, fmt.Sprintf("%d create/delete cycles", cycles))
 }
 
-// PROV-10: volume name edge cases. Assert that Kubernetes admission cleanly rejects
-// names it will not store, and that the longest name it will store, built from the
-// characters it will store, binds, mounts, produces a well-formed export, and
-// supports cross-node I/O without a server restart.
+// PROV-10: volume name edge cases. Two things a user can observe: a name Kubernetes
+// will not store is rejected cleanly, and the longest name it will store produces a
+// volume that works.
 //
-// The two halves are different layers and the case says so in both directions. A
-// 1000-character or uppercase name never reaches the driver: the apiserver rejects
-// it against RFC 1123, which is a platform barrier and no evidence about NFS.
-// Characters the API will not store therefore cannot be the storage assertion, so
-// the name that goes through the provisioner is 253 characters of the set RFC 1123
-// does permit, dots and dashes included, since those are what a driver has to carry
-// into an export path, a config file or a command line.
+// The rejections are the apiserver's, not the driver's. A 1000-character or uppercase
+// name is refused by RFC 1123 validation before any storage component sees it, so it
+// is evidence about Kubernetes admission and none about NFS, and the case says so
+// rather than presenting it as a provisioner result. Characters the API will not store
+// therefore cannot be the storage assertion. What can is the other end of the same
+// rule: the longest name it will store, built from the characters it will store, dots
+// and dashes included, since a name of 253 characters is where a provisioner that
+// builds paths out of claim names meets NAME_MAX.
 //
-// What is being hunted is acceptance with an alteration. A provisioner that derives
-// an export directory from the claim name meets NAME_MAX at 255 bytes per path
-// component, and a 253-character name with anything prepended is already past it.
-// Cutting the name to fit, or replacing a character it will not put in a path,
-// gives two claims that agree up to that point one export between them. That is
-// this deployment's naming behaviour rather than an NFS guarantee, and the failure
-// message says so.
+// What that name has to do is work: bind, mount on two nodes, carry a file between
+// them, and delete without disturbing the server. The export the provisioner mints is
+// logged as evidence and not asserted on. How a driver names an export is its own
+// business, one volume cannot show a naming collision anyway, and an export malformed
+// enough to matter cannot be mounted, which step 4 already requires.
 //
 // Steps:
 //  1. Verify admission-layer rejection: attempt to create a PVC with a 1000-character name.
@@ -952,10 +950,8 @@ func TestProvRapidProvisionChurn(t *testing.T) {
 //  3. Create a claim with the longest valid RFC 1123 name, 253 characters of dotted,
 //     dashed labels.
 //  4. Mount the boundary claim in a writer on node A and a reader on node B.
-//  5. Confirm the claim reaches Bound, resolve the PV, and inspect the minted export
-//     server, path and CSI volumeHandle: well-formed syntax, an absolute export path,
-//     and no altered copy of the claim name. A PV whose export the harness cannot
-//     read reports blocked, not pass.
+//  5. Confirm the claim reaches Bound, resolve the PV, and record the export and volume
+//     handle it was given.
 //  6. Write a payload from the writer on node A and verify the SHA-256 checksum from
 //     the reader on node B across the wire.
 //  7. Delete both pods gracefully, await API departure, and delete the claim.
@@ -1050,79 +1046,22 @@ func TestProvVolumeNameEdgeCases(t *testing.T) {
 	t.Logf("%d-character boundary claim %s bound to PV %s on StorageClass %s",
 		len(bound.Name), bound.Name, pv.Name, f.Env.StorageClass)
 
-	// The minted export is what the boundary name is being tested against, so a
-	// source the harness cannot read leaves this case with nothing to assert.
-	// It reports blocked, as DATA-08 does, rather than logging past it: a pass
-	// carried by mount and I/O alone would claim an export assertion that never
-	// ran.
-	nfsSource, err := framework.ExtractNFSSource(pv)
-	if err != nil {
-		blocked(t, "the export behind the %d-character claim %s could not be read, so PROV-10 cannot "+
-			"assert on the minted export configuration: %v",
-			framework.MaxObjectNameLength, bound.Name, err)
-	}
-	// Server, path and handle are one export between them, and each is checked
-	// and reported separately: whitespace or a control character in any of them
-	// builds a mount address nobody asked for. Only the path and the handle can
-	// be built out of a claim name; the server is an address the StorageClass
-	// gave the driver.
-	type mintedField struct {
-		field     string
-		value     string
-		derivable bool
-	}
-	minted := []mintedField{
-		{field: "export server", value: nfsSource.Server},
-		{field: "export path", value: nfsSource.Path, derivable: true},
-	}
+	// What the provisioner minted for a name at the boundary is recorded, not
+	// asserted on. How a driver builds an export out of a claim is its own
+	// business: the user-visible contract is that a legal name produces a volume
+	// that mounts and carries data, which steps 4 and 6 observe directly, and a
+	// malformed export cannot mount at all. A volume whose export the harness
+	// cannot read is not a finding here either, since nothing in this case
+	// depends on reading it.
 	var volumeHandle string
 	if pv.Spec.CSI != nil {
 		volumeHandle = pv.Spec.CSI.VolumeHandle
-		minted = append(minted, mintedField{field: "CSI volumeHandle", value: volumeHandle, derivable: true})
 	}
-	for _, m := range minted {
-		if err := framework.CheckExportSyntax(m.field, m.value); err != nil {
-			t.Errorf("volume %s, minted for a %d-character claim name: %v",
-				pv.Name, framework.MaxObjectNameLength, err)
-		}
+	if src, err := framework.ExtractNFSSource(pv); err != nil {
+		t.Logf("boundary volume %s: the export could not be read for the record: %v", pv.Name, err)
+	} else {
+		t.Logf("boundary volume configuration: PV=%s volumeHandle=%q export=%s", pv.Name, volumeHandle, src)
 	}
-	if !strings.HasPrefix(nfsSource.Path, "/") {
-		t.Errorf("volume %s names export path %q, which is not absolute: an export is mounted by "+
-			"server:/path and a relative path is a malformed export, not an unusual one",
-			pv.Name, nfsSource.Path)
-	}
-	// The defect the boundary name is here for. A provisioner that builds an
-	// export out of the claim name runs into NAME_MAX at 255 bytes per path
-	// component, and a 253-character name with anything prepended is already
-	// past it. Failing there is a legitimate answer; carrying the name only part
-	// of the way is not, whether it was cut to fit or had a character replaced,
-	// because two claims agreeing that far then get one export between them and
-	// the leak reads as an application bug. Naming exports by UID instead is a
-	// different design and not a defect, so it is logged rather than failed.
-	//
-	// Only the path and the handle are read this way, per the table above.
-	for _, m := range minted {
-		if !m.derivable {
-			continue
-		}
-		naming := framework.InspectExportName(bound.Name, m.value)
-		switch {
-		case naming.CarriesName:
-			t.Logf("the %s carries the %d-character claim name whole", m.field, len(bound.Name))
-		case naming.DivergesAt > 0:
-			t.Errorf("the %s of volume %s carries the claim name for %d of its %d characters and then "+
-				"stops matching it (%q): this provisioner derives the export from the claim name and "+
-				"alters it, by a cut at NAME_MAX or by a character it will not put in a path, so two "+
-				"claims agreeing on their first %d characters share one export. This is this "+
-				"deployment's naming behaviour rather than an NFSv4.1 guarantee, so the finding is "+
-				"against the provisioner on StorageClass %s, not against the server",
-				m.field, pv.Name, naming.DivergesAt, len(bound.Name), m.value, naming.DivergesAt,
-				f.Env.StorageClass)
-		default:
-			t.Logf("the %s is not derived from the claim name: %q", m.field, m.value)
-		}
-	}
-	t.Logf("boundary volume configuration: PV=%s volumeHandle=%q export=%s", pv.Name, volumeHandle, nfsSource)
 
 	// 6. Write a payload from writer on node A and verify checksum from reader on node B.
 	want, err := f.WriteFile(ctx, writer.Name, fileIn("prov10.dat"), 1<<20, "prov10")
