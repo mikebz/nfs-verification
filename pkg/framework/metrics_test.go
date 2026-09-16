@@ -269,9 +269,9 @@ func TestDescribePodPortsNamesWhatWasLooked(t *testing.T) {
 	}
 }
 
-// TestClassifyMetricsVerdicts covers the four verdicts OBS-07 reports.
+// TestClassifyMetricsVerdicts covers the five verdicts OBS-07 reports.
 //
-// The routing is the whole assertion, and two of the four are failures that
+// The routing is the whole assertion, and two of the five are failures that
 // name the deployment, so a verdict decided wrongly here either files a working
 // server as a defect or passes a deployment whose metrics went dark across a
 // failover. It is a pure function so that the decision can be checked without a

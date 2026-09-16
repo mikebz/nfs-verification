@@ -4,7 +4,8 @@ Author: mikebz@
 Created: 2026-09-11
 Updated: 2026-09-15
 Status: **in progress.** Delivery step 7 (OBS-06 shipped in [PR #29](https://github.com/mikebz/nfs-verification/pull/29);
-OBS-07 shipped in step 7 and not yet run against a cluster; OBS-01 and OBS-05 designed). OBS-02 and OBS-03 shipped in
+OBS-07 shipped in step 7 and run against `gke-w1` and `gke-w2`, red on both as shipped ([F-023](findings.md))
+and green only with Ganesha's exposer enabled by hand ([F-024](findings.md)); OBS-01 and OBS-05 designed). OBS-02 and OBS-03 shipped in
 Step 4 ([PR #8](https://github.com/mikebz/nfs-verification/pull/8));
 OBS-04 shipped in Step 2b ([PR #4](https://github.com/mikebz/nfs-verification/pull/4)). Consolidated here to serve
 the complete Observability test group.
