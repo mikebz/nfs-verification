@@ -509,7 +509,7 @@ func csiDriver(f *framework.Framework) string {
 // The gap in the series across the outage is not a defect and is not asserted
 // on. Neither is the exact label set: per-client and per-export labels come and
 // go with the clients and exports themselves, so what must survive is the
-// metric family, which is what a dashboard or an alert names.
+// metric name, which is what a dashboard query or an alert rule selects.
 //
 // Steps:
 //  1. Find the server pod, and register the bundle against it before anything
@@ -523,7 +523,7 @@ func csiDriver(f *framework.Framework) string {
 //     replacement to be ready.
 //  5. Scrape the replacement, which is a pod that was not in step 4's set,
 //     until it answers, inside the restart budget.
-//  6. Fail on a family published before the restart and not after. Pass on
+//  6. Fail on a metric name published before the restart and not after. Pass on
 //     counters reset and on counters carried across, saying which happened.
 func TestObsMetricsSurviveServerRestart(t *testing.T) {
 	f := framework.New(t, "OBS-07")
@@ -656,12 +656,12 @@ func TestObsMetricsSurviveServerRestart(t *testing.T) {
 				"the failover. The endpoint was %s",
 				before.Len(), within, endpoint)
 		}
-		t.Errorf("the server came back publishing %d of the %d metric families it published before the "+
-			"restart, and %d are gone: %v. A family that stops being published across a failover takes "+
+		t.Errorf("the server came back publishing %d of the %d metric names it published before the "+
+			"restart, and %d are gone: %v. A name that stops being published across a failover takes "+
 			"every rule written on it with it, and an operator watching this deployment sees the series "+
 			"end rather than the server recover. Scraped from %s. This is what the test plan requires of "+
 			"a deployment (Section 3.5), not an NFS protocol guarantee",
-			len(after.Families()), len(before.Families()), len(report.LostFamilies), report.LostFamilies,
+			len(after.MetricNames()), len(before.MetricNames()), len(report.LostMetricNames), report.LostMetricNames,
 			afterPod)
 	case framework.MetricsResumedReset:
 		t.Logf("the endpoint came back with %d counters reset, %d advanced and %d unchanged, which is "+
@@ -672,23 +672,24 @@ func TestObsMetricsSurviveServerRestart(t *testing.T) {
 			"this server carries counts across a restart (%d more were unchanged)",
 			len(report.Advanced), len(report.Unchanged))
 	case framework.MetricsResumedIndeterminate:
-		t.Logf("the endpoint came back publishing the same %d families, and all %d comparable counters "+
+		t.Logf("the endpoint came back publishing the same %d metric names, and all %d comparable counters "+
 			"are identical to before. No claim is made about continuity: on an idle server a restarted "+
 			"process re-derives the same values, so this reading is equally consistent with a reset. "+
 			"See F-024. To distinguish them the server would have to be doing work across the restart, "+
-			"which is not what this case drives", len(after.Families()), len(report.Unchanged))
+			"which is not what this case drives", len(after.MetricNames()), len(report.Unchanged))
 	default:
 		t.Errorf("the comparison produced the verdict %q, which this case has no reading for", report.Verdict)
 	}
 
-	// Diagnostics, deliberately not assertions. More families than before is a
-	// server publishing more, and a label set that changed is a client or an
-	// export that has not come back yet, neither of which is a defect.
-	if len(report.NewFamilies) > 0 {
-		t.Logf("%d families appeared only after the restart: %v", len(report.NewFamilies), report.NewFamilies)
+	// Diagnostics, deliberately not assertions. More metric names than before
+	// is a server publishing more, and a label set that changed is a client or
+	// an export that has not come back yet, neither of which is a defect.
+	if len(report.NewMetricNames) > 0 {
+		t.Logf("%d metric names appeared only after the restart: %v",
+			len(report.NewMetricNames), report.NewMetricNames)
 	}
 	if len(report.LostSeries) > 0 {
-		t.Logf("%d series changed their labels across the restart while their family survived, which is "+
+		t.Logf("%d series changed their labels across the restart while their metric name survived, which is "+
 			"what a per-client or per-export label does when the clients reconnect: %v",
 			len(report.LostSeries), report.LostSeries)
 	}

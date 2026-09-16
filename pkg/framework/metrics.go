@@ -216,27 +216,28 @@ type MetricSet struct {
 // Len is the number of series the scrape published.
 func (m MetricSet) Len() int { return len(m.Samples) }
 
-// Families returns the metric family names, sorted. A family is the series
-// name without its labels, which is the level a dashboard or an alert names.
+// MetricNames returns the metric names, sorted: a series key with its labels
+// stripped, which is the level a dashboard or an alert names.
 //
-// A histogram or a summary therefore contributes its _bucket, _sum and _count
-// as separate entries rather than the single parent its # TYPE line names, and
-// this count will exceed the number of TYPE lines the server published for that
-// reason: 66 against 39 on the deployment in F-023. Grouping them under the
-// parent instead was considered and rejected. It is the coarser assertion: a
-// server that comes back having stopped publishing _sum, while still publishing
-// _bucket, would read as having lost nothing, and _sum is what a dashboard
-// divides by _count to get an average. PromQL names these series directly, so
-// losing one of them breaks a query whatever the exposition format calls it.
+// Not "families", which the exposition format reserves for the group a # TYPE
+// line declares. The two differ for histograms and summaries, whose _bucket,
+// _sum and _count are three names belonging to one family, so this count runs
+// ahead of the server's TYPE lines: 66 against 39 on the deployment in F-023.
+// Both numbers were once reported as families, which left the artifact bundle
+// contradicting the finding written from the same scrape.
 //
-// The cost of the choice is that the word here is looser than the exposition
-// format's, and the direction check compensates for it separately: see
-// isCounter, which resolves a component back to the parent's TYPE so that a
-// histogram that restarts is still seen to have reset.
-func (m MetricSet) Families() []string {
+// Comparing at this level rather than by family is deliberate. PromQL names
+// these series directly — histogram_quantile selects _bucket, an average is
+// _sum over _count — so a server that comes back having stopped publishing one
+// of them has broken a query whatever the format calls the group it belongs to.
+// Grouping them under the parent would report that as having lost nothing.
+//
+// The direction check does go through the family, because only the TYPE line
+// says whether a name is monotonic: see isCounter.
+func (m MetricSet) MetricNames() []string {
 	seen := map[string]bool{}
 	for key := range m.Samples {
-		seen[familyOf(key)] = true
+		seen[nameOf(key)] = true
 	}
 	out := make([]string, 0, len(seen))
 	for name := range seen {
@@ -263,7 +264,7 @@ func (m MetricSet) Families() []string {
 // happens to publish but is not something the exposition format promises, and
 // a series that may legitimately fall must not be read as a reset.
 func (m MetricSet) isCounter(key string) bool {
-	name := familyOf(key)
+	name := nameOf(key)
 	if t, ok := m.Types[name]; ok {
 		return t == "counter"
 	}
@@ -299,12 +300,14 @@ func (m MetricSet) Describe() string {
 		return fmt.Sprintf("%s answered with %d lines, none of which read as the Prometheus exposition "+
 			"format, and it begins %q", m.Endpoint, m.Lines, excerpt)
 	}
-	return fmt.Sprintf("%s published %d series across %d families over %s (%d unreadable lines)",
-		m.Endpoint, m.Len(), len(m.Families()), m.Scheme, m.Unparsed)
+	return fmt.Sprintf("%s published %d series under %d metric names over %s (%d unreadable lines)",
+		m.Endpoint, m.Len(), len(m.MetricNames()), m.Scheme, m.Unparsed)
 }
 
-// familyOf strips the labels from a canonical series key.
-func familyOf(key string) string {
+// nameOf strips the labels from a canonical series key, leaving the metric
+// name. Not the family: see MetricNames for why the two are not the same for a
+// histogram, and isCounter for the one place the family is what matters.
+func nameOf(key string) string {
 	if i := strings.IndexByte(key, '{'); i >= 0 {
 		return key[:i]
 	}
@@ -594,7 +597,7 @@ const (
 	// survive a restart, and no container-level signal substitutes for it.
 	MetricsAbsent MetricsVerdict = "absent"
 	// MetricsNeverResumed is an endpoint that answered before the restart and
-	// not after it, or one that came back having lost families it used to
+	// not after it, or one that came back having lost metric names it used to
 	// publish. Also a failure: every dashboard and every alert built on the
 	// missing series goes blind at the moment it is needed most.
 	MetricsNeverResumed MetricsVerdict = "never-resumed"
@@ -610,7 +613,7 @@ const (
 	MetricsResumedContinuous MetricsVerdict = "resumed-continuous"
 	// MetricsResumedIndeterminate is the endpoint back with every comparable
 	// counter identical to before. Also a pass, because the assertion is that
-	// the families survived and they did, but it deliberately claims nothing
+	// the metric names survived and they did, but it claims nothing
 	// about continuity: an idle server with a deterministic startup re-derives
 	// the same numbers after a genuine restart, so equality is consistent with
 	// both a reset and a carry-across. See F-024, which is the run that
@@ -637,14 +640,14 @@ type MetricsComparison struct {
 	Before MetricSet
 	After  MetricSet
 
-	// LostFamilies are families published before the restart and not after.
-	// This is the assertion: a family is what a dashboard names.
-	LostFamilies []string
-	// NewFamilies are families that only appeared afterwards, reported as a
+	// LostMetricNames are metric names published before the restart and not
+	// after. This is the assertion: a name is what a dashboard query selects.
+	LostMetricNames []string
+	// NewMetricNames are names that only appeared afterwards, reported as a
 	// diagnostic. A server that publishes more after a restart than before is
 	// not a defect.
-	NewFamilies []string
-	// LostSeries are series whose family survived but whose exact label set did
+	NewMetricNames []string
+	// LostSeries are series whose name survived but whose exact label set did
 	// not. Also a diagnostic, deliberately: per-client and per-export labels
 	// come and go with the clients and exports themselves, so asserting on them
 	// would fail a healthy server for having no clients reconnected yet.
@@ -688,16 +691,16 @@ func ClassifyMetrics(before, after *MetricSet) MetricsComparison {
 	}
 	c.After = *after
 
-	beforeFamilies := setOf(before.Families())
-	afterFamilies := setOf(after.Families())
-	for _, name := range before.Families() {
-		if !afterFamilies[name] {
-			c.LostFamilies = append(c.LostFamilies, name)
+	beforeNames := setOf(before.MetricNames())
+	afterNames := setOf(after.MetricNames())
+	for _, name := range before.MetricNames() {
+		if !afterNames[name] {
+			c.LostMetricNames = append(c.LostMetricNames, name)
 		}
 	}
-	for _, name := range after.Families() {
-		if !beforeFamilies[name] {
-			c.NewFamilies = append(c.NewFamilies, name)
+	for _, name := range after.MetricNames() {
+		if !beforeNames[name] {
+			c.NewMetricNames = append(c.NewMetricNames, name)
 		}
 	}
 
@@ -710,7 +713,7 @@ func ClassifyMetrics(before, after *MetricSet) MetricsComparison {
 		was := before.Samples[key]
 		now, ok := after.Samples[key]
 		if !ok {
-			if afterFamilies[familyOf(key)] {
+			if afterNames[nameOf(key)] {
 				c.LostSeries = append(c.LostSeries, key)
 			}
 			continue
@@ -730,7 +733,7 @@ func ClassifyMetrics(before, after *MetricSet) MetricsComparison {
 	}
 
 	switch {
-	case len(c.LostFamilies) > 0:
+	case len(c.LostMetricNames) > 0:
 		c.Verdict = MetricsNeverResumed
 	case len(c.Reset) > 0:
 		c.Verdict = MetricsResumedReset
@@ -757,10 +760,10 @@ func setOf(names []string) map[string]bool {
 
 // String renders the comparison for a log line or a failure message.
 func (c MetricsComparison) String() string {
-	return fmt.Sprintf("%s: %d series in %d families before, %d in %d after; %d families lost, "+
-		"%d new; %d counters reset, %d advanced, %d unchanged, %d series lost within a surviving family",
-		c.Verdict, c.Before.Len(), len(c.Before.Families()), c.After.Len(), len(c.After.Families()),
-		len(c.LostFamilies), len(c.NewFamilies), len(c.Reset), len(c.Advanced), len(c.Unchanged),
+	return fmt.Sprintf("%s: %d series under %d names before, %d under %d after; %d names lost, "+
+		"%d new; %d counters reset, %d advanced, %d unchanged, %d series lost under a surviving name",
+		c.Verdict, c.Before.Len(), len(c.Before.MetricNames()), c.After.Len(), len(c.After.MetricNames()),
+		len(c.LostMetricNames), len(c.NewMetricNames), len(c.Reset), len(c.Advanced), len(c.Unchanged),
 		len(c.LostSeries))
 }
 
@@ -782,9 +785,9 @@ func (c MetricsComparison) Table() string {
 	}
 	fmt.Fprintf(&b, "before:  %s at %s\n", c.Before.Describe(), stampOf(c.Before))
 	fmt.Fprintf(&b, "after:   %s at %s\n", c.After.Describe(), stampOf(c.After))
-	writeList(&b, "families lost", c.LostFamilies)
-	writeList(&b, "families new", c.NewFamilies)
-	writeList(&b, "series lost within a surviving family", c.LostSeries)
+	writeList(&b, "metric names lost", c.LostMetricNames)
+	writeList(&b, "metric names new", c.NewMetricNames)
+	writeList(&b, "series lost under a surviving metric name", c.LostSeries)
 	fmt.Fprintf(&b, "\ncounters reset (%d)\n", len(c.Reset))
 	for _, ch := range c.Reset {
 		fmt.Fprintf(&b, "  %s: %g -> %g\n", ch.Series, ch.Before, ch.After)

@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-10
-Updated: 2026-09-15
+Updated: 2026-09-16
 
 Things learned by running the suite against a real cluster that are worth
 remembering. Each entry is dated, and says what happened, why, what changed in
