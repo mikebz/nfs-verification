@@ -464,6 +464,23 @@ func TestMetricsComparisonTableHoldsBothScrapes(t *testing.T) {
 				want, table)
 		}
 	}
+
+	// The labels are pinned, and the word they replaced is rejected. The
+	// bundle once counted 66 "families" of what F-023 counted 39 of, from the
+	// same scrape, because a histogram's _bucket, _sum and _count are three
+	// names under one family. Nothing in the suite held that wording, so
+	// nothing would have caught it drifting back.
+	for _, want := range []string{"metric names lost", "metric names new", "series lost under a surviving metric name"} {
+		if !strings.Contains(table, want) {
+			t.Errorf("the table omits the %q section, so a reader cannot tell which unit it counted:\n%s",
+				want, table)
+		}
+	}
+	if strings.Contains(table, "families") {
+		t.Errorf("the table calls its unit a family again. A family is what a # TYPE line declares, "+
+			"and this counts series names with their labels stripped, which is a larger number:\n%s",
+			table)
+	}
 }
 
 // TestMetricSetDescribeSeparatesNoScrapeFromNoMetrics is the other failure with

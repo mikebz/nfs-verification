@@ -1,8 +1,8 @@
 # F-023: Neither NFS deployment publishes metrics as shipped, but Ganesha's exposer is compiled into one of them and is one config line away
 
 Author: mikebz@
-Created: 2026-09-15
-Updated: 2026-09-15
+Created: 2026-09-16
+Updated: 2026-09-16
 
 
 **Found:** 2026-09-15, the first runs of OBS-07, against GKE clusters `gke-w1`

@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-11
-Updated: 2026-09-15
+Updated: 2026-09-16
 Status: **in progress.** Delivery step 7 (OBS-06 shipped in [PR #29](https://github.com/mikebz/nfs-verification/pull/29);
 OBS-07 shipped in step 7 and run against `gke-w1` and `gke-w2`, red on both as shipped ([F-023](findings.md))
 and green only with Ganesha's exposer enabled by hand ([F-024](findings.md)); OBS-01 and OBS-05 designed). OBS-02 and OBS-03 shipped in
@@ -262,9 +262,9 @@ specific to the Observability test group:
     annotation name reads here as publishing no endpoint. The failure message therefore lists every
     annotation and port the pod does carry, so a reviewer can see a differently-named annotation and
     correct the verdict rather than trusting it.
-  - **The assertion is at the metric family, the diagnostic at the series.** A family is what a
-    dashboard or an alert names, and a family that stops being published takes every rule written on
-    it with it. An exact label set is not asserted on: per-client and per-export labels come and go
+  - **The assertion is at the metric name, the diagnostic at the series.** A name is what a
+    dashboard query or an alert rule selects, and a name that stops being published takes every rule
+    written on it with it. An exact label set is not asserted on: per-client and per-export labels come and go
     with the clients and exports themselves, so a server that comes back before any client has
     reconnected publishes the same metric names under different labels, and asserting on the series
     would fail a healthy deployment for a client's timing.

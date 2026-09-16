@@ -1,8 +1,8 @@
 # F-024: Identical counters after a restart are not continuity, and reported as continuity they are a green nobody earned
 
 Author: mikebz@
-Created: 2026-09-15
-Updated: 2026-09-15
+Created: 2026-09-16
+Updated: 2026-09-16
 
 
 **Found:** 2026-09-15, the first end-to-end run of OBS-07 against `gke-w2` (run
@@ -76,7 +76,8 @@ evidence of continuity".
 `TestClassifyMetricsEqualityIsNotContinuity` is the regression test, carrying
 the numbers above.
 
-`TestClassifyMetricsSeparatesFamiliesFromLabels` had to stop asserting
+`TestClassifyMetricsSeparatesNamesFromLabels`, then called
+`TestClassifyMetricsSeparatesFamiliesFromLabels`, had to stop asserting
 `resumed-continuous`. When every series is relabelled there is no counter
 present on both sides at all, so the honest verdict is indeterminate, and the
 test now checks that the verdict is not a failure rather than pinning which pass
