@@ -327,8 +327,11 @@ requires.
   the RFC 1123 character set that reaches a driver. A first draft of the same change also asserted on
   the shape of the minted export, failing a path that looked like a truncated copy of the claim name.
   That was dropped in review: it inferred a provisioner's naming algorithm from one volume rather than
-  observing anything a user can see, and the export is now recorded rather than asserted on. The
-  admission rejections stay, labelled as the platform barrier they are.
+  observing anything a user can see, and the export is now recorded rather than asserted on. Runs on
+  `gke-w1` and `gke-w2` bore the reasoning out: `nfs-server-provisioner` names its exports
+  `/export/pvc-<PV UID>`, carrying no part of the claim name, so the dropped check would have
+  asserted nothing there while still being able to misfire on a driver that shortens names
+  deliberately. The admission rejections stay, labelled as the platform barrier they are.
 
 ---
 
