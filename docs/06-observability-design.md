@@ -2,9 +2,11 @@
 
 Author: mikebz@
 Created: 2026-09-11
-Updated: 2026-09-14
+Updated: 2026-09-15
 Status: **in progress.** Delivery step 7 (OBS-06 shipped in [PR #29](https://github.com/mikebz/nfs-verification/pull/29);
-OBS-01, OBS-05, OBS-07 designed). OBS-02 and OBS-03 shipped in Step 4 ([PR #8](https://github.com/mikebz/nfs-verification/pull/8));
+OBS-07 shipped in step 7 and run against `gke-w1` and `gke-w2`, red on both as shipped ([F-023](findings.md))
+and green only with Ganesha's exposer enabled by hand ([F-024](findings.md)); OBS-01 and OBS-05 designed). OBS-02 and OBS-03 shipped in
+Step 4 ([PR #8](https://github.com/mikebz/nfs-verification/pull/8));
 OBS-04 shipped in Step 2b ([PR #4](https://github.com/mikebz/nfs-verification/pull/4)). Consolidated here to serve
 the complete Observability test group.
 Serves: OBS-01 through OBS-07. Requirements in [`01-test-plan.md`](01-test-plan.md) Section 3.5.
@@ -96,10 +98,12 @@ requiring an in-cluster monitoring stack:
    for `Warning` events such as `FailedMount` and `FailedAttachVolume` (`OBS-04`). For failover traces
    (`OBS-02`), reads container restart timestamps via `ServerStartedAfter` (`pkg/framework/status.go`)
    and server logs (`ServerLog`).
-4. **The Server Metrics Pod Proxy Reader**:
+4. **The Server Metrics Pod Proxy Reader** (`pkg/framework/metrics.go`):
    Accessed via the API server's pod proxy (`/api/v1/namespaces/<ns>/pods/<pod>:<port>/proxy/metrics`).
    Implements a minimal text scanner for the Prometheus exposition format, checking series
-   survival and counter resets across server restarts (`OBS-07`).
+   survival and counter resets across server restarts (`OBS-07`). The endpoint itself is
+   discovered from what the pod declares: the `prometheus.io` annotations, then a container port
+   named for metrics.
 5. **The Service Readiness Probe Configuration Checker**:
    Inspects the server pod's container spec and the backing Service's endpoints. Asserts that
    readiness is driven by an active probe targeting the NFS service (port 2049 or an NFS-aware health probe)
@@ -142,7 +146,7 @@ specific to the Observability test group:
 | **OBS-04** | ✅ A mount failure on a client pod surfaces as an actionable `Warning` Event naming the volume; pod does not report Ready | Kubelet mount logic. Fails if no mount failure event arrives within budget, if the event omits the volume name, or if container status reports Ready. Wording of the failure cause is logged as a diagnostic warning because kubelet controls event phrasing |
 | **OBS-05** | The server container declares a memory limit, and its working set is readable and moves under load | Kubelet Summary API. Fails if no limit is declared; never manufactures an OOMKill |
 | **OBS-06** | ✅ Kubelet volume usage agrees with pod `df` within tolerance, both move with writes, and quota applies | CSI `NodeGetVolumeStats` capability. Kubelet stats summary (`pkg/framework/kubeletstats.go`) compared against pod `df -P -k` (`pkg/framework/volumeusage.go`). Fails if unannounced or if reported total is backing disk (F-009) |
-| **OBS-07** | Server metrics answer before and after restart; counters persist or reset cleanly | Prometheus metrics scraping. Fails if no metrics endpoint is exposed |
+| **OBS-07** | ✅ Server metrics answer before and after restart; every family published before is published after; counters persist or reset cleanly | Prometheus exposition format read through `pods/proxy` (`pkg/framework/metrics.go`), from an endpoint the pod declares. Fails if no metrics endpoint is exposed, if it does not come back, or if it comes back short a family. Label-set changes within a surviving family are a diagnostic |
 
 ## 6. Detailed case walkthroughs
 
@@ -227,12 +231,85 @@ specific to the Observability test group:
   restarts or reset predictably so monitoring pipelines do not break during failover.
 - **Design**:
   - Scrapes the server's metrics endpoint before a pod deletion and again after the server recovers.
-  - Categorizes the series behavior into four mutually exclusive verdicts:
+  - Categorizes the series behavior into five mutually exclusive verdicts:
     - `resumed-reset`: series present before and after, counter reset lower (passes).
-    - `resumed-continuous`: series present before and after, counter continuous (passes).
+    - `resumed-continuous`: series present before and after, at least one counter strictly higher
+      and none lower (passes).
+    - `resumed-indeterminate`: series present before and after, every comparable counter identical
+      (passes, and claims nothing about continuity — see F-024).
     - `never-resumed`: series answered before but failed after restart (fails).
     - `absent`: no metrics endpoint published by server (fails).
   - Fails if the server exposes no metrics endpoint.
+- **Decisions taken while implementing it**:
+  - **The endpoint is discovered from what the deployment declares, never probed for.** Two channels
+    are read: the `prometheus.io` annotations, then a container port named for metrics. Sweeping the
+    ports a pod does not declare would find endpoints the monitoring an operator actually runs
+    cannot see, and would report a deployment as monitorable on the strength of a port nobody
+    published. An explicit `prometheus.io/scrape` of false is treated as no endpoint, because a
+    scraper configured for that annotation honours it. No flag: the pod spec is where a cluster
+    states this, so it is discovered rather than declared.
+  - **The annotation names are a convention, and the distinction matters.** What is *documented* is
+    the mechanism: Prometheus' Kubernetes service discovery exposes every pod annotation as a
+    `__meta_kubernetes_pod_annotation_<name>` meta label, which a scrape config selects and routes
+    on ([`kubernetes_sd_config`](https://prometheus.io/docs/prometheus/latest/configuration/configuration/#kubernetes_sd_config),
+    `role: pod`). The particular names `prometheus.io/scrape`, `/port`, `/path` and `/scheme` are a
+    community convention rather than any specification: upstream's own
+    [example Kubernetes scrape config](https://github.com/prometheus/prometheus/blob/main/documentation/examples/prometheus-kubernetes.yml)
+    deliberately uses commented-out `example.io/*` placeholders instead, leaving the names to the
+    operator. The convention is what the common Helm charts and managed collection stacks emit, so
+    it is the best available proxy for "a scraper here would find this", and it is not a guarantee.
+    **The limitation that follows**: a deployment that marks its scrape targets under some other
+    annotation name reads here as publishing no endpoint. The failure message therefore lists every
+    annotation and port the pod does carry, so a reviewer can see a differently-named annotation and
+    correct the verdict rather than trusting it.
+  - **The assertion is at the metric family, the diagnostic at the series.** A family is what a
+    dashboard or an alert names, and a family that stops being published takes every rule written on
+    it with it. An exact label set is not asserted on: per-client and per-export labels come and go
+    with the clients and exports themselves, so a server that comes back before any client has
+    reconnected publishes the same families under different labels, and asserting on the series
+    would fail a healthy deployment for a client's timing.
+  - **Label sets are canonicalized before they are compared.** Nothing requires a server to render
+    labels in the same order twice, and an order-sensitive key reports every series as lost the
+    first time the order changes.
+  - **Two shapes must not read as an endpoint publishing nothing**: an error page served with a 200,
+    which parses into no samples, and a scheme mismatch, where a TLS listener refuses the plain
+    request. The first is told apart by counting the lines that could not be read and keeping an
+    excerpt of the body; the second by attempting HTTP and then HTTPS where the pod declared no
+    scheme. Both would otherwise fail a working deployment.
+  - **The restart is not timed here.** The case waits past the restart budget from `pkg/slo` for the
+    endpoint to come back, and asserts only that it does. How long a restart takes belongs to CHAOS.
+  - **No workload.** Nothing here writes through the export: the case asserts survival and counter
+    direction, not movement, and the movement cases are OBS-05 and OBS-06. A counter equal on both
+    sides is therefore the expected reading on an idle server, and it is reported as claiming
+    nothing rather than as continuity, which is [F-024](findings.md).
+  - **A histogram's components are compared as separate names but typed through their parent.**
+    `_bucket`, `_sum` and `_count` are what a PromQL query names, so each is checked for presence in
+    its own right; grouping them under the parent the `# TYPE` line names would let a server drop
+    `_sum` and still read as intact. Their direction, though, has to come from the parent, because
+    nothing declares a type for a component. Reading only the exact name left 14 of 367 series
+    direction-checked on the deployment in [F-023](findings.md), so a histogram whose counts
+    restarted at zero could not produce `resumed-reset`. `_sum` stays out of the direction check: it
+    is monotonic only for non-negative observations, which the format does not promise.
+  - **The bundle is registered before the endpoint is looked for, not after the first scrape.** The
+    outcome that most needs the evidence is `absent`, and `absent` has no scrape to carry it: its
+    entire content is what the pod declared instead, and the pod is gone by the time anyone reads
+    the run. Registering on the first successful scrape meant the only verdict this case has ever
+    produced against real hardware left no artifact at all. The bundle therefore records what was
+    read, or what was found when there was nothing to read, and names the verdict rather than
+    reporting it as not reached.
+  - **The pod scraped after the restart must be one that did not exist before it.** Identified by
+    UID against the set taken before the fault, which excludes two different wrong pods: the
+    terminating original, whose name a StatefulSet replacement reuses (the F-013 confusion), and, on
+    a deployment serving the class from more than one pod, a sibling that was up the whole time.
+    Excluding only the deleted pod would let the case pass by scraping something that never
+    restarted.
+  - **Counter equality is not continuity, and is not reported as it.** Counters are split three ways:
+    strictly lower is a reset, strictly higher is an advance, and equal is its own bucket that grounds
+    no claim. `resumed-continuous` requires an advance; all-equal reports `resumed-indeterminate` and
+    still passes, because the assertion is family survival and that is independent of counter
+    direction. This was two-way until a real run showed why it cannot be: on an idle server with a
+    deterministic startup, a genuinely restarted process re-derives identical counters, and lumping
+    equality in with advances inverted the verdict. See F-024.
 
 ## 7. Decisions worth keeping
 
@@ -253,6 +330,12 @@ specific to the Observability test group:
 - Does not claim that any human operator is paged, or that alert thresholds are set appropriately.
 - Does not claim that NFS operation rates or lock states are visible from outside when a server exposes
   no metrics endpoint.
+- Does not claim that a server OBS-07 reports as publishing nothing is serving no metrics anywhere.
+  What the `absent` verdict states is narrower and is the thing an operator cares about: this pod
+  marks no scrape target under the `prometheus.io` convention and names no metrics port, so a
+  scraper following that convention finds nothing here. A server exporting on an undeclared port, or
+  marked up under some other annotation name, is indistinguishable from one exporting nothing, and
+  the failure prints what the pod does carry so that case can be spotted.
 - Does not claim that availability probes catch deadlock conditions until the Step 10 freeze fault lands.
 
 ## 9. What real runs taught
@@ -262,6 +345,21 @@ specific to the Observability test group:
 - **[F-009](findings.md) (Missing per-volume quota)**: On shared exports without filesystem quotas,
   both kubelet and `df` report the host's 10 GiB disk for a 1 GiB claim. OBS-06 fails on its quota check,
   proving that percentage-based capacity alerts on this deployment would be alerting on the wrong volume.
+- **[F-023](findings.md) (No metrics published as shipped, for two different reasons)**: OBS-07's first
+  runs, against two clusters running different provisioner images, both reported `absent`. The cause is
+  not the same on each. `gke-w1` is built without `USE_MONITORING` and cannot publish. `gke-w2` has
+  `libganesha_monitoring` linked into the running process and publishes nothing only because Ganesha's
+  `Enable_Metrics` defaults to false; setting it served 39 families including lease, lock and
+  client-state metrics. Enabling it is still not enough, because the chart declares no port and no
+  annotation, so nothing can discover the endpoint. Read next to F-008 and F-022, both channels this
+  plan allows for NFS-level observability are empty as configured, and in both cases the content exists
+  and is sent somewhere nobody is looking.
+- **[F-024](findings.md) (Identical counters are not continuity)**: the first end-to-end run of OBS-07
+  passed with `resumed-continuous` and claimed the server keeps its counts across a restart, on a
+  process whose `ganesha_uptime_seconds` read 1. Ganesha's startup is deterministic and the server was
+  idle, so a genuinely restarted process re-derived exactly the same counters. Counters are now split
+  three ways, continuity requires a strict advance, and all-equal reports `resumed-indeterminate`. The
+  deployment's real counter behaviour across a restart remains unmeasured, which is the honest state.
 
 ## 10. Sources
 
@@ -275,3 +373,14 @@ specific to the Observability test group:
   for readiness probe behavior and Service endpoint tracking, which is OBS-01's subject.
 - [CSI Specification](https://github.com/container-storage-interface/spec/blob/master/spec.md) for
   `NodeGetVolumeStats` optional capability.
+- Prometheus [exposition formats](https://prometheus.io/docs/instrumenting/exposition_formats/) for
+  the text format OBS-07's scanner reads: series names, label sets, values and `# TYPE` lines.
+- Prometheus [`kubernetes_sd_config`](https://prometheus.io/docs/prometheus/latest/configuration/configuration/#kubernetes_sd_config),
+  `role: pod`, for `__meta_kubernetes_pod_annotation_<annotationname>`: the documented mechanism by
+  which a pod annotation becomes something a scrape config can discover a target from. This is what
+  makes reading annotations the right channel; it does not fix which annotation.
+- Prometheus' [example Kubernetes scrape config](https://github.com/prometheus/prometheus/blob/main/documentation/examples/prometheus-kubernetes.yml),
+  cited for what it does *not* say: its `kubernetes-pods` job uses commented-out `example.io/*`
+  placeholders, not `prometheus.io/*`. The `prometheus.io` names OBS-07 reads are therefore a
+  community convention, evidenced by the charts and collection stacks that emit them, and not a
+  specification the deployment under test is obliged to follow.
