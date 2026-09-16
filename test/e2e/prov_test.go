@@ -942,16 +942,34 @@ func TestProvRapidProvisionChurn(t *testing.T) {
 // them, and delete without disturbing the server. The export the provisioner mints is
 // logged as evidence and not asserted on. How a driver names an export is its own
 // business, one volume cannot show a naming collision anyway, and an export malformed
-// enough to matter cannot be mounted, which step 4 already requires.
+// enough to matter cannot be mounted, which step 6 already requires. Two claims
+// landing on one export is a real defect and a separate observation: PROV-02 makes it,
+// by provisioning 20 claims at once and requiring distinct export paths.
+//
+// Citations, in the order the case uses them:
+//   - Kubernetes object names, https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#dns-subdomain-names:
+//     a claim name is an RFC 1123 DNS subdomain, at most 253 characters, lowercase
+//     alphanumerics plus '-' and '.'. That is the whole of what steps 1 to 3 rest on,
+//     and it is a Kubernetes rule, not an NFS one. Note it caps the total only: a
+//     single 253-character label is accepted, as a server-side dry run confirms.
+//   - NAME_MAX, 255 bytes for one path component, is why 253 is the interesting
+//     length for a provisioner that builds a directory out of the name.
+//   - RFC 8881 Section 10, https://www.rfc-editor.org/rfc/rfc8881.html#section-10:
+//     the reader on node B opens after the writer on node A has closed, so
+//     close-to-open is what entitles step 6 to expect the bytes. Nothing stronger is
+//     asserted, and nothing weaker would be lawful.
 //
 // Steps:
 //  1. Verify admission-layer rejection: attempt to create a PVC with a 1000-character name.
 //  2. Verify admission-layer rejection: attempt to create a PVC with uppercase characters.
 //  3. Create a claim with the longest valid RFC 1123 name, 253 characters of dotted,
 //     dashed labels.
-//  4. Mount the boundary claim in a writer on node A and a reader on node B.
+//  4. Start a writer on node A and a reader on node B, without waiting for either: the
+//     claim needs a consumer before it can bind, and a pod wait here would mask the
+//     bind verdict in step 5.
 //  5. Confirm the claim reaches Bound, resolve the PV, and record the export and volume
-//     handle it was given.
+//     handle it was given. Only then wait for both pods, so a provisioning failure and
+//     a mount failure are reported as different things.
 //  6. Write a payload from the writer on node A and verify the SHA-256 checksum from
 //     the reader on node B across the wire.
 //  7. Delete both pods gracefully, await API departure, and delete the claim.
@@ -1028,11 +1046,29 @@ func TestProvVolumeNameEdgeCases(t *testing.T) {
 			framework.MaxObjectNameLength, len(boundPVC.Name), boundPVC.Name)
 	}
 
-	// 4. Mount the boundary claim in a writer on node A and a reader on node B.
-	// The pods come before the bind check: a class that binds on first consumer
-	// has nothing to bind to until something is scheduled.
-	writer := f.MustPod(ctx, toolsPod("writer", boundPVC.Name, nodeA))
-	reader := f.MustPod(ctx, toolsPod("reader", boundPVC.Name, nodeB))
+	// 4. Start a writer on node A and a reader on node B, without waiting for
+	// either.
+	//
+	// The pods have to exist before the bind check, because a class that binds
+	// on first consumer has nothing to bind to until something is scheduled
+	// (F-002). Waiting for them here would spend the pod-ready timeout on a
+	// claim that never bound and then fail the case with a pod message, so the
+	// bind verdict below, which is the one that names the provisioner, would
+	// never be printed. PROV-07 starts its consumer the same way and for the
+	// same reason.
+	start := func(name, node string) *corev1.Pod {
+		t.Helper()
+		obj, err := f.PodBuilder(toolsPod(name, boundPVC.Name, node))
+		if err != nil {
+			t.Fatalf("building the %s pod: %v", name, err)
+		}
+		pod, err := f.C.Kube.CoreV1().Pods(framework.Namespace).Create(ctx, obj, metav1.CreateOptions{})
+		if err != nil {
+			t.Fatalf("creating the %s pod: %v", name, err)
+		}
+		return pod
+	}
+	writer, reader := start("writer", nodeA), start("reader", nodeB)
 
 	// 5. Confirm the claim reached Bound and record what the provisioner minted.
 	//
@@ -1056,6 +1092,16 @@ func TestProvVolumeNameEdgeCases(t *testing.T) {
 	}
 	t.Logf("%d-character boundary claim %s bound to PV %s on StorageClass %s",
 		len(bound.Name), bound.Name, pv.Name, f.Env.StorageClass)
+
+	// The claim bound, so the pods can be waited for. Anything that goes wrong
+	// from here is a mount rather than a provision, and is reported as one.
+	for _, pod := range []*corev1.Pod{writer, reader} {
+		if _, err := f.WaitPodReady(ctx, pod.Name, framework.PodReadyTimeout); err != nil {
+			t.Fatalf("pod %s never became ready with the %d-character claim %s mounted, though the "+
+				"claim bound to PV %s: the volume exists and the node could not mount it: %v",
+				pod.Name, len(bound.Name), bound.Name, pv.Name, err)
+		}
+	}
 
 	// What the provisioner minted for a name at the boundary is recorded, not
 	// asserted on. How a driver builds an export out of a claim is its own

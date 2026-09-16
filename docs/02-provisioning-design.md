@@ -254,9 +254,16 @@ requires.
   3. Build the boundary name with `framework.BoundaryVolumeName`: exactly 253 characters on top of the
      run prefix, made of dotted, dashed RFC 1123 labels rather than one repeated letter, so the name
      carries the characters the API will store and a driver then has to handle.
-  4. Create the claim with that name and mount it across two nodes.
-  5. Wait for the claim to bind. Resolve the PV and log the export server, export path and CSI
-     `volumeHandle` it was given, as the run's record of what a boundary name produced here.
+  4. Create the claim, then start a writer and a reader on two nodes **without waiting for either**.
+     The claim needs a consumer before a `WaitForFirstConsumer` class will bind it ([F-002](findings.md)),
+     but waiting for the pods here would spend the pod-ready timeout on a claim that never bound and
+     report a pod failure instead of the provisioning verdict in step 5.
+  5. Wait for the claim to bind. A claim that never binds is the failure the case exists to report:
+     Kubernetes stored the name, so the provisioner owes a volume, and the message says the finding
+     is against the provisioner rather than the NFS server and points at the claim's events. Resolve
+     the PV and log the export server, export path and CSI `volumeHandle` it was given, as the run's
+     record of what a boundary name produced here. Only then wait for both pods, so a provisioning
+     failure and a mount failure are reported as different things.
   6. Write 1MiB payload from Node A and verify SHA-256 checksum from Node B.
   7. Gracefully delete pods and claim. Assert server remained healthy with zero restarts.
 
