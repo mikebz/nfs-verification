@@ -926,233 +926,295 @@ func TestProvRapidProvisionChurn(t *testing.T) {
 }
 
 // PROV-10: volume name edge cases. Two things a user can observe: a name Kubernetes
-// will not store is rejected cleanly, and the longest name it will store produces a
-// volume that works.
+// will not store is rejected cleanly, and a name it will store produces a volume
+// that works.
 //
-// The rejections are the apiserver's, not the driver's. A 1000-character or uppercase
-// name is refused by RFC 1123 validation before any storage component sees it, so it
-// is evidence about Kubernetes admission and none about NFS, and the case says so
-// rather than presenting it as a provisioner result. Characters the API will not store
-// therefore cannot be the storage assertion. What can is the other end of the same
-// rule: the longest name it will store, built from the characters it will store, dots
-// and dashes included, since a name of 253 characters is where a provisioner that
-// builds paths out of claim names meets NAME_MAX.
+// Nothing about a name is judged here. Every name in both tables is posted to the
+// API exactly as written and the cluster's answer is the result, which is why the
+// case builds its own claims rather than calling CreatePVC: that helper runs
+// CheckObjectName first, and would refuse the first table on the workstation,
+// turning a verdict that belongs to the apiserver into one made by the harness.
 //
-// What that name has to do is work: bind, mount on two nodes, carry a file between
-// them, and delete without disturbing the server. The export the provisioner mints is
-// logged as evidence and not asserted on. How a driver names an export is its own
-// business, one volume cannot show a naming collision anyway, and an export malformed
-// enough to matter cannot be mounted, which step 6 already requires. Two claims
-// landing on one export is a real defect and a separate observation: PROV-02 makes it,
-// by provisioning 20 claims at once and requiring distinct export paths.
+// The rejections are the apiserver's, not the driver's. An over-long or uppercase
+// name is refused by RFC 1123 validation before any storage component sees it, so
+// it is evidence about Kubernetes admission and none about NFS, and the case says
+// so rather than presenting it as a provisioner result. Characters the API will not
+// store therefore cannot be the storage assertion. What can is the other end of the
+// same rule: names it will store, including the longest one, since 253 characters
+// is where a provisioner that builds paths out of claim names meets NAME_MAX.
+//
+// What those names have to do is work: bind, mount on two nodes, carry a file
+// between them, and delete without disturbing the server. The export the
+// provisioner mints is logged as evidence and not asserted on. How a driver names
+// an export is its own business, one volume cannot show a naming collision anyway,
+// and an export malformed enough to matter cannot be mounted, which the checksum
+// step already requires. Two claims landing on one export is a real defect and a
+// separate observation: PROV-02 makes it, by provisioning 20 claims at once and
+// requiring distinct export paths.
 //
 // Citations, in the order the case uses them:
 //   - Kubernetes object names, https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#dns-subdomain-names:
 //     a claim name is an RFC 1123 DNS subdomain, at most 253 characters, lowercase
-//     alphanumerics plus '-' and '.'. That is the whole of what steps 1 to 3 rest on,
-//     and it is a Kubernetes rule, not an NFS one. Note it caps the total only: a
-//     single 253-character label is accepted, as a server-side dry run confirms.
+//     alphanumerics plus '-' and '.'. That is what the first table expects to be
+//     enforced, and it is a Kubernetes rule, not an NFS one. Note it caps the total
+//     only: a single 253-character label is accepted, as a server-side dry run
+//     confirms.
 //   - NAME_MAX, 255 bytes for one path component, is why 253 is the interesting
 //     length for a provisioner that builds a directory out of the name.
 //   - RFC 8881 Section 10, https://www.rfc-editor.org/rfc/rfc8881.html#section-10:
 //     the reader on node B opens after the writer on node A has closed, so
-//     close-to-open is what entitles step 6 to expect the bytes. Nothing stronger is
-//     asserted, and nothing weaker would be lawful.
+//     close-to-open is what entitles the case to expect the bytes. Nothing stronger
+//     is asserted, and nothing weaker would be lawful.
 //
 // Steps:
-//  1. Verify admission-layer rejection: attempt to create a PVC with a 1000-character name.
-//  2. Verify admission-layer rejection: attempt to create a PVC with uppercase characters.
-//  3. Create a claim with the longest valid RFC 1123 name, 253 characters of dotted,
-//     dashed labels.
-//  4. Start a writer on node A and a reader on node B, without waiting for either: the
-//     claim needs a consumer before it can bind, and a pod wait here would mask the
-//     bind verdict in step 5.
-//  5. Confirm the claim reaches Bound, resolve the PV, and record the export and volume
-//     handle it was given. Only then wait for both pods, so a provisioning failure and
-//     a mount failure are reported as different things.
-//  6. Write a payload from the writer on node A and verify the SHA-256 checksum from
+//  1. Post each name Kubernetes should not store and require a clean Invalid or
+//     BadRequest refusal, logging the reason the API gave.
+//  2. Post each name Kubernetes should store, and for the boundary name confirm
+//     against the stored object that it really is 253 characters, since a name
+//     built short would pass every later step while testing nothing.
+//  3. Start a writer on node A and a reader on node B, without waiting for either:
+//     the claim needs a consumer before it can bind, and a pod wait here would mask
+//     the bind verdict in step 4.
+//  4. Confirm the claim reaches Bound, resolve the PV, and record the export and
+//     volume handle it was given. Only then wait for both pods, so a provisioning
+//     failure and a mount failure are reported as different things.
+//  5. Write a payload from the writer on node A and verify the SHA-256 checksum from
 //     the reader on node B across the wire.
-//  7. Delete both pods gracefully, await API departure, and delete the claim.
-//  8. Confirm server remains healthy with no restarts. Its own subtest, and
+//  6. Delete both pods gracefully, await API departure, and delete the claim.
+//  7. Confirm the server remains healthy with no restarts. Its own subtest, and
 //     blocked rather than passed where no server pod was discovered.
 func TestProvVolumeNameEdgeCases(t *testing.T) {
 	f := framework.New(t, "PROV-10")
 	requireCap(t, f.Caps.MultiNode, "cross-node verification needs two schedulable workers")
-	ctx, cancel := caseCtx(t, 15*time.Minute)
+	ctx, cancel := caseCtx(t, 20*time.Minute)
 	defer cancel()
 
 	nodeA, nodeB := f.TwoNodes(ctx)
 
 	restarts := watchServerRestarts(ctx, f)
 
-	// 1. Admission barrier: direct API call with 1000-character name.
-	// Must be rejected cleanly by kube-apiserver admission (RFC 1123 limit).
-	longName := strings.Repeat("a", 1000)
-	longPVC := &corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{Name: longName, Namespace: framework.Namespace},
-		Spec: corev1.PersistentVolumeClaimSpec{
-			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany},
-			Resources: corev1.VolumeResourceRequirements{
-				Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("1Gi")},
-			},
-		},
-	}
-	if _, err := f.C.Kube.CoreV1().PersistentVolumeClaims(framework.Namespace).Create(ctx, longPVC, metav1.CreateOptions{}); err == nil {
-		t.Fatalf("API accepted PVC with 1000-character name; expected admission rejection")
-	} else if !apierrors.IsInvalid(err) && !apierrors.IsBadRequest(err) {
-		t.Fatalf("expected Invalid/BadRequest admission error for 1000-character name, got: %v", err)
-	} else {
-		t.Logf("1000-character PVC name rejected cleanly at admission layer: %v", err)
-	}
-
-	// 2. Admission barrier: direct API call with invalid characters (uppercase letters).
-	// Must be rejected cleanly by kube-apiserver admission (RFC 1123 subdomain syntax).
-	// The name is alphanumeric on purpose. A name carrying underscores as well
-	// is rejected for the underscores, so it would pass this check on a cluster
-	// that accepted capital letters, which is the one thing it is here to rule
-	// out.
-	badCharPVC := &corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{Name: "InvalidUppercaseName", Namespace: framework.Namespace},
-		Spec: corev1.PersistentVolumeClaimSpec{
-			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany},
-			Resources: corev1.VolumeResourceRequirements{
-				Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("1Gi")},
-			},
-		},
-	}
-	if _, err := f.C.Kube.CoreV1().PersistentVolumeClaims(framework.Namespace).Create(ctx, badCharPVC, metav1.CreateOptions{}); err == nil {
-		t.Fatalf("API accepted PVC with uppercase name; expected admission rejection")
-	} else if !apierrors.IsInvalid(err) && !apierrors.IsBadRequest(err) {
-		t.Fatalf("expected Invalid/BadRequest admission error for uppercase name, got: %v", err)
-	} else {
-		t.Logf("uppercase PVC name rejected cleanly at admission layer: %v", err)
-	}
-
-	// 3. The longest name Kubernetes will store, built from the characters it
-	// will store. One repeated letter would test the length and nothing else;
-	// the dots and dashes are the part of RFC 1123 a provisioner has to carry
-	// into a path, a config file or a command line.
-	boundaryName, err := framework.BoundaryVolumeName(f.Name(""), framework.MaxObjectNameLength)
+	size, err := resource.ParseQuantity(framework.Cfg().PVCSize)
 	if err != nil {
-		t.Fatalf("building the boundary claim name: %v", err)
-	}
-	boundPVC, err := f.CreatePVC(ctx, framework.PVCSpec{Name: boundaryName})
-	if err != nil {
-		t.Fatalf("creating %d-character boundary claim %s: %v",
-			framework.MaxObjectNameLength, boundaryName, err)
-	}
-	if len(boundPVC.Name) != framework.MaxObjectNameLength {
-		t.Fatalf("expected boundary PVC name length %d, got %d (%s)",
-			framework.MaxObjectNameLength, len(boundPVC.Name), boundPVC.Name)
+		t.Fatalf("parsing the configured claim size %q: %v", framework.Cfg().PVCSize, err)
 	}
 
-	// 4. Start a writer on node A and a reader on node B, without waiting for
-	// either.
-	//
-	// The pods have to exist before the bind check, because a class that binds
-	// on first consumer has nothing to bind to until something is scheduled
-	// (F-002). Waiting for them here would spend the pod-ready timeout on a
-	// claim that never bound and then fail the case with a pod message, so the
-	// bind verdict below, which is the one that names the provisioner, would
-	// never be printed. PROV-07 starts its consumer the same way and for the
-	// same reason.
-	start := func(name, node string) *corev1.Pod {
-		t.Helper()
-		obj, err := f.PodBuilder(toolsPod(name, boundPVC.Name, node))
-		if err != nil {
-			t.Fatalf("building the %s pod: %v", name, err)
-		}
-		pod, err := f.C.Kube.CoreV1().Pods(framework.Namespace).Create(ctx, obj, metav1.CreateOptions{})
-		if err != nil {
-			t.Fatalf("creating the %s pod: %v", name, err)
-		}
-		return pod
-	}
-	writer, reader := start("writer", nodeA), start("reader", nodeB)
-
-	// 5. Confirm the claim reached Bound and record what the provisioner minted.
-	//
-	// Never binding is the failure this case exists to report, not an outcome to
-	// tolerate: Kubernetes stored the name, so a user who picked it is entitled
-	// to a volume. Where the reason is a provisioner that cannot build a path
-	// out of a name this long, that is a finding against the provisioner and the
-	// message says so, because the claim's events will name the directory it
-	// could not create and nothing else in the run will.
-	bound, err := f.WaitPVCBound(ctx, boundPVC.Name, framework.BindTimeout)
-	if err != nil {
-		t.Fatalf("the %d-character claim %s never bound on StorageClass %s, though Kubernetes accepted "+
-			"the name and both pods consumed it: the provisioner took a name the API stores and "+
-			"produced no volume, which is a finding against it rather than against the NFS server. "+
-			"Check the claim's events for the export path or directory it could not create: %v",
-			len(boundPVC.Name), boundPVC.Name, f.Env.StorageClass, err)
-	}
-	pv, err := f.C.Kube.CoreV1().PersistentVolumes().Get(ctx, bound.Spec.VolumeName, metav1.GetOptions{})
-	if err != nil {
-		t.Fatalf("resolving bound PV %s for claim %s: %v", bound.Spec.VolumeName, bound.Name, err)
-	}
-	t.Logf("%d-character boundary claim %s bound to PV %s on StorageClass %s",
-		len(bound.Name), bound.Name, pv.Name, f.Env.StorageClass)
-
-	// The claim bound, so the pods can be waited for. Anything that goes wrong
-	// from here is a mount rather than a provision, and is reported as one.
-	for _, pod := range []*corev1.Pod{writer, reader} {
-		if _, err := f.WaitPodReady(ctx, pod.Name, framework.PodReadyTimeout); err != nil {
-			t.Fatalf("pod %s never became ready with the %d-character claim %s mounted, though the "+
-				"claim bound to PV %s: the volume exists and the node could not mount it: %v",
-				pod.Name, len(bound.Name), bound.Name, pv.Name, err)
-		}
+	// createClaim posts a name exactly as given, so that whether Kubernetes will
+	// have it is Kubernetes' answer and not the harness's. The labels are the
+	// ones teardown selects on, so a claim that is stored is still the suite's
+	// to clean up.
+	createClaim := func(ctx context.Context, name string) (*corev1.PersistentVolumeClaim, error) {
+		sc := f.Env.StorageClass
+		return f.C.Kube.CoreV1().PersistentVolumeClaims(framework.Namespace).Create(ctx,
+			&corev1.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: framework.Namespace, Labels: f.Labels()},
+				Spec: corev1.PersistentVolumeClaimSpec{
+					AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany},
+					StorageClassName: &sc,
+					Resources: corev1.VolumeResourceRequirements{
+						Requests: corev1.ResourceList{corev1.ResourceStorage: size},
+					},
+				},
+			}, metav1.CreateOptions{})
 	}
 
-	// What the provisioner minted for a name at the boundary is recorded, not
-	// asserted on. How a driver builds an export out of a claim is its own
-	// business: the user-visible contract is that a legal name produces a volume
-	// that mounts and carries data, which steps 4 and 6 observe directly, and a
-	// malformed export cannot mount at all. A volume whose export the harness
-	// cannot read is not a finding here either, since nothing in this case
-	// depends on reading it.
-	var volumeHandle string
-	if pv.Spec.CSI != nil {
-		volumeHandle = pv.Spec.CSI.VolumeHandle
-	}
-	if src, err := framework.ExtractNFSSource(pv); err != nil {
-		t.Logf("boundary volume %s: the export could not be read for the record: %v", pv.Name, err)
-	} else {
-		t.Logf("boundary volume configuration: PV=%s volumeHandle=%q export=%s", pv.Name, volumeHandle, src)
-	}
-
-	// 6. Write a payload from writer on node A and verify checksum from reader on node B.
-	want, err := f.WriteFile(ctx, writer.Name, fileIn("prov10.dat"), 1<<20, "prov10")
-	if err != nil {
-		t.Fatalf("writing to boundary share from writer pod %s on %s: %v", writer.Name, nodeA, err)
-	}
-	got, err := f.Sha256(ctx, reader.Name, fileIn("prov10.dat"))
-	if err != nil {
-		t.Fatalf("reader pod %s on %s failed reading file written by writer pod %s on %s (profile %s, want %s): %v",
-			reader.Name, nodeB, writer.Name, nodeA, profile(t).Name, want, err)
-	}
-	if got != want {
-		t.Fatalf("reader on %s did not see what writer on %s closed (profile %s): got %s want %s",
-			nodeB, nodeA, profile(t).Name, got, want)
-	}
-
-	// 7. Graceful teardown: pods first, wait for API departure, then delete the claim.
-	for _, pod := range []*corev1.Pod{writer, reader} {
-		if err := f.DeletePod(ctx, pod.Name); err != nil {
-			t.Fatalf("deleting pod %s: %v", pod.Name, err)
-		}
-		if err := f.WaitPodGone(ctx, pod.Name, framework.DeleteTimeout); err != nil {
-			t.Fatalf("pod %s did not go away: %v", pod.Name, err)
-		}
-	}
-	if err := f.DeletePVC(ctx, bound.Name); err != nil {
-		t.Fatalf("deleting boundary claim %s: %v", bound.Name, err)
-	}
-	if err := f.WaitPVCGone(ctx, bound.Name, framework.DeleteTimeout); err != nil {
-		t.Fatalf("boundary claim %s did not delete: %v", bound.Name, err)
+	// 1. Names Kubernetes should not store. None of these reaches the
+	// provisioner, let alone the NFS server: the apiserver is the barrier, and
+	// the only thing under test is that it refuses them as invalid names rather
+	// than failing some other way a user could not act on.
+	for _, tc := range []struct {
+		id   string
+		name string
+		why  string
+	}{
+		{"far-too-long", strings.Repeat("a", 1000), "1000 characters"},
+		{"one-too-long", strings.Repeat("a", framework.MaxObjectNameLength+1), "one character past the limit"},
+		// Alphanumeric on purpose. A name carrying underscores as well is
+		// rejected for the underscores, so it would pass on a cluster that
+		// accepted capital letters, which is the one thing it is here to rule
+		// out.
+		{"uppercase", "InvalidUppercaseName", "uppercase letters"},
+		{"underscore", "invalid_underscore_name", "an underscore"},
+	} {
+		t.Run("rejected/"+tc.id, func(t *testing.T) {
+			claim, err := createClaim(ctx, tc.name)
+			switch {
+			case err == nil:
+				if derr := f.C.Kube.CoreV1().PersistentVolumeClaims(framework.Namespace).
+					Delete(ctx, claim.Name, metav1.DeleteOptions{}); derr != nil {
+					t.Logf("removing the claim that should not have been stored: %v", derr)
+				}
+				t.Fatalf("Kubernetes stored a claim whose name carries %s, which RFC 1123 forbids; "+
+					"a name the API keeps is a name the provisioner has to build a path out of", tc.why)
+			case !apierrors.IsInvalid(err) && !apierrors.IsBadRequest(err):
+				t.Fatalf("a claim name carrying %s was refused, but not as an invalid name: a user cannot "+
+					"tell a name they must fix from a cluster that is unwell. Got: %v", tc.why, err)
+			default:
+				t.Logf("a name carrying %s was refused at admission: %v", tc.why, err)
+			}
+		})
 	}
 
-	// 8. Confirm server remained healthy.
-	restarts.assertNoRestart(ctx, t, f, "the 253-character claim's lifecycle")
+	// The longest name Kubernetes will store, which is where a provisioner that
+	// builds a directory out of a claim name meets NAME_MAX. The run prefix
+	// comes first so the claim stays attributable to this run, and the rest is
+	// padding: length is all this name contributes, and the dotted entry below
+	// covers the character set. The padding is not checked here, since a name
+	// this case gets wrong is caught against the object the apiserver stored.
+	boundaryName := f.Name("")
+	pad := framework.MaxObjectNameLength - len(boundaryName)
+	if pad <= 0 {
+		t.Fatalf("the run prefix %q is %d characters, which leaves nothing inside the %d Kubernetes "+
+			"stores; shorten -run-id", boundaryName, len(boundaryName), framework.MaxObjectNameLength)
+	}
+	boundaryName += strings.Repeat("z", pad)
+
+	// 2. Names Kubernetes should store, each of which owes the user a working
+	// volume. wantLen is asserted against the stored object where the length is
+	// the point of the entry.
+	for _, tc := range []struct {
+		id      string
+		name    string
+		wantLen int
+	}{
+		{"longest-stored", boundaryName, framework.MaxObjectNameLength},
+		// Short, but carrying the dots and digits RFC 1123 allows, which a
+		// provisioner has to carry into a path, a config file or a command line.
+		{"dots-and-digits", f.Name("9x.dots.0-9.digits"), 0},
+	} {
+		t.Run("accepted/"+tc.id, func(t *testing.T) {
+			claim, err := createClaim(ctx, tc.name)
+			if err != nil {
+				t.Fatalf("Kubernetes refused the %d-character claim name %q, which RFC 1123 permits: %v",
+					len(tc.name), tc.name, err)
+			}
+			if tc.wantLen != 0 && len(claim.Name) != tc.wantLen {
+				t.Fatalf("the claim Kubernetes stored is %d characters, not the %d this entry exists to "+
+					"drive: the name was built short, so the boundary is not being tested even if the "+
+					"rest of this passes (%q)", len(claim.Name), tc.wantLen, claim.Name)
+			}
+
+			// 3. Start a writer on node A and a reader on node B, without
+			// waiting for either.
+			//
+			// The pods have to exist before the bind check, because a class that
+			// binds on first consumer has nothing to bind to until something is
+			// scheduled (F-002). Waiting for them here would spend the pod-ready
+			// timeout on a claim that never bound and then fail with a pod
+			// message, so the bind verdict below, which is the one that names
+			// the provisioner, would never be printed. PROV-07 starts its
+			// consumer the same way and for the same reason.
+			start := func(role, node string) *corev1.Pod {
+				t.Helper()
+				obj, err := f.PodBuilder(toolsPod(tc.id+"-"+role, claim.Name, node))
+				if err != nil {
+					t.Fatalf("building the %s pod: %v", role, err)
+				}
+				pod, err := f.C.Kube.CoreV1().Pods(framework.Namespace).Create(ctx, obj, metav1.CreateOptions{})
+				if err != nil {
+					t.Fatalf("creating the %s pod: %v", role, err)
+				}
+				return pod
+			}
+			writer, reader := start("writer", nodeA), start("reader", nodeB)
+
+			// 4. Confirm the claim reached Bound and record what the provisioner
+			// minted.
+			//
+			// Never binding is the failure this case exists to report, not an
+			// outcome to tolerate: Kubernetes stored the name, so a user who
+			// picked it is entitled to a volume. Where the reason is a
+			// provisioner that cannot build a path out of the name, that is a
+			// finding against the provisioner and the message says so, because
+			// the claim's events will name the directory it could not create and
+			// nothing else in the run will.
+			bound, err := f.WaitPVCBound(ctx, claim.Name, framework.BindTimeout)
+			if err != nil {
+				t.Fatalf("the %d-character claim %s never bound on StorageClass %s, though Kubernetes "+
+					"accepted the name and both pods consumed it: the provisioner took a name the API "+
+					"stores and produced no volume, which is a finding against it rather than against "+
+					"the NFS server. Check the claim's events for the export path or directory it could "+
+					"not create: %v", len(claim.Name), claim.Name, f.Env.StorageClass, err)
+			}
+			pv, err := f.C.Kube.CoreV1().PersistentVolumes().Get(ctx, bound.Spec.VolumeName, metav1.GetOptions{})
+			if err != nil {
+				t.Fatalf("resolving bound PV %s for claim %s: %v", bound.Spec.VolumeName, bound.Name, err)
+			}
+			t.Logf("%d-character claim %s bound to PV %s on StorageClass %s",
+				len(bound.Name), bound.Name, pv.Name, f.Env.StorageClass)
+
+			// What the provisioner minted for this name is recorded, not
+			// asserted on. How a driver builds an export out of a claim is its
+			// own business: the user-visible contract is that a legal name
+			// produces a volume that mounts and carries data, which the steps
+			// either side of this observe directly, and a malformed export
+			// cannot mount at all. A volume whose export the harness cannot read
+			// is not a finding here either, since nothing in this case depends
+			// on reading it.
+			//
+			// This runs before the pods are waited for, not after. A claim that
+			// binds and then will not mount is the failure where the export
+			// matters most, and recording it afterwards would mean the mount
+			// failure exits with the value that explains it unprinted.
+			var volumeHandle string
+			if pv.Spec.CSI != nil {
+				volumeHandle = pv.Spec.CSI.VolumeHandle
+			}
+			if src, err := framework.ExtractNFSSource(pv); err != nil {
+				t.Logf("volume configuration: PV=%s volumeHandle=%q export could not be read "+
+					"for the record: %v", pv.Name, volumeHandle, err)
+			} else {
+				t.Logf("volume configuration: PV=%s volumeHandle=%q export=%s", pv.Name, volumeHandle, src)
+			}
+
+			// The claim bound, so the pods can be waited for. Anything that goes
+			// wrong from here is a mount rather than a provision, and is
+			// reported as one.
+			for _, pod := range []*corev1.Pod{writer, reader} {
+				if _, err := f.WaitPodReady(ctx, pod.Name, framework.PodReadyTimeout); err != nil {
+					t.Fatalf("pod %s never became ready with the %d-character claim %s mounted, though "+
+						"the claim bound to PV %s: the volume exists and the node could not mount it: %v",
+						pod.Name, len(bound.Name), bound.Name, pv.Name, err)
+				}
+			}
+
+			// 5. Write a payload from the writer on node A and verify the
+			// checksum from the reader on node B.
+			want, err := f.WriteFile(ctx, writer.Name, fileIn("prov10.dat"), 1<<20, "prov10")
+			if err != nil {
+				t.Fatalf("writing to the share from writer pod %s on %s: %v", writer.Name, nodeA, err)
+			}
+			got, err := f.Sha256(ctx, reader.Name, fileIn("prov10.dat"))
+			if err != nil {
+				t.Fatalf("reader pod %s on %s failed reading file written by writer pod %s on %s "+
+					"(profile %s, want %s): %v",
+					reader.Name, nodeB, writer.Name, nodeA, profile(t).Name, want, err)
+			}
+			if got != want {
+				t.Fatalf("reader on %s did not see what writer on %s closed (profile %s): got %s want %s",
+					nodeB, nodeA, profile(t).Name, got, want)
+			}
+
+			// 6. Graceful teardown: pods first, wait for API departure, then
+			// delete the claim. Never the other way round (F-001).
+			for _, pod := range []*corev1.Pod{writer, reader} {
+				if err := f.DeletePod(ctx, pod.Name); err != nil {
+					t.Fatalf("deleting pod %s: %v", pod.Name, err)
+				}
+				if err := f.WaitPodGone(ctx, pod.Name, framework.DeleteTimeout); err != nil {
+					t.Fatalf("pod %s did not go away: %v", pod.Name, err)
+				}
+			}
+			if err := f.DeletePVC(ctx, bound.Name); err != nil {
+				t.Fatalf("deleting claim %s: %v", bound.Name, err)
+			}
+			if err := f.WaitPVCGone(ctx, bound.Name, framework.DeleteTimeout); err != nil {
+				t.Fatalf("claim %s did not delete: %v", bound.Name, err)
+			}
+		})
+	}
+
+	// 7. Confirm the server remained healthy.
+	restarts.assertNoRestart(ctx, t, f, "the name edge cases' lifecycle")
 }
 
 // PROV-11: two-stage expansion under active I/O. Grows the backing volume while

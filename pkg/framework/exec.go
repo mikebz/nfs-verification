@@ -125,6 +125,13 @@ func CheckScriptID(id string) error {
 	return nil
 }
 
+// MaxObjectNameLength is the longest name Kubernetes will store for an object.
+// It caps the name as a whole and says nothing about the labels between the
+// dots: a single 253-character label is stored, as a server-side dry run
+// confirms. See
+// https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#dns-subdomain-names.
+const MaxObjectNameLength = 253
+
 // rfc1123Subdomain matches a Kubernetes object name: lowercase alphanumerics,
 // dashes and dots, starting and ending alphanumeric.
 var rfc1123Subdomain = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`)
