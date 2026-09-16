@@ -41,7 +41,8 @@ process_start_time_seconds 1.7364e+09 1736400000000
 //
 // Steps:
 //  1. Parse a scrape in the shape a server serves one.
-//  2. Check the series count, the families, and the types read off TYPE lines.
+//  2. Check the series count, the metric names, and the types read off TYPE
+//     lines.
 //  3. Check a labelled value, an unlabelled one, and one with a timestamp.
 //  4. Check that nothing in it was unreadable.
 func TestParseExpositionReadsSeries(t *testing.T) {
@@ -54,9 +55,9 @@ func TestParseExpositionReadsSeries(t *testing.T) {
 	if got, want := m.Len(), 7; got != want {
 		t.Errorf("read %d series, want %d: %s", got, want, m.Describe())
 	}
-	if got, want := strings.Join(m.Families(), " "), "nfsd_clients nfsd_op_seconds_bucket nfsd_op_seconds_count "+
+	if got, want := strings.Join(m.MetricNames(), " "), "nfsd_clients nfsd_op_seconds_bucket nfsd_op_seconds_count "+
 		"nfsd_op_seconds_sum nfsd_rpc_operations_total process_start_time_seconds"; got != want {
-		t.Errorf("families %q, want %q", got, want)
+		t.Errorf("metric names %q, want %q", got, want)
 	}
 	if got := m.Types["nfsd_rpc_operations_total"]; got != "counter" {
 		t.Errorf("the counter's type read as %q, so its direction across a restart would not be checked", got)
@@ -280,7 +281,7 @@ func TestDescribePodPortsNamesWhatWasLooked(t *testing.T) {
 // Steps:
 //  1. No scrape before, which is an endpoint that never published.
 //  2. A scrape before and none after, and one after that answered with nothing.
-//  3. Both scrapes, with a family missing from the second.
+//  3. Both scrapes, with a metric name missing from the second.
 //  4. Both scrapes, with a counter lower afterwards.
 //  5. Both scrapes, with the counters carried across.
 //  6. Both scrapes, with every counter identical, which is the one that must
@@ -290,7 +291,7 @@ func TestClassifyMetricsVerdicts(t *testing.T) {
 	reset := ParseExposition([]byte(strings.ReplaceAll(serverExposition, "1024", "7")))
 	continued := ParseExposition([]byte(strings.ReplaceAll(serverExposition, "1024", "2048")))
 	identical := ParseExposition([]byte(serverExposition))
-	lostFamily := ParseExposition([]byte("# TYPE nfsd_clients gauge\nnfsd_clients 1\n"))
+	lostName := ParseExposition([]byte("# TYPE nfsd_clients gauge\nnfsd_clients 1\n"))
 	nothing := ParseExposition([]byte("<html>404</html>"))
 
 	for _, tc := range []struct {
@@ -302,7 +303,7 @@ func TestClassifyMetricsVerdicts(t *testing.T) {
 		{"endpoint published nothing", &nothing, &before, MetricsAbsent},
 		{"did not come back", &before, nil, MetricsNeverResumed},
 		{"came back with nothing", &before, &nothing, MetricsNeverResumed},
-		{"came back short a family", &before, &lostFamily, MetricsNeverResumed},
+		{"came back short a metric name", &before, &lostName, MetricsNeverResumed},
 		{"counters reset", &before, &reset, MetricsResumedReset},
 		{"counters carried across", &before, &continued, MetricsResumedContinuous},
 		{"counters identical", &before, &identical, MetricsResumedIndeterminate},
@@ -361,36 +362,36 @@ func TestClassifyMetricsEqualityIsNotContinuity(t *testing.T) {
 	}
 }
 
-// TestClassifyMetricsSeparatesFamiliesFromLabels is the deliberate boundary: a
-// family that stops being published is the assertion, and a label set that
+// TestClassifyMetricsSeparatesNamesFromLabels is the deliberate boundary: a
+// metric name that stops being published is the assertion, and a label set that
 // changes is not.
 //
 // Per-client and per-export labels come and go with the clients and exports
 // themselves, so a server that comes back before any client has reconnected
-// publishes the same families with different labels. Asserting on the exact
+// publishes the same names with different labels. Asserting on the exact
 // series would report that as metrics lost across the restart, which is a
 // healthy deployment failed for a client's timing.
 //
 // Steps:
-//  1. Classify a pair whose family survives with a different client label.
+//  1. Classify a pair whose metric name survives with a different client label.
 //  2. Assert the verdict is not a failure and the changed series is recorded as
-//     a diagnostic rather than as a lost family.
+//     a diagnostic rather than as a lost name.
 //
 // The verdict is checked as "not never-resumed" rather than pinned to one of
 // the passing verdicts on purpose. When every series is relabelled there is no
 // counter present on both sides, so there is nothing to say about continuity,
 // and which passing verdict comes back is not what this test is about.
-func TestClassifyMetricsSeparatesFamiliesFromLabels(t *testing.T) {
+func TestClassifyMetricsSeparatesNamesFromLabels(t *testing.T) {
 	before := ParseExposition([]byte("# TYPE nfsd_ops counter\nnfsd_ops{client=\"10.0.0.1\"} 5\n"))
 	after := ParseExposition([]byte("# TYPE nfsd_ops counter\nnfsd_ops{client=\"10.0.0.2\"} 1\n"))
 
 	got := ClassifyMetrics(&before, &after)
 	if got.Verdict == MetricsNeverResumed || got.Verdict == MetricsAbsent {
 		t.Errorf("verdict %s: a client label that changed across the restart is not a "+
-			"family the server stopped publishing", got.Verdict)
+			"metric name the server stopped publishing", got.Verdict)
 	}
-	if len(got.LostFamilies) != 0 {
-		t.Errorf("families reported lost: %v", got.LostFamilies)
+	if len(got.LostMetricNames) != 0 {
+		t.Errorf("metric names reported lost: %v", got.LostMetricNames)
 	}
 	if len(got.LostSeries) != 1 {
 		t.Errorf("the series whose labels changed was not recorded as a diagnostic: %s", got)

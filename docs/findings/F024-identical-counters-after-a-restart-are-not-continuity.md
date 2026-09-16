@@ -16,10 +16,14 @@ That is worse than the red it replaced.
 ### What happened
 
 With Ganesha's exposer enabled, OBS-07 finally ran all five of its steps. It
-scraped 367 series across 66 families, deleted the server pod, waited for the
+scraped 367 series under 66 metric names, deleted the server pod, waited for the
 replacement, scraped again, and reported:
 
     resumed-continuous: 0 counters reset, 14 continuous, 0 families lost
+
+The word "families" there is the output as it stood. It was wrong twice over and
+both are corrected below: the count is of metric names, not of the families a
+`# TYPE` line declares, of which this server publishes 39.
 
 and logged "this server keeps its counts across a restart". Both scrapes were
 identical, series for series:
@@ -65,7 +69,7 @@ in the doc and the sentence the case printed were different sentences.
 equality. `MetricsResumedContinuous` requires at least one `Advanced` and no
 `Reset`. A comparison where every counter merely matches gets a new verdict,
 `MetricsResumedIndeterminate`, which still passes — the case's assertion is that
-the metric families survive, and they did — while explicitly claiming nothing
+the metric names survive, and they did — while explicitly claiming nothing
 about continuity. The bundle labels the bucket "counters unchanged, which is not
 evidence of continuity".
 
@@ -84,7 +88,8 @@ unchanged. Still a pass, and now it says what it actually observed.
 ### The same false pass had a second cause, found in review
 
 Fourteen counters out of 367 series is the number that should have been
-questioned at the time, and was not. Review asked why `Families()` splits a
+questioned at the time, and was not. Review asked why `MetricNames()`, then
+called `Families()`, splits a
 histogram into `_bucket`, `_sum` and `_count`, and the answer turned up the
 larger half of the problem: the `# TYPE` line names the parent, nothing declares
 a type for the three components, and the direction check looked up the exact

@@ -266,7 +266,7 @@ specific to the Observability test group:
     dashboard or an alert names, and a family that stops being published takes every rule written on
     it with it. An exact label set is not asserted on: per-client and per-export labels come and go
     with the clients and exports themselves, so a server that comes back before any client has
-    reconnected publishes the same families under different labels, and asserting on the series
+    reconnected publishes the same metric names under different labels, and asserting on the series
     would fail a healthy deployment for a client's timing.
   - **Label sets are canonicalized before they are compared.** Nothing requires a server to render
     labels in the same order twice, and an order-sensitive key reports every series as lost the
@@ -282,6 +282,13 @@ specific to the Observability test group:
     direction, not movement, and the movement cases are OBS-05 and OBS-06. A counter equal on both
     sides is therefore the expected reading on an idle server, and it is reported as claiming
     nothing rather than as continuity, which is [F-024](findings.md).
+  - **"Metric name" and "family" are not the same word here, and the harness says which it means.**
+    A name is a series key with its labels stripped, which is what a PromQL query selects. A family
+    is the group a `# TYPE` line declares. They differ for histograms and summaries, whose `_bucket`,
+    `_sum` and `_count` are three names under one family, and the difference is not small: the
+    deployment in [F-023](findings.md) publishes 39 families under 66 names. Both were once called
+    families, so the artifact bundle reported 66 of something the finding counted 39 of, from the
+    same scrape. The comparison is by name and says so; only the direction check goes by family.
   - **A histogram's components are compared as separate names but typed through their parent.**
     `_bucket`, `_sum` and `_count` are what a PromQL query names, so each is checked for presence in
     its own right; grouping them under the parent the `# TYPE` line names would let a server drop
