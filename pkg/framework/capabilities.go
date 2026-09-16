@@ -18,8 +18,11 @@ type Capabilities struct {
 	CanExpand bool
 	// DualStack: both IP families present in the cluster.
 	DualStack bool
-	// SharedServer: server fan-out is greater than one, so exports share a
-	// process and noisy-neighbour cases apply.
+	// SharedServer: one server process serves more than one export, so exports
+	// contend and the noisy-neighbour cases mean something. True when a server
+	// pod holds several exports, and true when the whole cluster has exactly
+	// one server pod, which is the extreme of sharing rather than the absence
+	// of it. Computed by sharesOneServer in pkg/preflight.
 	SharedServer bool
 	// DelegationsEnabled gates the delegation recall case.
 	DelegationsEnabled bool
