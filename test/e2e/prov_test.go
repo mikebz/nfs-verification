@@ -32,7 +32,7 @@ import (
 //     PROV-06's case, not a leak.
 func TestProvProvisionMountWriteDelete(t *testing.T) {
 	f := framework.New(t, "PROV-01")
-	requireCap(t, f.Caps.MultiNode, "cross-node verification needs two schedulable workers")
+	requireCap(t, f.Caps.MultiNode, "cross-node verification needs two schedulable nodes")
 	ctx, cancel := caseCtx(t, 15*time.Minute)
 	defer cancel()
 
@@ -428,7 +428,7 @@ func TestProvConcurrentProvisioning(t *testing.T) {
 //  9. Delete pods and claims.
 func TestProvSnapshotAndRestore(t *testing.T) {
 	f := framework.New(t, "PROV-05")
-	requireCap(t, f.Caps.MultiNode, "PROV-05 requires two worker nodes to assert RWX mount")
+	requireCap(t, f.Caps.MultiNode, "PROV-05 requires two schedulable nodes to assert RWX mount")
 
 	ctx, cancel := caseCtx(t, 20*time.Minute)
 	defer cancel()
@@ -985,7 +985,7 @@ func TestProvRapidProvisionChurn(t *testing.T) {
 //     blocked rather than passed where no server pod was discovered.
 func TestProvVolumeNameEdgeCases(t *testing.T) {
 	f := framework.New(t, "PROV-10")
-	requireCap(t, f.Caps.MultiNode, "cross-node verification needs two schedulable workers")
+	requireCap(t, f.Caps.MultiNode, "cross-node verification needs two schedulable nodes")
 	ctx, cancel := caseCtx(t, 20*time.Minute)
 	defer cancel()
 
