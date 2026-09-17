@@ -42,13 +42,14 @@ func Run(ctx context.Context) (*Result, error) {
 		return nil, err
 	}
 
-	// Check: at least two schedulable workers.
+	// Check: at least two schedulable nodes. Two is the whole requirement; what
+	// else those nodes run is not the suite's concern. See WorkerNodes.
 	workers, err := framework.WorkerNodes(ctx, c)
 	if err != nil {
-		return nil, fmt.Errorf("listing worker nodes: %w", err)
+		return nil, fmt.Errorf("listing schedulable nodes: %w", err)
 	}
 	if len(workers) < 2 {
-		return nil, fmt.Errorf("insufficient nodes for cross-node cases: %d schedulable workers", len(workers))
+		return nil, fmt.Errorf("insufficient nodes for cross-node cases: %d schedulable nodes", len(workers))
 	}
 	caps.MultiNode = true
 

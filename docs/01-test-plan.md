@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-10
-Updated: 2026-09-16
+Updated: 2026-09-17
 Version: 1.0 (v1 scope)
 
 This is the requirements and delivery document: what gets verified, why, the
@@ -25,7 +25,7 @@ The suite refuses to run unless all of the following hold. `make preflight` exit
 | A PVC on that class binds within 120s | `RWX PVC did not bind` |
 | Two pods on two different nodes both mount it read-write | `RWX PVC not simultaneously mountable` |
 | The mount is NFS and negotiates 4.1 | `mount is not nfs4 vers=4.1` |
-| Cluster has >= 2 schedulable worker nodes | `insufficient nodes for cross-node cases` |
+| Cluster has >= 2 schedulable nodes | `insufficient nodes for cross-node cases` |
 | Privileged DaemonSet can be scheduled | `node-level assertions unavailable (Autopilot?)` |
 
 Preflight also records, and does not require as input:
@@ -56,7 +56,7 @@ These land in `artifacts/<run-id>/environment.json` and are attached to every fa
 | Portability rule | No distro-specific APIs. Kubernetes API plus portable Linux binaries (fio, dd, flock, stat) in test containers. |
 | Harness | Go, `client-go`, standard `testing` package. No Ginkgo. |
 | Execution | Local `make` targets with GitHub Actions CI for hermetic checks (fmt, vet, unit, build). |
-| Topology | 3 control plane, >= 2 workers. CNodes and DNodes colocated. No dedicated storage network. |
+| Topology | >= 2 schedulable nodes. Either dedicated workers alongside 3 control plane, or 3 nodes that each serve the API and the workloads, which is what GDC ships. The suite counts nodes it can schedule on and does not read role labels. CNodes and DNodes colocated. No dedicated storage network. |
 | Upgrade testing | Out of scope, deferred to v2 |
 | Multi-cluster | Out of scope |
 | Rights | Destructive and chaos operations permitted; clusters are disposable |
@@ -359,6 +359,7 @@ were settled while building the phases below and are stated here rather than in
 any one design doc, because a convention that lives inside a phase is one the
 next phase has to rediscover:
 
+- **"Worker" means a node the suite can schedule on, never a role label.** Where this plan, the design documents or a skip message says "schedulable workers", it means the nodes `WorkerNodes` returns: Ready, not cordoned, and carrying no taint a test pod would have to tolerate. Role labels are not read. A control-plane node that does not want workloads carries a `NoSchedule` taint and is excluded by that; one that does not is a node its operator runs workloads on, and a three-node cluster where every node serves both the API and the workloads is a supported topology, not a degraded one. Filtering on the label instead left such a cluster with nothing and stopped preflight for the wrong reason.
 - **Fault operations live in `pkg/chaos`, not on the per-case fixture.** Faults are the one thing a reader should be able to enumerate in one file, and a fault that records itself cannot be forgotten by the case that injected it.
 - **Targets are resolved live, at case time, never from the cached environment record.** Preflight names the pod that was there when it ran; the chaos cases move pods around. A stale target either fails to act or acts on the wrong thing.
 - **A fault that was not injected is never measured.** An operation that cannot identify its target, or that matched nothing, is an error, and the case reports blocked. A recovery measured from a fault that never landed passes for the wrong reason.

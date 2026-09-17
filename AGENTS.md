@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-10
-Updated: 2026-09-14
+Updated: 2026-09-17
 
 This repository is a test harness, not a product. It verifies NFS RWX
 persistent volumes on Kubernetes by driving a real cluster and asserting what a
@@ -28,7 +28,7 @@ that renaming or renumbering one does not leave a stale pointer here.
    someone a node and a day of attribution.
 2. **You almost certainly cannot run the thing you are changing.** Unit tests
    run anywhere. Preflight and the cases need a cluster with an RWX class, a
-   reachable NFS server, and two schedulable workers. Every real bug found so
+   reachable NFS server, and two schedulable nodes. Every real bug found so
    far was found by running against a live cluster, not by reading the code.
 3. **A wrong assertion is worse than no assertion.** A suite that reports a node
    reboot as a storage defect, or that measures failover against an unknown

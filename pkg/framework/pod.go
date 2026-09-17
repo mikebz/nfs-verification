@@ -233,8 +233,17 @@ func (f *Framework) MustShf(ctx context.Context, pod, format string, args ...any
 	return out
 }
 
-// WorkerNodes returns schedulable nodes that are not control plane, sorted for
+// WorkerNodes returns the nodes this suite can put a test pod on, sorted for
 // determinism so that a rerun pins the same pods to the same nodes.
+//
+// Schedulability is the whole test: Ready, not cordoned, and carrying no taint
+// a test pod would have to tolerate. What else a node does is not the harness's
+// business. Role labels are deliberately not consulted: a control-plane node
+// that does not want workloads says so with a NoSchedule taint and drops out
+// below, and one that carries no such taint belongs to a cluster whose operator
+// runs workloads there. Filtering on the label instead refused to run at all on
+// a three-node cluster where every node serves both the API and the workloads,
+// which is the shape GDC ships.
 func (f *Framework) WorkerNodes(ctx context.Context) ([]string, error) {
 	return WorkerNodes(ctx, f.C)
 }
@@ -248,25 +257,13 @@ func WorkerNodes(ctx context.Context, c *Client) ([]string, error) {
 	var out []string
 	for i := range nodes.Items {
 		n := &nodes.Items[i]
-		if n.Spec.Unschedulable || isControlPlaneNode(n) || !nodeReady(n) || hasBlockingTaint(n) {
+		if n.Spec.Unschedulable || !nodeReady(n) || hasBlockingTaint(n) {
 			continue
 		}
 		out = append(out, n.Name)
 	}
 	sort.Strings(out)
 	return out, nil
-}
-
-// isControlPlaneNode reports whether n carries either the standard Kubernetes
-// control-plane role label or the legacy master role label.
-func isControlPlaneNode(n *corev1.Node) bool {
-	if _, ok := n.Labels["node-role.kubernetes.io/control-plane"]; ok {
-		return true
-	}
-	if _, ok := n.Labels["node-role.kubernetes.io/master"]; ok {
-		return true
-	}
-	return false
 }
 
 // hasBlockingTaint reports whether n carries a taint that prevents ordinary
@@ -291,16 +288,16 @@ func nodeReady(n *corev1.Node) bool {
 	return false
 }
 
-// TwoNodes returns two distinct schedulable worker nodes, failing the test when
-// the cluster cannot host a cross-node case.
+// TwoNodes returns two distinct schedulable nodes, failing the test when the
+// cluster cannot host a cross-node case.
 func (f *Framework) TwoNodes(ctx context.Context) (string, string) {
 	f.T.Helper()
 	nodes, err := f.WorkerNodes(ctx)
 	if err != nil {
-		f.T.Fatalf("listing worker nodes: %v", err)
+		f.T.Fatalf("listing schedulable nodes: %v", err)
 	}
 	if len(nodes) < 2 {
-		f.T.Fatalf("insufficient nodes for cross-node cases: %d schedulable workers", len(nodes))
+		f.T.Fatalf("insufficient nodes for cross-node cases: %d schedulable nodes", len(nodes))
 	}
 	return nodes[0], nodes[1]
 }
