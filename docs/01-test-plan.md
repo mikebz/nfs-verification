@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-10
-Updated: 2026-09-16
+Updated: 2026-09-17
 Version: 1.0 (v1 scope)
 
 This is the requirements and delivery document: what gets verified, why, the
@@ -25,7 +25,7 @@ The suite refuses to run unless all of the following hold. `make preflight` exit
 | A PVC on that class binds within 120s | `RWX PVC did not bind` |
 | Two pods on two different nodes both mount it read-write | `RWX PVC not simultaneously mountable` |
 | The mount is NFS and negotiates 4.1 | `mount is not nfs4 vers=4.1` |
-| Cluster has >= 2 schedulable worker nodes | `insufficient nodes for cross-node cases` |
+| Cluster has >= 2 schedulable nodes | `insufficient nodes for cross-node cases` |
 | Privileged DaemonSet can be scheduled | `node-level assertions unavailable (Autopilot?)` |
 
 Preflight also records, and does not require as input:
@@ -56,7 +56,7 @@ These land in `artifacts/<run-id>/environment.json` and are attached to every fa
 | Portability rule | No distro-specific APIs. Kubernetes API plus portable Linux binaries (fio, dd, flock, stat) in test containers. |
 | Harness | Go, `client-go`, standard `testing` package. No Ginkgo. |
 | Execution | Local `make` targets with GitHub Actions CI for hermetic checks (fmt, vet, unit, build). |
-| Topology | 3 control plane, >= 2 workers. CNodes and DNodes colocated. No dedicated storage network. |
+| Topology | >= 2 schedulable nodes. Either dedicated workers alongside 3 control plane, or 3 nodes that each serve the API and the workloads, which is what GDC ships. The suite counts nodes it can schedule on and does not read role labels. CNodes and DNodes colocated. No dedicated storage network. |
 | Upgrade testing | Out of scope, deferred to v2 |
 | Multi-cluster | Out of scope |
 | Rights | Destructive and chaos operations permitted; clusters are disposable |
