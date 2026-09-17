@@ -248,22 +248,38 @@ func WorkerNodes(ctx context.Context, c *Client) ([]string, error) {
 	var out []string
 	for i := range nodes.Items {
 		n := &nodes.Items[i]
-		if n.Spec.Unschedulable {
-			continue
-		}
-		if _, ok := n.Labels["node-role.kubernetes.io/control-plane"]; ok {
-			continue
-		}
-		if _, ok := n.Labels["node-role.kubernetes.io/master"]; ok {
-			continue
-		}
-		if !nodeReady(n) {
+		if n.Spec.Unschedulable || isControlPlaneNode(n) || !nodeReady(n) || hasBlockingTaint(n) {
 			continue
 		}
 		out = append(out, n.Name)
 	}
 	sort.Strings(out)
 	return out, nil
+}
+
+// isControlPlaneNode reports whether n carries either the standard Kubernetes
+// control-plane role label or the legacy master role label.
+func isControlPlaneNode(n *corev1.Node) bool {
+	if _, ok := n.Labels["node-role.kubernetes.io/control-plane"]; ok {
+		return true
+	}
+	if _, ok := n.Labels["node-role.kubernetes.io/master"]; ok {
+		return true
+	}
+	return false
+}
+
+// hasBlockingTaint reports whether n carries a taint that prevents ordinary
+// pods from scheduling. Test pods rendered by PodBuilder carry no tolerations
+// and pin nodes via nodeSelector (so WaitForFirstConsumer claims bind through
+// kube-scheduler), meaning any NoSchedule or NoExecute taint blocks scheduling.
+func hasBlockingTaint(n *corev1.Node) bool {
+	for _, t := range n.Spec.Taints {
+		if t.Effect == corev1.TaintEffectNoSchedule || t.Effect == corev1.TaintEffectNoExecute {
+			return true
+		}
+	}
+	return false
 }
 
 func nodeReady(n *corev1.Node) bool {
