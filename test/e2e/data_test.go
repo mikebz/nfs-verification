@@ -28,7 +28,7 @@ import (
 //  3. Read it on the reader and compare.
 func TestDataCloseToOpen(t *testing.T) {
 	f := framework.New(t, "DATA-03")
-	requireCap(t, f.Caps.MultiNode, "cross-node close-to-open needs two schedulable workers")
+	requireCap(t, f.Caps.MultiNode, "cross-node close-to-open needs two schedulable nodes")
 	ctx, cancel := caseCtx(t, 10*time.Minute)
 	defer cancel()
 
@@ -70,7 +70,7 @@ func TestDataCloseToOpen(t *testing.T) {
 //     must be refused, and the refusal must name the range actually held.
 func TestDataLocksAcrossNodes(t *testing.T) {
 	f := framework.New(t, "DATA-05")
-	requireCap(t, f.Caps.MultiNode, "cross-node locking needs two schedulable workers")
+	requireCap(t, f.Caps.MultiNode, "cross-node locking needs two schedulable nodes")
 	ctx, cancel := caseCtx(t, 15*time.Minute)
 	defer cancel()
 
@@ -254,7 +254,7 @@ func assertRangesExcludeEachOther(ctx context.Context, t *testing.T, f *framewor
 // not about coordination between them, which is DATA-02 and DATA-05.
 //
 // Steps:
-//  1. Put four pods on the available worker nodes, round robin, on one claim.
+//  1. Put four pods on the available schedulable nodes, round robin, on one claim.
 //  2. Have all four write a megabyte each, at the same time, to their own file
 //     with their own seed.
 //  3. Verify each file from a pod that did not write it, so the read crosses
@@ -267,12 +267,12 @@ func TestDataConcurrentWritersDistinctFiles(t *testing.T) {
 	ctx, cancel := caseCtx(t, 20*time.Minute)
 	defer cancel()
 
-	nodes, err := f.WorkerNodes(ctx)
+	nodes, err := f.SchedulableNodes(ctx)
 	if err != nil {
-		t.Fatalf("listing worker nodes: %v", err)
+		t.Fatalf("listing schedulable nodes: %v", err)
 	}
 	if len(nodes) == 0 {
-		t.Fatalf("no schedulable worker nodes")
+		t.Fatalf("no schedulable nodes")
 	}
 	const writers = 4
 	pvc := f.MustRWXPVC(ctx, "data01")
@@ -356,7 +356,7 @@ func TestDataConcurrentWritersDistinctFiles(t *testing.T) {
 //  5. The reader must then see the whole payload, and the delay is logged.
 func TestDataNoVisibilityBeforeClose(t *testing.T) {
 	f := framework.New(t, "DATA-04")
-	requireCap(t, f.Caps.MultiNode, "the cross-node visibility boundary needs two schedulable workers")
+	requireCap(t, f.Caps.MultiNode, "the cross-node visibility boundary needs two schedulable nodes")
 	ctx, cancel := caseCtx(t, 15*time.Minute)
 	defer cancel()
 
@@ -433,7 +433,7 @@ const appendCaveat = "\n\nNote before filing: NFSv4.1 has no append operation. A
 // pass as an answer either way.
 //
 // Steps:
-//  1. Put four pods on the available worker nodes, round robin, on one claim,
+//  1. Put four pods on the available schedulable nodes, round robin, on one claim,
 //     and truncate the shared file.
 //  2. Have all four append fifty short records at the same time, each through
 //     one descriptor held open for its whole loop.
@@ -453,12 +453,12 @@ func TestDataConcurrentAppendToOneFile(t *testing.T) {
 	ctx, cancel := caseCtx(t, 20*time.Minute)
 	defer cancel()
 
-	nodes, err := f.WorkerNodes(ctx)
+	nodes, err := f.SchedulableNodes(ctx)
 	if err != nil {
-		t.Fatalf("listing worker nodes: %v", err)
+		t.Fatalf("listing schedulable nodes: %v", err)
 	}
 	if len(nodes) == 0 {
-		t.Fatalf("no schedulable worker nodes")
+		t.Fatalf("no schedulable nodes")
 	}
 	// Records are one short line each, well under a page, so a torn record
 	// means the append path tore it and not that the record was too large to
@@ -649,7 +649,7 @@ var appendRecord = regexp.MustCompile(`^record-from-[a-z0-9-]+-\d{4}$`)
 //     the interval as a descriptor close or a lease expiry.
 func TestDataLockReleasedAfterForcedPodLoss(t *testing.T) {
 	f := framework.New(t, "DATA-06")
-	requireCap(t, f.Caps.MultiNode, "re-acquiring a lock from another client needs two schedulable workers")
+	requireCap(t, f.Caps.MultiNode, "re-acquiring a lock from another client needs two schedulable nodes")
 	ctx, cancel := caseCtx(t, 20*time.Minute)
 	defer cancel()
 
@@ -784,7 +784,7 @@ func TestDataLockReleasedAfterForcedPodLoss(t *testing.T) {
 //     nor a lost write can read as a pass.
 func TestDataDirectIOFromTwoPods(t *testing.T) {
 	f := framework.New(t, "DATA-07")
-	requireCap(t, f.Caps.MultiNode, "contrasting two clients' direct I/O needs two schedulable workers")
+	requireCap(t, f.Caps.MultiNode, "contrasting two clients' direct I/O needs two schedulable nodes")
 	ctx, cancel := caseCtx(t, 15*time.Minute)
 	defer cancel()
 
@@ -794,7 +794,7 @@ func TestDataDirectIOFromTwoPods(t *testing.T) {
 	f.MustPod(ctx, toolsPod(podA, pvc.Name, nodeA))
 	f.MustPod(ctx, toolsPod(podB, pvc.Name, nodeB))
 
-	// Every node that will do direct I/O, not just the first. Two workers can
+	// Every node that will do direct I/O, not just the first. Two nodes can
 	// run different kernels and different NFS clients, and a second node that
 	// rejects O_DIRECT after the first probe passed would have its refusal
 	// reported as a data failure.
@@ -882,7 +882,7 @@ func TestDataDirectIOFromTwoPods(t *testing.T) {
 //     sees the bytes before the writer closes.
 func TestDataNoacVisibilityWithoutClose(t *testing.T) {
 	f := framework.New(t, "DATA-08")
-	requireCap(t, f.Caps.MultiNode, "contrasting two mounts of one export needs two schedulable workers")
+	requireCap(t, f.Caps.MultiNode, "contrasting two mounts of one export needs two schedulable nodes")
 	ctx, cancel := caseCtx(t, 20*time.Minute)
 	defer cancel()
 
@@ -978,7 +978,7 @@ func TestDataNoacVisibilityWithoutClose(t *testing.T) {
 //  3. Rename, in both shapes: a descriptor must follow the file, not the name.
 func TestDataSillyRenameAndOpenDescriptors(t *testing.T) {
 	f := framework.New(t, "DATA-09")
-	requireCap(t, f.Caps.MultiNode, "the cross-node half needs two schedulable workers")
+	requireCap(t, f.Caps.MultiNode, "the cross-node half needs two schedulable nodes")
 	ctx, cancel := caseCtx(t, 20*time.Minute)
 	defer cancel()
 
@@ -1185,7 +1185,7 @@ const dirEntries = 100000
 //     counts go in the bundle.
 func TestDataLargeDirectoryReaddirUnderDeletes(t *testing.T) {
 	f := framework.New(t, "DATA-10")
-	requireCap(t, f.Caps.MultiNode, "listing from a pod that is not deleting needs two schedulable workers")
+	requireCap(t, f.Caps.MultiNode, "listing from a pod that is not deleting needs two schedulable nodes")
 	ctx, cancel := caseCtx(t, 40*time.Minute)
 	defer cancel()
 
@@ -1317,9 +1317,9 @@ func TestDataSparseFileAndHolePunch(t *testing.T) {
 	ctx, cancel := caseCtx(t, 15*time.Minute)
 	defer cancel()
 
-	nodes, err := f.WorkerNodes(ctx)
+	nodes, err := f.SchedulableNodes(ctx)
 	if err != nil || len(nodes) == 0 {
-		t.Fatalf("listing worker nodes: %v", err)
+		t.Fatalf("listing schedulable nodes: %v", err)
 	}
 	pvc := f.MustRWXPVC(ctx, "data11")
 	const pod = "sparse"

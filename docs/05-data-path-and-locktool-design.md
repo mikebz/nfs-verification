@@ -148,7 +148,7 @@ profile-driven timing) live in [`01-test-plan.md`](01-test-plan.md) Section 4.1.
 
 ### DATA-01: Concurrent writers to distinct files
 - **Steps**:
-  1. Schedule four client pods round-robin across schedulable worker nodes on one RWX claim.
+  1. Schedule four client pods round-robin across schedulable nodes on one RWX claim.
   2. Concurrently write a 1MiB file from each pod with a distinct pseudorandom seed.
   3. Verify each file from a pod on a different node to cross the server and avoid local cache hits.
   4. Assert all four checksums match the writer's generated seed and that all four checksums are distinct.
@@ -158,7 +158,7 @@ profile-driven timing) live in [`01-test-plan.md`](01-test-plan.md) Section 4.1.
 - **Steps**:
   1. Schedule four appender pods across worker nodes and truncate the shared file.
   2. Concurrently append 50 records (one short line each) per pod through an open file descriptor.
-  3. Read back the entire file from a dedicated non-writing reader pod (placed on an unused node when more than 4 workers are available) to cross the server and avoid local cache hits.
+  3. Read back the entire file from a dedicated non-writing reader pod (placed on an unused node when more than 4 nodes are available) to cross the server and avoid local cache hits.
   4. Assert every line is a whole, untorn record, and no record is duplicated (torn records fail immediately as corruption).
   5. Check total line count against 200 expected records; if lines were lost, report failure with the implementation caveat and list the missing record IDs per appender ([F-016](findings.md)).
 

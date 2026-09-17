@@ -43,13 +43,13 @@ func Run(ctx context.Context) (*Result, error) {
 	}
 
 	// Check: at least two schedulable nodes. Two is the whole requirement; what
-	// else those nodes run is not the suite's concern. See WorkerNodes.
-	workers, err := framework.WorkerNodes(ctx, c)
+	// else those nodes run is not the suite's concern. See SchedulableNodes.
+	nodes, err := framework.SchedulableNodes(ctx, c)
 	if err != nil {
 		return nil, fmt.Errorf("listing schedulable nodes: %w", err)
 	}
-	if len(workers) < 2 {
-		return nil, fmt.Errorf("insufficient nodes for cross-node cases: %d schedulable nodes", len(workers))
+	if len(nodes) < 2 {
+		return nil, fmt.Errorf("insufficient nodes for cross-node cases: %d schedulable nodes", len(nodes))
 	}
 	caps.MultiNode = true
 
@@ -68,7 +68,7 @@ func Run(ctx context.Context) (*Result, error) {
 	fx, closeFx := framework.NewSystem(c, e, caps, "PREFLIGHT")
 	defer closeFx(context.WithoutCancel(ctx))
 
-	sc, podA, podB, err := findRWXClass(ctx, c, fx, workers[0], workers[1])
+	sc, podA, podB, err := findRWXClass(ctx, c, fx, nodes[0], nodes[1])
 	if err != nil {
 		return nil, err
 	}
