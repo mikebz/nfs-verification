@@ -49,7 +49,7 @@ const (
 //     on both is the server, wrong only on the reader is that node's idmapper.
 func TestSecOwnershipPreservedAcrossPods(t *testing.T) {
 	f := framework.New(t, "SEC-01")
-	requireCap(t, f.Caps.MultiNode, "reading ownership from a second client needs two schedulable workers")
+	requireCap(t, f.Caps.MultiNode, "reading ownership from a second client needs two schedulable nodes")
 	ctx, cancel := caseCtx(t, 15*time.Minute)
 	defer cancel()
 
@@ -173,7 +173,7 @@ func nobodyNote(o framework.Owner) string {
 //     when that is what the display reflects.
 func TestSecOwnershipChangePrivilege(t *testing.T) {
 	f := framework.New(t, "SEC-02")
-	requireCap(t, f.Caps.MultiNode, "requiring one rule on every client needs two schedulable workers")
+	requireCap(t, f.Caps.MultiNode, "requiring one rule on every client needs two schedulable nodes")
 	ctx, cancel := caseCtx(t, 15*time.Minute)
 	defer cancel()
 
@@ -375,9 +375,9 @@ func TestSecFSGroupOnAnNFSVolume(t *testing.T) {
 	ctx, cancel := caseCtx(t, 25*time.Minute)
 	defer cancel()
 
-	nodes, err := f.WorkerNodes(ctx)
+	nodes, err := f.SchedulableNodes(ctx)
 	if err != nil || len(nodes) == 0 {
-		t.Fatalf("listing worker nodes: %v", err)
+		t.Fatalf("listing schedulable nodes: %v", err)
 	}
 	// One node for every pod here. The question is what kubelet does to the
 	// volume on mount, and spreading the pods would add a second kubelet's
@@ -723,7 +723,7 @@ const nfsPort = 2049
 // the server still has it — which is precisely the failure being hunted. Node B
 // cannot ask either, because node B is the client that had to leave. So the
 // question is put to a third node, which holds no lock on the file and must
-// therefore go to the server for its answer. A cluster with two workers cannot
+// therefore go to the server for its answer. A cluster with two nodes cannot
 // answer this case correctly and skips rather than asserting something its own
 // kernel decided.
 //
@@ -747,21 +747,21 @@ const nfsPort = 2049
 //     must still be able to read and write through its mount.
 func TestSecServerKeepsTwoClientsStateApart(t *testing.T) {
 	f := framework.New(t, "SEC-04")
-	requireCap(t, f.Caps.MultiNode, "asking whether two clients' state is separable needs two schedulable workers")
+	requireCap(t, f.Caps.MultiNode, "asking whether two clients' state is separable needs two schedulable nodes")
 	ctx, cancel := caseCtx(t, 20*time.Minute)
 	defer cancel()
 
-	workers, err := f.WorkerNodes(ctx)
+	nodes, err := f.SchedulableNodes(ctx)
 	if err != nil {
-		t.Fatalf("listing worker nodes: %v", err)
+		t.Fatalf("listing schedulable nodes: %v", err)
 	}
-	// A third worker is a capability, not a preference. Without an observer
+	// A third node is a capability, not a preference. Without an observer
 	// that holds no lock on the file, the only clients left to ask are the one
 	// whose kernel would answer from its own table and the one that had to
 	// leave, and a pass from either says nothing about the server.
-	requireCap(t, len(workers) >= 3, "observing one node's lock after another node leaves needs a third "+
-		"schedulable worker: the holder's own client answers F_GETLK locally, and the leaver is gone")
-	nodeA, nodeB, nodeC := workers[0], workers[1], workers[2]
+	requireCap(t, len(nodes) >= 3, "observing one node's lock after another node leaves needs a third "+
+		"schedulable node: the holder's own client answers F_GETLK locally, and the leaver is gone")
+	nodeA, nodeB, nodeC := nodes[0], nodes[1], nodes[2]
 
 	pvc := f.MustRWXPVC(ctx, "sec04")
 	const stayer, leaver, observer = "stayer", "leaver", "observer"
@@ -1088,9 +1088,9 @@ func TestSecClientIdentityAcrossAddressFamilies(t *testing.T) {
 	ctx, cancel := caseCtx(t, 20*time.Minute)
 	defer cancel()
 
-	nodes, err := f.WorkerNodes(ctx)
+	nodes, err := f.SchedulableNodes(ctx)
 	if err != nil || len(nodes) == 0 {
-		t.Fatalf("listing worker nodes: %v", err)
+		t.Fatalf("listing schedulable nodes: %v", err)
 	}
 	// One node throughout. Two families from one client is the subject; two
 	// clients is SEC-04's.
@@ -1456,9 +1456,9 @@ func TestSecDataPathConfidentiality(t *testing.T) {
 	ctx, cancel := caseCtx(t, 15*time.Minute)
 	defer cancel()
 
-	nodes, err := f.WorkerNodes(ctx)
+	nodes, err := f.SchedulableNodes(ctx)
 	if err != nil || len(nodes) == 0 {
-		t.Fatalf("listing worker nodes: %v", err)
+		t.Fatalf("listing schedulable nodes: %v", err)
 	}
 	node := nodes[0]
 	pvc := f.MustRWXPVC(ctx, "sec08")

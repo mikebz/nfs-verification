@@ -51,7 +51,7 @@ func startChaosCase(ctx context.Context, t *testing.T, f *framework.Framework, i
 func startChaosCaseWith(ctx context.Context, t *testing.T, f *framework.Framework, id string,
 	load framework.WriteLoadSpec) chaosSetup {
 	t.Helper()
-	requireCap(t, f.Caps.MultiNode, "verifying committed data from a second client needs two schedulable workers")
+	requireCap(t, f.Caps.MultiNode, "verifying committed data from a second client needs two schedulable nodes")
 	target, err := chaos.ServerTarget(ctx, f)
 	if err != nil {
 		t.Skipf("blocked: %v", err)
@@ -874,9 +874,9 @@ func assertRangesSurvivedFailover(ctx context.Context, t *testing.T, f *framewor
 	// it shares a node with one holder, and that refusal is the client's own
 	// lock manager rather than the server's. Said out loud, because a refusal
 	// that never reached the server proves less.
-	nodes, err := f.WorkerNodes(ctx)
+	nodes, err := f.SchedulableNodes(ctx)
 	if err != nil {
-		t.Fatalf("listing worker nodes: %v", err)
+		t.Fatalf("listing schedulable nodes: %v", err)
 	}
 	thirdNode := d.holderNode
 	if len(nodes) > 2 {
@@ -888,7 +888,7 @@ func assertRangesSurvivedFailover(ctx context.Context, t *testing.T, f *framewor
 		}
 	}
 	if thirdNode == d.holderNode {
-		t.Logf("this cluster has %d workers, so the third client shares %s with %s: its refusal on %s "+
+		t.Logf("this cluster has %d schedulable nodes, so the third client shares %s with %s: its refusal on %s "+
 			"is the client's own lock manager, and only its refusal on %s crosses the server",
 			len(nodes), thirdNode, d.holderPod, rangeA, rangeB)
 	}

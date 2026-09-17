@@ -10,7 +10,7 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 )
 
-// TestWorkerNodesSelection checks that WorkerNodes counts a node when a test
+// TestSchedulableNodesSelection checks that SchedulableNodes counts a node when a test
 // pod could land on it, and not otherwise. Role labels play no part: a
 // three-node cluster where every node runs the API server and the workloads
 // yields three usable nodes, which is what GDC ships and what an earlier
@@ -22,10 +22,10 @@ import (
 //
 // Steps:
 //  1. Seed a fake clientset with the case's nodes.
-//  2. Call WorkerNodes.
+//  2. Call SchedulableNodes.
 //  3. Compare against the names a pinned pod could actually be scheduled on,
 //     in sorted order.
-func TestWorkerNodesSelection(t *testing.T) {
+func TestSchedulableNodesSelection(t *testing.T) {
 	ready := corev1.NodeStatus{Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}}}
 	notReady := corev1.NodeStatus{Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionFalse}}}
 	controlPlane := map[string]string{"node-role.kubernetes.io/control-plane": ""}
@@ -91,9 +91,9 @@ func TestWorkerNodesSelection(t *testing.T) {
 					t.Fatalf("seeding node %s: %v", n.Name, err)
 				}
 			}
-			got, err := WorkerNodes(ctx, &Client{Kube: kube})
+			got, err := SchedulableNodes(ctx, &Client{Kube: kube})
 			if err != nil {
-				t.Fatalf("WorkerNodes failed: %v", err)
+				t.Fatalf("SchedulableNodes failed: %v", err)
 			}
 			if !slices.Equal(got, tc.want) {
 				t.Errorf("got %v, want %v", got, tc.want)

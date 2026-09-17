@@ -243,7 +243,7 @@ locally, without asking the server, so node A asking whether node A's lock
 survived returns held whatever the server thinks — which is precisely the
 failure this case hunts. A third pod on a third node, holding nothing, does the
 asking; its answers can only have come from the server. Node B cannot do it: node
-B is the client that had to leave. That makes three schedulable workers a
+B is the client that had to leave. That makes three schedulable nodes a
 precondition, and a smaller cluster skips.
 
 **What changed after this was written.** The first implementation asked a

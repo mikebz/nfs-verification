@@ -237,7 +237,7 @@ the core assertions across the Resiliency & Chaos test group:
 - **Un-reclaimed state held throughout grace probe**: Prevents premature grace lifting, ensuring
   the server actively enforces state protection.
 - **Multi-node guards (`requireCap(t, f.Caps.MultiNode)`)**: Every test reading back data or
-  testing locks across clients requires multiple schedulable workers; single-node clusters skip
+  testing locks across clients requires multiple schedulable nodes; single-node clusters skip
   honestly rather than failing.
 - **Blanket core dump rule (Step 10 target)**: Any server core dump during any chaos case fails
   the suite immediately; automated core sweep and artifact packaging will land in Step 10.

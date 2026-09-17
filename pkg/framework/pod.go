@@ -233,7 +233,7 @@ func (f *Framework) MustShf(ctx context.Context, pod, format string, args ...any
 	return out
 }
 
-// WorkerNodes returns the nodes this suite can put a test pod on, sorted for
+// SchedulableNodes returns the nodes this suite can put a test pod on, sorted for
 // determinism so that a rerun pins the same pods to the same nodes.
 //
 // Schedulability is the whole test: Ready, not cordoned, and carrying no taint
@@ -244,12 +244,12 @@ func (f *Framework) MustShf(ctx context.Context, pod, format string, args ...any
 // runs workloads there. Filtering on the label instead refused to run at all on
 // a three-node cluster where every node serves both the API and the workloads,
 // which is the shape GDC ships.
-func (f *Framework) WorkerNodes(ctx context.Context) ([]string, error) {
-	return WorkerNodes(ctx, f.C)
+func (f *Framework) SchedulableNodes(ctx context.Context) ([]string, error) {
+	return SchedulableNodes(ctx, f.C)
 }
 
-// WorkerNodes is the client-level form, usable before a fixture exists.
-func WorkerNodes(ctx context.Context, c *Client) ([]string, error) {
+// SchedulableNodes is the client-level form, usable before a fixture exists.
+func SchedulableNodes(ctx context.Context, c *Client) ([]string, error) {
 	nodes, err := c.Kube.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, err
@@ -292,7 +292,7 @@ func nodeReady(n *corev1.Node) bool {
 // cluster cannot host a cross-node case.
 func (f *Framework) TwoNodes(ctx context.Context) (string, string) {
 	f.T.Helper()
-	nodes, err := f.WorkerNodes(ctx)
+	nodes, err := f.SchedulableNodes(ctx)
 	if err != nil {
 		f.T.Fatalf("listing schedulable nodes: %v", err)
 	}

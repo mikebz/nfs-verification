@@ -99,7 +99,7 @@ the provisioning test group adheres to strict architectural safety rules:
    automated framework teardown to reclaim backing storage (a mid-test failure before this point leaves the PV in `Retain` for manual triage).
 4. **Capability-guarded checks**: Tests requiring multi-node scheduling (`PROV-01`, `PROV-05`, `PROV-10`)
    guard execution via `requireCap(t, f.Caps.MultiNode, ...)`. While preflight enforces at least two
-   schedulable workers as a precondition for the suite, the case-level guard enforces capability discipline.
+   schedulable nodes as a precondition for the suite, the case-level guard enforces capability discipline.
 
 ---
 

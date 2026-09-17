@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-10
-Updated: 2026-09-16
+Updated: 2026-09-17
 
 End-to-end verification of NFS RWX persistent volumes on Kubernetes.
 
@@ -110,7 +110,7 @@ the generated run ID. `make unit` needs no cluster, no network and no
 kubeconfig, and unit tests must stay that way: a test under `pkg/` that needs a
 cluster belongs in `test/e2e` behind a capability check.
 
-**Worker nodes need at least 4GB of memory**, which on GKE means `e2-medium` or
+**The nodes the suite schedules on need at least 4GB of memory**, which on GKE means `e2-medium` or
 larger. A 2GB node (`e2-small`) cannot host the suite: the platform's own system
 daemons already account for most of that, and the nodes then reboot mid-run,
 which from inside a case is indistinguishable from the storage failures the plan
