@@ -29,6 +29,7 @@ func TestWorkerNodesSelection(t *testing.T) {
 	ready := corev1.NodeStatus{Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}}}
 	notReady := corev1.NodeStatus{Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionFalse}}}
 	controlPlane := map[string]string{"node-role.kubernetes.io/control-plane": ""}
+	legacyMaster := map[string]string{"node-role.kubernetes.io/master": ""}
 
 	cases := []struct {
 		name  string
@@ -37,10 +38,12 @@ func TestWorkerNodesSelection(t *testing.T) {
 	}{
 		{
 			// Names are out of order so that the sort is actually exercised.
+			// Both role labels appear, so restoring either half of the old
+			// filter fails here.
 			name: "every node runs the API server and the workloads",
 			nodes: []*corev1.Node{
 				{ObjectMeta: metav1.ObjectMeta{Name: "node-c", Labels: controlPlane}, Status: ready},
-				{ObjectMeta: metav1.ObjectMeta{Name: "node-a", Labels: controlPlane}, Status: ready},
+				{ObjectMeta: metav1.ObjectMeta{Name: "node-a", Labels: legacyMaster}, Status: ready},
 				{
 					ObjectMeta: metav1.ObjectMeta{Name: "node-b", Labels: controlPlane},
 					Spec:       corev1.NodeSpec{Taints: []corev1.Taint{{Key: "node-role.kubernetes.io/control-plane", Effect: corev1.TaintEffectPreferNoSchedule}}},
