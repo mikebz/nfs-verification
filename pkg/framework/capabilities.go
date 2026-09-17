@@ -3,7 +3,7 @@ package framework
 // Capabilities is what the cluster in front of us can actually do. Every case
 // is skippable by capability, never by platform name.
 type Capabilities struct {
-	// MultiNode: at least two schedulable workers.
+	// MultiNode: at least two schedulable nodes, whatever else they run.
 	MultiNode bool
 	// NodeAgent: the privileged DaemonSet scheduled, so /proc/mounts, dmesg and
 	// process signals are available.

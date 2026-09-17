@@ -10,23 +10,26 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 )
 
-// TestWorkerNodesSelection verifies that WorkerNodes returns only Ready,
-// schedulable worker nodes without NoSchedule or NoExecute taints, excludes
-// control-plane nodes (both control-plane and master labels), and sorts the
-// returned node names deterministically (test plan Section 0 and Section 1).
+// TestWorkerNodesSelection checks that WorkerNodes counts a node when a test
+// pod could land on it, and not otherwise. Role labels play no part: a
+// three-node cluster where every node runs the API server and the workloads
+// yields three usable nodes, which is what GDC ships and what an earlier
+// role-label filter refused to run on.
 //
-// Why this test exists: test pods rendered by PodBuilder carry no tolerations
-// and pin nodes via nodeSelector so WaitForFirstConsumer claims bind through
-// kube-scheduler. Returning a tainted or unschedulable node causes pinned test
-// pods to hang Pending rather than failing preflight loudly.
+// Why this test exists: test pods carry no tolerations and pin their node with
+// a nodeSelector, so a node returned here that will not accept one leaves the
+// pod Pending until the case times out, with nothing naming the cause.
 //
 // Steps:
-//  1. Seed a fake clientset with each table case's node list.
+//  1. Seed a fake clientset with the case's nodes.
 //  2. Call WorkerNodes.
-//  3. Assert the returned slice matches the expected sorted list of worker names.
+//  3. Compare against the names a pinned pod could actually be scheduled on,
+//     in sorted order.
 func TestWorkerNodesSelection(t *testing.T) {
-	ready := []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}}
-	notReady := []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionFalse}}
+	ready := corev1.NodeStatus{Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}}}
+	notReady := corev1.NodeStatus{Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionFalse}}}
+	controlPlane := map[string]string{"node-role.kubernetes.io/control-plane": ""}
+	legacyMaster := map[string]string{"node-role.kubernetes.io/master": ""}
 
 	cases := []struct {
 		name  string
@@ -34,119 +37,48 @@ func TestWorkerNodesSelection(t *testing.T) {
 		want  []string
 	}{
 		{
-			name: "excludes control-plane and master labeled nodes",
+			// Names are out of order so that the sort is actually exercised.
+			// Both role labels appear, so restoring either half of the old
+			// filter fails here.
+			name: "every node runs the API server and the workloads",
 			nodes: []*corev1.Node{
+				{ObjectMeta: metav1.ObjectMeta{Name: "node-c", Labels: controlPlane}, Status: ready},
+				{ObjectMeta: metav1.ObjectMeta{Name: "node-a", Labels: legacyMaster}, Status: ready},
 				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:   "cp-1",
-						Labels: map[string]string{"node-role.kubernetes.io/control-plane": ""},
-					},
-					Status: corev1.NodeStatus{Conditions: ready},
-				},
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:   "master-1",
-						Labels: map[string]string{"node-role.kubernetes.io/master": ""},
-					},
-					Status: corev1.NodeStatus{Conditions: ready},
-				},
-				{
-					ObjectMeta: metav1.ObjectMeta{Name: "worker-1"},
-					Status:     corev1.NodeStatus{Conditions: ready},
+					ObjectMeta: metav1.ObjectMeta{Name: "node-b", Labels: controlPlane},
+					Spec:       corev1.NodeSpec{Taints: []corev1.Taint{{Key: "node-role.kubernetes.io/control-plane", Effect: corev1.TaintEffectPreferNoSchedule}}},
+					Status:     ready,
 				},
 			},
-			want: []string{"worker-1"},
+			want: []string{"node-a", "node-b", "node-c"},
 		},
 		{
-			name: "excludes workers with NoSchedule or NoExecute taints and accepts PreferNoSchedule",
+			name: "a node that would not take a pinned pod does not count",
 			nodes: []*corev1.Node{
+				{ObjectMeta: metav1.ObjectMeta{Name: "cordoned"}, Spec: corev1.NodeSpec{Unschedulable: true}, Status: ready},
+				{ObjectMeta: metav1.ObjectMeta{Name: "not-ready"}, Status: notReady},
+				{ObjectMeta: metav1.ObjectMeta{Name: "no-conditions"}},
 				{
-					ObjectMeta: metav1.ObjectMeta{Name: "worker-noschedule"},
-					Spec: corev1.NodeSpec{
-						Taints: []corev1.Taint{{Key: "dedicated", Value: "gpu", Effect: corev1.TaintEffectNoSchedule}},
-					},
-					Status: corev1.NodeStatus{Conditions: ready},
+					ObjectMeta: metav1.ObjectMeta{Name: "tainted-noschedule"},
+					Spec:       corev1.NodeSpec{Taints: []corev1.Taint{{Key: "dedicated", Value: "gpu", Effect: corev1.TaintEffectNoSchedule}}},
+					Status:     ready,
 				},
 				{
-					ObjectMeta: metav1.ObjectMeta{Name: "worker-noexecute"},
-					Spec: corev1.NodeSpec{
-						Taints: []corev1.Taint{{Key: "maintenance", Effect: corev1.TaintEffectNoExecute}},
-					},
-					Status: corev1.NodeStatus{Conditions: ready},
+					// The stock kubeadm control-plane taint: excluded here on
+					// its taint, which is the cluster saying so, rather than on
+					// its label.
+					ObjectMeta: metav1.ObjectMeta{Name: "tainted-control-plane", Labels: controlPlane},
+					Spec:       corev1.NodeSpec{Taints: []corev1.Taint{{Key: "node-role.kubernetes.io/control-plane", Effect: corev1.TaintEffectNoSchedule}}},
+					Status:     ready,
 				},
 				{
-					ObjectMeta: metav1.ObjectMeta{Name: "worker-prefer-noschedule"},
-					Spec: corev1.NodeSpec{
-						Taints: []corev1.Taint{{Key: "spot", Effect: corev1.TaintEffectPreferNoSchedule}},
-					},
-					Status: corev1.NodeStatus{Conditions: ready},
+					ObjectMeta: metav1.ObjectMeta{Name: "tainted-noexecute"},
+					Spec:       corev1.NodeSpec{Taints: []corev1.Taint{{Key: "maintenance", Effect: corev1.TaintEffectNoExecute}}},
+					Status:     ready,
 				},
-				{
-					ObjectMeta: metav1.ObjectMeta{Name: "worker-clean"},
-					Status:     corev1.NodeStatus{Conditions: ready},
-				},
+				{ObjectMeta: metav1.ObjectMeta{Name: "usable"}, Status: ready},
 			},
-			want: []string{"worker-clean", "worker-prefer-noschedule"},
-		},
-		{
-			name: "excludes unschedulable and not-ready workers",
-			nodes: []*corev1.Node{
-				{
-					ObjectMeta: metav1.ObjectMeta{Name: "worker-cordoned"},
-					Spec:       corev1.NodeSpec{Unschedulable: true},
-					Status:     corev1.NodeStatus{Conditions: ready},
-				},
-				{
-					ObjectMeta: metav1.ObjectMeta{Name: "worker-notready"},
-					Status:     corev1.NodeStatus{Conditions: notReady},
-				},
-				{
-					ObjectMeta: metav1.ObjectMeta{Name: "worker-noconditions"},
-				},
-				{
-					ObjectMeta: metav1.ObjectMeta{Name: "worker-ready"},
-					Status:     corev1.NodeStatus{Conditions: ready},
-				},
-			},
-			want: []string{"worker-ready"},
-		},
-		{
-			name: "sorts returned worker names deterministically from unsorted input",
-			nodes: []*corev1.Node{
-				{
-					ObjectMeta: metav1.ObjectMeta{Name: "worker-c"},
-					Status:     corev1.NodeStatus{Conditions: ready},
-				},
-				{
-					ObjectMeta: metav1.ObjectMeta{Name: "worker-a"},
-					Status:     corev1.NodeStatus{Conditions: ready},
-				},
-				{
-					ObjectMeta: metav1.ObjectMeta{Name: "worker-b"},
-					Status:     corev1.NodeStatus{Conditions: ready},
-				},
-			},
-			want: []string{"worker-a", "worker-b", "worker-c"},
-		},
-		{
-			name: "all control-plane cluster returns empty list for loud preflight stop",
-			nodes: []*corev1.Node{
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:   "cp-1",
-						Labels: map[string]string{"node-role.kubernetes.io/control-plane": ""},
-					},
-					Status: corev1.NodeStatus{Conditions: ready},
-				},
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:   "cp-2",
-						Labels: map[string]string{"node-role.kubernetes.io/control-plane": ""},
-					},
-					Status: corev1.NodeStatus{Conditions: ready},
-				},
-			},
-			want: nil,
+			want: []string{"usable"},
 		},
 	}
 
@@ -159,8 +91,7 @@ func TestWorkerNodesSelection(t *testing.T) {
 					t.Fatalf("seeding node %s: %v", n.Name, err)
 				}
 			}
-			c := &Client{Kube: kube}
-			got, err := WorkerNodes(ctx, c)
+			got, err := WorkerNodes(ctx, &Client{Kube: kube})
 			if err != nil {
 				t.Fatalf("WorkerNodes failed: %v", err)
 			}
