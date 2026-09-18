@@ -105,6 +105,16 @@ func Run(ctx context.Context) (*Result, error) {
 			"the server did not restart under its load will report blocked instead")
 	}
 
+	proc, err := framework.DiscoverServerProcess(ctx, c, agent)
+	if err != nil {
+		e.AddNote("discovering NFS server process: %v", err)
+	} else if proc != "" {
+		e.ServerProcess = proc
+	} else if e.FanOut > 0 {
+		e.AddNote("cannot tell which process serves NFS: server containers declare no known command " +
+			"and process inspection found no candidate; in-place kill cases will report blocked unless -server-process is passed")
+	}
+
 	e.CSIDriverImages = csiImages(ctx, c, e.CSIDriver)
 	e.IndependentlyVersioned = independentlyVersioned(e)
 	caps.IndependentVersions = e.IndependentlyVersioned

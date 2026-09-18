@@ -84,6 +84,10 @@ type Environment struct {
 	// different release trains. Gates the SKEW cases.
 	IndependentlyVersioned bool `json:"independentlyVersioned"`
 
+	// ServerProcess is the process name pattern to signal for in-place kill.
+	// Discovered during preflight and pinned for the run.
+	ServerProcess string `json:"serverProcess,omitempty"`
+
 	Mounts           []MountInfo `json:"mounts"`
 	NFSVersion       string      `json:"nfsVersion"`
 	HardMount        bool        `json:"hardMount"`
