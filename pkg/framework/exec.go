@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/httpstream"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/remotecommand"
 )
@@ -45,6 +46,9 @@ func (c *Client) ExecStdin(ctx context.Context, ns, pod, container string, stdin
 }
 
 func (c *Client) exec(ctx context.Context, ns, pod, container string, stdin io.Reader, argv ...string) ExecResult {
+	if c == nil || c.Rest == nil || c.Kube == nil || c.Kube.CoreV1() == nil || c.Kube.CoreV1().RESTClient() == nil {
+		return ExecResult{Err: fmt.Errorf("kubernetes REST client is not configured for exec"), ExitCode: -1}
+	}
 	req := c.Kube.CoreV1().RESTClient().Post().
 		Resource("pods").Name(pod).Namespace(ns).SubResource("exec").
 		VersionedParams(&corev1.PodExecOptions{
@@ -55,9 +59,17 @@ func (c *Client) exec(ctx context.Context, ns, pod, container string, stdin io.R
 			Stderr:    true,
 		}, scheme.ParameterCodec)
 
-	exec, err := remotecommand.NewSPDYExecutor(c.Rest, "POST", req.URL())
+	wsExec, err := remotecommand.NewWebSocketExecutor(c.Rest, "GET", req.URL().String())
 	if err != nil {
-		return ExecResult{Err: fmt.Errorf("creating executor: %w", err), ExitCode: -1}
+		return ExecResult{Err: fmt.Errorf("creating websocket executor: %w", err), ExitCode: -1}
+	}
+	spdyExec, err := remotecommand.NewSPDYExecutor(c.Rest, "POST", req.URL())
+	if err != nil {
+		return ExecResult{Err: fmt.Errorf("creating spdy executor: %w", err), ExitCode: -1}
+	}
+	exec, err := remotecommand.NewFallbackExecutor(wsExec, spdyExec, httpstream.IsUpgradeFailure)
+	if err != nil {
+		return ExecResult{Err: fmt.Errorf("creating fallback executor: %w", err), ExitCode: -1}
 	}
 	var stdout, stderr bytes.Buffer
 	opts := remotecommand.StreamOptions{Stdout: &stdout, Stderr: &stderr}

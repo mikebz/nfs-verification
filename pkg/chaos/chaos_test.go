@@ -7,6 +7,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"github.com/mikebz/nfs-verification/pkg/env"
 	"github.com/mikebz/nfs-verification/pkg/framework"
 )
 
@@ -84,10 +85,110 @@ func TestUsableAsPattern(t *testing.T) {
 			t.Errorf("%q was rejected, but it names a server process", name)
 		}
 	}
-	for _, name := range []string{"", "sh", "bash", "env", "tini", "run", "start.sh", "entrypoint.sh"} {
+	for _, name := range []string{"", "sh", "bash", "env", "tini", "run", "start.sh", "entrypoint.sh", "nfs-provisioner", "nfs-entry.sh"} {
 		if usableAsPattern(name) {
 			t.Errorf("%q was accepted; killing everything matching it on a node takes the node out", name)
 		}
+	}
+}
+
+// TestProcessPatternPrecedence covers the priority order between the flag, the
+// preflight-discovered environment, container probes, and the container command.
+//
+// Steps:
+//  1. Assert the -server-process flag wins over SuiteEnv and the container command.
+//  2. Assert SuiteEnv wins over container probes and command when flag is unset.
+//  3. Assert container probes win when SuiteEnv is unset and command is empty.
+//  4. Assert container command is used when no flag, SuiteEnv or probe is present.
+//  5. Assert an undiscoverable pod reports an error directing the operator to -server-process.
+func TestProcessPatternPrecedence(t *testing.T) {
+	origFlag := framework.Cfg().ServerProcess
+	origEnv := framework.SuiteEnv()
+	origCaps := framework.SuiteCaps()
+	t.Cleanup(func() {
+		framework.Cfg().ServerProcess = origFlag
+		framework.SetSuite(nil, origEnv, origCaps)
+	})
+
+	target := Target{
+		Pod: "nfs-server-0",
+		Containers: []corev1.Container{
+			{
+				Name:    "nfs",
+				Command: []string{"/usr/sbin/rpc.nfsd"},
+				LivenessProbe: &corev1.Probe{
+					ProbeHandler: corev1.ProbeHandler{
+						Exec: &corev1.ExecAction{
+							Command: []string{"dbus-send", "--dest=org.ganesha.nfsd"},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	// 1. Flag wins over everything.
+	framework.Cfg().ServerProcess = "unfsd"
+	framework.SetSuite(nil, &env.Environment{ServerProcess: "ganesha.nfsd"}, framework.Capabilities{})
+	got, err := ProcessPattern(target)
+	if err != nil || got != "unfsd" {
+		t.Errorf("ProcessPattern with flag set = (%q, %v), want (%q, nil)", got, err, "unfsd")
+	}
+
+	// 2. SuiteEnv wins over container probes and command.
+	framework.Cfg().ServerProcess = ""
+	got, err = ProcessPattern(target)
+	if err != nil || got != "ganesha.nfsd" {
+		t.Errorf("ProcessPattern with SuiteEnv set = (%q, %v), want (%q, nil)", got, err, "ganesha.nfsd")
+	}
+
+	// 3. Probes win when SuiteEnv has no ServerProcess and command is empty or a shell wrapper.
+	framework.SetSuite(nil, &env.Environment{}, framework.Capabilities{})
+	targetProbeOnly := Target{
+		Pod: "robin-nfs-0",
+		Containers: []corev1.Container{
+			{
+				Name:    "robin-nfs",
+				Command: []string{"/nfs-entry.sh"},
+				LivenessProbe: &corev1.Probe{
+					ProbeHandler: corev1.ProbeHandler{
+						Exec: &corev1.ExecAction{
+							Command: []string{"/bin/sh", "-c", "timeout 25 dbus-send --dest=org.ganesha.nfsd /org/ganesha/nfsd"},
+						},
+					},
+				},
+			},
+		},
+	}
+	got, err = ProcessPattern(targetProbeOnly)
+	if err != nil || got != "ganesha.nfsd" {
+		t.Errorf("ProcessPattern from probe = (%q, %v), want (%q, nil)", got, err, "ganesha.nfsd")
+	}
+
+	// 4. Container command is used when no flag, SuiteEnv or probe matches.
+	targetCmdOnly := Target{
+		Pod: "nfs-0",
+		Containers: []corev1.Container{
+			{Name: "nfs", Command: []string{"/usr/sbin/rpc.nfsd"}},
+		},
+	}
+	got, err = ProcessPattern(targetCmdOnly)
+	if err != nil || got != "rpc.nfsd" {
+		t.Errorf("ProcessPattern from command = (%q, %v), want (%q, nil)", got, err, "rpc.nfsd")
+	}
+
+	// 5. Undiscoverable pod returns an informative error.
+	targetEmpty := Target{
+		Pod: "nfs-provisioner-0",
+		Containers: []corev1.Container{
+			{Name: "nfs", Args: []string{"-provisioner=cluster.local"}},
+		},
+	}
+	got, err = ProcessPattern(targetEmpty)
+	if err == nil {
+		t.Errorf("ProcessPattern on empty target returned %q, want error", got)
+	} else if !strings.Contains(err.Error(), "-server-process") {
+		t.Errorf("ProcessPattern error %q does not prompt for -server-process", err.Error())
 	}
 }
 

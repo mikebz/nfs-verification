@@ -139,8 +139,8 @@ func unfitToInjure(p *corev1.Pod) string {
 }
 
 // ProcessPattern is the fixed string that identifies the server process on the
-// node. The flag wins; otherwise it comes from the container's own command,
-// which is the only place the cluster states it.
+// node. The flag wins; otherwise it comes from the preflight-discovered
+// environment, probe inspection, or the container's own command.
 func ProcessPattern(t Target) (string, error) {
 	// The flag is checked exactly as a derived name is. An operator who passes
 	// -server-process=sh means a server called sh, but what the node gets is a
@@ -155,6 +155,21 @@ func ProcessPattern(t Target) (string, error) {
 		}
 		return p, nil
 	}
+	if e := framework.SuiteEnv(); e != nil && e.ServerProcess != "" {
+		if !usableAsPattern(e.ServerProcess) {
+			return "", fmt.Errorf("discovered server process %q is too generic to signal on: it would match processes "+
+				"that have nothing to do with NFS, and killing those on a node takes the node out of service. "+
+				"Pass -server-process with the name the server process actually runs under", e.ServerProcess)
+		}
+		return e.ServerProcess, nil
+	}
+	for _, c := range t.Containers {
+		for _, cand := range framework.ServerDaemonCandidates {
+			if probeMentions(c, cand) {
+				return cand, nil
+			}
+		}
+	}
 	for _, c := range t.Containers {
 		if len(c.Command) == 0 {
 			continue
@@ -168,15 +183,24 @@ func ProcessPattern(t Target) (string, error) {
 		t.Pod)
 }
 
+func probeMentions(c corev1.Container, pattern string) bool {
+	checkProbe := func(p *corev1.Probe) bool {
+		if p != nil && p.Exec != nil {
+			return strings.Contains(strings.Join(p.Exec.Command, " "), pattern)
+		}
+		return false
+	}
+	if checkProbe(c.LivenessProbe) || checkProbe(c.ReadinessProbe) || checkProbe(c.StartupProbe) {
+		return true
+	}
+	return strings.Contains(strings.Join(c.Args, " "), pattern)
+}
+
 // usableAsPattern rejects names too generic to signal on. Killing everything
 // matching "sh" on a node takes the node out, and a case that does that is a
 // worse outage than the one it was written to measure.
 func usableAsPattern(name string) bool {
-	switch name {
-	case "", "sh", "bash", "dash", "env", "sleep", "tini", "dumb-init", "entrypoint.sh", "start.sh":
-		return false
-	}
-	return len(name) >= 4
+	return framework.UsableAsPattern(name)
 }
 
 // KillServerProcess sends a signal to the server process on its node and

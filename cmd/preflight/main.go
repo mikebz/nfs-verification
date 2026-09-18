@@ -30,8 +30,12 @@ func main() {
 	}
 	b, _ := json.MarshalIndent(res.Env, "", "  ")
 	fmt.Println(string(b))
-	fmt.Fprintf(os.Stderr, "\npreflight passed: storageClass=%s csi=%s servers=%d profile=%s(lease=%ds grace=%ds)\n",
-		res.Env.StorageClass, res.Env.CSIDriver, res.Env.FanOut,
+	proc := res.Env.ServerProcess
+	if proc == "" {
+		proc = "undiscovered"
+	}
+	fmt.Fprintf(os.Stderr, "\npreflight passed: storageClass=%s csi=%s servers=%d serverProcess=%s profile=%s(lease=%ds grace=%ds)\n",
+		res.Env.StorageClass, res.Env.CSIDriver, res.Env.FanOut, proc,
 		res.Env.Timing.Profile, res.Env.Timing.LeaseSeconds, res.Env.Timing.GraceSeconds)
 	fmt.Fprintf(os.Stderr, "environment written to %s/environment.json\n", framework.RunDir())
 	fmt.Fprintf(os.Stderr, "cached for context %q at %s; test runs reuse it for %s\n",

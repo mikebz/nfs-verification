@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-10
-Updated: 2026-09-17
+Updated: 2026-09-18
 
 End-to-end verification of NFS RWX persistent volumes on Kubernetes.
 
@@ -300,7 +300,7 @@ answer them:
 | `-pvc-size` | claim size | defaults to 1Gi: a backing volume that cannot satisfy the request fails every case, and no case here needs more |
 | `-refresh-preflight` | forcing rediscovery | the cached result is reused until it ages out |
 | `-tools-image` | client pods and the node agent | needs `dd`, `sha256sum`, `flock`, `stat` and `nsenter`; defaults to `alpine:3.20`, whose busybox carries all five. DATA-07 and DATA-11 probe two things this image may not have, `dd`'s `oflag=direct` and `fallocate`'s `-p`, and report blocked naming this flag rather than filing a tool gap as a protocol gap |
-| `-server-process` | CHAOS-01 | derived from the server container's command; a server started through a shell wrapper or an image entrypoint hides it, and the case reports blocked rather than signalling the wrong process |
+| `-server-process` | CHAOS-01, DATA-12, DATA-13 | discovered during preflight from running processes, probes, or container command; pass only when discovery cannot identify the daemon |
 | `-grace-enter-pattern`, `-grace-exit-pattern` | OBS-03, CHAOS-05, CHAOS-07 | nothing in the Kubernetes API states how a server words grace entry and exit; the built-in rule covers the common wordings, and these state it for a server it does not. Set both or neither: one alone would report every failover as a grace re-entry loop |
 | `-root-squash` | SEC-02 | nothing in the Kubernetes API states the export's squash setting; without it the case records what the export does instead of asserting a value nobody stated |
 
