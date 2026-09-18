@@ -163,6 +163,15 @@ func flockFor(a lockArgs, typ int16) syscall.Flock_t {
 	return syscall.Flock_t{Type: typ, Whence: 0, Start: a.start, Len: a.length}
 }
 
+// fcntlFlock constructs a lock description and invokes syscall.FcntlFlock.
+func fcntlFlock(f *os.File, cmd int, a lockArgs, typ int16) (syscall.Flock_t, error) {
+	lk := flockFor(a, typ)
+	if err := syscall.FcntlFlock(f.Fd(), cmd, &lk); err != nil {
+		return syscall.Flock_t{}, err
+	}
+	return lk, nil
+}
+
 // setLock attempts a non-blocking acquire and, when the kernel refuses, asks
 // what stands in the way.
 //
@@ -172,8 +181,7 @@ func flockFor(a lockArgs, typ int16) syscall.Flock_t {
 // D state, which leaves the pod Terminating and turns teardown into the
 // F-001-adjacent path it exists to avoid.
 func setLock(f *os.File, a lockArgs, typ int16) (granted bool, conflict syscall.Flock_t, known bool, err error) {
-	lk := flockFor(a, typ)
-	err = syscall.FcntlFlock(f.Fd(), syscall.F_SETLK, &lk)
+	_, err = fcntlFlock(f, syscall.F_SETLK, a, typ)
 	if err == nil {
 		return true, syscall.Flock_t{}, false, nil
 	}
@@ -213,18 +221,14 @@ func setLock(f *os.File, a lockArgs, typ int16) (granted bool, conflict syscall.
 // A lock the calling process already holds is not reported as a conflict, which
 // is why every query here comes from a different pod than the holder.
 func getLock(f *os.File, a lockArgs, typ int16) (syscall.Flock_t, error) {
-	lk := flockFor(a, typ)
-	if err := syscall.FcntlFlock(f.Fd(), syscall.F_GETLK, &lk); err != nil {
-		return syscall.Flock_t{}, err
-	}
-	return lk, nil
+	return fcntlFlock(f, syscall.F_GETLK, a, typ)
 }
 
 // unlock drops a held range explicitly, before the descriptor closes, so that
 // "released" in the state file cannot be read before the lock is really gone.
 func unlock(f *os.File, a lockArgs) error {
-	lk := flockFor(a, syscall.F_UNLCK)
-	return syscall.FcntlFlock(f.Fd(), syscall.F_SETLK, &lk)
+	_, err := fcntlFlock(f, syscall.F_SETLK, a, syscall.F_UNLCK)
+	return err
 }
 
 // describe renders a conflicting lock as the harness parses it.
