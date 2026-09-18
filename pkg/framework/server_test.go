@@ -224,3 +224,115 @@ func TestServerRestartCount(t *testing.T) {
 		}
 	})
 }
+
+// TestDiscoverServerProcess covers daemon discovery from flags, probes, container
+// commands and candidate matching.
+//
+// Steps:
+//  1. Assert explicit -server-process flag wins and is validated.
+//  2. Assert generic flag values are rejected.
+//  3. Assert container probe mentioning org.ganesha.nfsd discovers ganesha.nfsd.
+//  4. Assert container command containing rpc.nfsd discovers rpc.nfsd.
+//  5. Assert nfs-provisioner supervisor is not mistaken for a daemon.
+func TestDiscoverServerProcess(t *testing.T) {
+	restore := *Cfg()
+	t.Cleanup(func() { *Cfg() = restore })
+	Cfg().ServerNamespace, Cfg().ServerSelector, Cfg().ServerProcess = "", "", ""
+
+	t.Run("explicit flag wins and is returned", func(t *testing.T) {
+		Cfg().ServerProcess = "ganesha.nfsd"
+		c := &Client{Kube: fake.NewSimpleClientset()}
+		got, err := DiscoverServerProcess(context.Background(), c, nil)
+		if err != nil || got != "ganesha.nfsd" {
+			t.Errorf("DiscoverServerProcess = (%q, %v), want (%q, nil)", got, err, "ganesha.nfsd")
+		}
+	})
+
+	t.Run("generic flag is rejected loudly", func(t *testing.T) {
+		Cfg().ServerProcess = "sh"
+		c := &Client{Kube: fake.NewSimpleClientset()}
+		got, err := DiscoverServerProcess(context.Background(), c, nil)
+		if err == nil {
+			t.Errorf("DiscoverServerProcess with generic flag returned %q, want error", got)
+		}
+	})
+
+	t.Run("probe mentioning ganesha daemon is discovered", func(t *testing.T) {
+		Cfg().ServerProcess = ""
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: "robin-nfs-0", Namespace: "robinio"},
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:    "robin-nfs",
+						Image:   "registry.example.com/nfs-server:v6.5",
+						Command: []string{"/nfs-entry.sh"},
+						LivenessProbe: &corev1.Probe{
+							ProbeHandler: corev1.ProbeHandler{
+								Exec: &corev1.ExecAction{
+									Command: []string{"/bin/sh", "-c", "dbus-send --dest=org.ganesha.nfsd /org/ganesha/nfsd"},
+								},
+							},
+						},
+						Ports: []corev1.ContainerPort{{ContainerPort: nfsPort}},
+					},
+				},
+			},
+			Status: corev1.PodStatus{Phase: corev1.PodRunning},
+		}
+		c := &Client{Kube: fake.NewSimpleClientset(pod)}
+		got, err := DiscoverServerProcess(context.Background(), c, nil)
+		if err != nil || got != "ganesha.nfsd" {
+			t.Errorf("DiscoverServerProcess from probe = (%q, %v), want (%q, nil)", got, err, "ganesha.nfsd")
+		}
+	})
+
+	t.Run("container command with valid daemon is discovered", func(t *testing.T) {
+		Cfg().ServerProcess = ""
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: "kernel-nfs-0", Namespace: "nfs"},
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:    "nfs",
+						Image:   "registry.example.com/kernel-nfs:latest",
+						Command: []string{"/usr/sbin/rpc.nfsd", "-G", "10"},
+						Ports:   []corev1.ContainerPort{{ContainerPort: nfsPort}},
+					},
+				},
+			},
+			Status: corev1.PodStatus{Phase: corev1.PodRunning},
+		}
+		c := &Client{Kube: fake.NewSimpleClientset(pod)}
+		got, err := DiscoverServerProcess(context.Background(), c, nil)
+		if err != nil || got != "rpc.nfsd" {
+			t.Errorf("DiscoverServerProcess from command = (%q, %v), want (%q, nil)", got, err, "rpc.nfsd")
+		}
+	})
+
+	t.Run("nfs-provisioner supervisor is not returned as daemon", func(t *testing.T) {
+		Cfg().ServerProcess = ""
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: "nfs-provisioner-0", Namespace: "nfs"},
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:    "nfs",
+						Image:   "registry.example.com/nfs-provisioner:latest",
+						Command: []string{"/nfs-provisioner"},
+						Ports:   []corev1.ContainerPort{{ContainerPort: nfsPort}},
+					},
+				},
+			},
+			Status: corev1.PodStatus{Phase: corev1.PodRunning},
+		}
+		c := &Client{Kube: fake.NewSimpleClientset(pod)}
+		got, err := DiscoverServerProcess(context.Background(), c, nil)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "" {
+			t.Errorf("DiscoverServerProcess returned %q, want empty string when supervisor cannot be identified as daemon", got)
+		}
+	})
+}

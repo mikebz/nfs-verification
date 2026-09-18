@@ -3,6 +3,7 @@ package framework
 import (
 	"context"
 	"fmt"
+	"path"
 	"regexp"
 	"sort"
 	"strconv"
@@ -352,4 +353,187 @@ func Profile() (slo.Profile, error) {
 		return slo.Profile{}, fmt.Errorf("environment carries unknown profile %q", e.Timing.Profile)
 	}
 	return p, nil
+}
+
+// UsableAsPattern rejects names too generic to signal on. Killing everything
+// matching "sh" on a node takes the node out, and a case that does that is a
+// worse outage than the one it was written to measure.
+func UsableAsPattern(name string) bool {
+	switch name {
+	case "", "sh", "bash", "dash", "env", "sleep", "tini", "dumb-init", "nfs-provisioner":
+		return false
+	}
+	if strings.HasSuffix(name, ".sh") {
+		return false
+	}
+	return len(name) >= 4
+}
+
+// ServerDaemonCandidates is the list of known NFS server daemon process names
+// (as they appear in /proc/<pid>/comm), ordered from most specific to least.
+var ServerDaemonCandidates = []string{
+	"ganesha.nfsd",
+	"rpc.nfsd",
+	"unfsd",
+	"nfsd",
+}
+
+// DiscoverServerProcess identifies the NFS server daemon process name running
+// in the server pods. If -server-process is explicitly passed, it validates it
+// and returns it. Otherwise it inspects the server pods in the following order:
+//  1. In-container process table via exec (/proc/[0-9]*/comm).
+//  2. Node agent host process table scoped to the server container's cgroup.
+//  3. Node agent host process table matching exact candidate comm names.
+//  4. Container probes and command arguments for daemon references.
+//
+// An empty result is returned if no known daemon can be identified.
+func DiscoverServerProcess(ctx context.Context, c *Client, agent *Agent) (string, error) {
+	if p := Cfg().ServerProcess; p != "" {
+		if !UsableAsPattern(p) {
+			return "", fmt.Errorf("-server-process=%q is too generic to signal on: it would match processes "+
+				"that have nothing to do with NFS, and killing those on a node takes the node out of service. "+
+				"Pass the name the server process actually runs under", p)
+		}
+		return p, nil
+	}
+
+	pods, err := ServerPods(ctx, c)
+	if err != nil {
+		return "", err
+	}
+	if len(pods) == 0 {
+		return "", nil
+	}
+
+	// 1. Try reading /proc/*/comm directly from the server container(s) via exec.
+	for i := range pods {
+		p := &pods[i]
+		if p.Status.Phase != corev1.PodRunning {
+			continue
+		}
+		for _, ct := range p.Spec.Containers {
+			if isIgnoredContainer(ct.Name, ct.Image) {
+				continue
+			}
+			r := c.Sh(ctx, p.Namespace, p.Name, ct.Name, `cat /proc/[0-9]*/comm 2>/dev/null`)
+			if r.Err == nil && r.Stdout != "" {
+				if match := matchCandidate(r.Stdout); match != "" {
+					return match, nil
+				}
+			}
+		}
+	}
+
+	// 2. Try node agent host process inspection for the server pod's node.
+	if agent != nil {
+		for i := range pods {
+			p := &pods[i]
+			if p.Status.Phase != corev1.PodRunning || p.Spec.NodeName == "" {
+				continue
+			}
+			// First try checking cgroup-scoped processes for the server containers.
+			for _, cs := range p.Status.ContainerStatuses {
+				cid := stripContainerIDPrefix(cs.ContainerID)
+				if cid != "" {
+					script := fmt.Sprintf(
+						`for p in /proc/[0-9]*; do if grep -q %s $p/cgroup 2>/dev/null; then cat $p/comm 2>/dev/null; fi; done`,
+						shellQuote(cid))
+					out, err := agent.Run(ctx, p.Spec.NodeName, script)
+					if err == nil && out != "" {
+						if match := matchCandidate(out); match != "" {
+							return match, nil
+						}
+					}
+				}
+			}
+
+			// If cgroup-scoping did not match, check exact comm on the server node.
+			for _, cand := range ServerDaemonCandidates {
+				out, err := agent.Run(ctx, p.Spec.NodeName, fmt.Sprintf(`ps -eo comm= | grep -Fx %s || true`, shellQuote(cand)))
+				if err == nil && strings.TrimSpace(out) == cand {
+					return cand, nil
+				}
+			}
+		}
+	}
+
+	// 3. Inspect container probes and command arguments for daemon references.
+	for i := range pods {
+		p := &pods[i]
+		for _, ct := range p.Spec.Containers {
+			if isIgnoredContainer(ct.Name, ct.Image) {
+				continue
+			}
+			blob := containerProbeBlob(ct)
+			if match := matchCandidateInText(blob); match != "" {
+				return match, nil
+			}
+			if len(ct.Command) > 0 {
+				name := path.Base(ct.Command[0])
+				if UsableAsPattern(name) {
+					return name, nil
+				}
+			}
+		}
+	}
+
+	return "", nil
+}
+
+func isIgnoredContainer(name, image string) bool {
+	lowerName := strings.ToLower(name)
+	lowerImg := strings.ToLower(image)
+	return lowerName == "pause" || strings.Contains(lowerName, "pause") ||
+		strings.Contains(lowerImg, "pause")
+}
+
+func matchCandidate(blob string) string {
+	lines := strings.Split(blob, "\n")
+	commSet := make(map[string]bool, len(lines))
+	for _, l := range lines {
+		if trimmed := strings.TrimSpace(l); trimmed != "" {
+			commSet[trimmed] = true
+		}
+	}
+	for _, cand := range ServerDaemonCandidates {
+		if commSet[cand] {
+			return cand
+		}
+	}
+	return ""
+}
+
+func matchCandidateInText(text string) string {
+	for _, cand := range ServerDaemonCandidates {
+		if strings.Contains(text, cand) {
+			return cand
+		}
+	}
+	return ""
+}
+
+func containerProbeBlob(ct corev1.Container) string {
+	var b strings.Builder
+	checkProbe := func(p *corev1.Probe) {
+		if p != nil && p.Exec != nil {
+			b.WriteString(strings.Join(p.Exec.Command, " "))
+			b.WriteString("\n")
+		}
+	}
+	checkProbe(ct.LivenessProbe)
+	checkProbe(ct.ReadinessProbe)
+	checkProbe(ct.StartupProbe)
+	for _, v := range ct.VolumeMounts {
+		b.WriteString(v.Name + " " + v.MountPath + "\n")
+	}
+	b.WriteString(strings.Join(ct.Args, " ") + "\n")
+	b.WriteString(strings.Join(ct.Command, " ") + "\n")
+	return b.String()
+}
+
+func stripContainerIDPrefix(id string) string {
+	if idx := strings.Index(id, "://"); idx != -1 {
+		return id[idx+3:]
+	}
+	return id
 }
