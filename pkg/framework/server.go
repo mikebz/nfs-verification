@@ -431,27 +431,20 @@ func DiscoverServerProcess(ctx context.Context, c *Client, agent *Agent) (string
 			if p.Status.Phase != corev1.PodRunning || p.Spec.NodeName == "" {
 				continue
 			}
-			// First try checking cgroup-scoped processes for the server containers.
+			// Check cgroup-scoped processes for the server containers.
 			for _, cs := range p.Status.ContainerStatuses {
 				cid := stripContainerIDPrefix(cs.ContainerID)
 				if cid != "" {
-					script := fmt.Sprintf(
-						`for p in /proc/[0-9]*; do if grep -q %s $p/cgroup 2>/dev/null; then cat $p/comm 2>/dev/null; fi; done`,
-						shellQuote(cid))
+					script, err := RunScript("cgroup-comm.sh", "serverproc", cid)
+					if err != nil {
+						continue
+					}
 					out, err := agent.Run(ctx, p.Spec.NodeName, script)
 					if err == nil && out != "" {
 						if match := matchCandidate(out); match != "" {
 							return match, nil
 						}
 					}
-				}
-			}
-
-			// If cgroup-scoping did not match, check exact comm on the server node.
-			for _, cand := range ServerDaemonCandidates {
-				out, err := agent.Run(ctx, p.Spec.NodeName, fmt.Sprintf(`ps -eo comm= | grep -Fx %s || true`, shellQuote(cand)))
-				if err == nil && strings.TrimSpace(out) == cand {
-					return cand, nil
 				}
 			}
 		}
@@ -523,9 +516,6 @@ func containerProbeBlob(ct corev1.Container) string {
 	checkProbe(ct.LivenessProbe)
 	checkProbe(ct.ReadinessProbe)
 	checkProbe(ct.StartupProbe)
-	for _, v := range ct.VolumeMounts {
-		b.WriteString(v.Name + " " + v.MountPath + "\n")
-	}
 	b.WriteString(strings.Join(ct.Args, " ") + "\n")
 	b.WriteString(strings.Join(ct.Command, " ") + "\n")
 	return b.String()

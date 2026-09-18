@@ -336,3 +336,54 @@ func TestDiscoverServerProcess(t *testing.T) {
 		}
 	})
 }
+
+// TestMatchCandidateProcComm covers matching candidate daemon names from
+// in-container /proc/*/comm outputs.
+//
+// Steps:
+//  1. Assert ganesha.nfsd is selected when running alongside nfs-provisioner and rpc helpers.
+//  2. Assert rpc.nfsd is selected when running in kernel NFS containers.
+//  3. Assert unfsd is selected when running in user-space NFS containers.
+//  4. Assert an image running only a supervisor returns empty string without matching the supervisor.
+//  5. Assert unrelated processes return empty string.
+func TestMatchCandidateProcComm(t *testing.T) {
+	cases := []struct {
+		name string
+		blob string
+		want string
+	}{
+		{
+			name: "ganesha alongside supervisor and helpers",
+			blob: "nfs-provisioner\nrpcbind\nrpc.statd\ndbus-daemon\nganesha.nfsd\nsh\n",
+			want: "ganesha.nfsd",
+		},
+		{
+			name: "kernel nfs userland daemon",
+			blob: "systemd\nrpcbind\nrpc.nfsd\n",
+			want: "rpc.nfsd",
+		},
+		{
+			name: "unfsd user daemon",
+			blob: "unfsd\n",
+			want: "unfsd",
+		},
+		{
+			name: "supervisor only with no daemon running",
+			blob: "nfs-provisioner\nrpcbind\n",
+			want: "",
+		},
+		{
+			name: "empty or unrelated processes",
+			blob: "nginx\nsleep\n",
+			want: "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := matchCandidate(tc.blob)
+			if got != tc.want {
+				t.Errorf("matchCandidate() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
