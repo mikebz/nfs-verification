@@ -1,12 +1,18 @@
 package framework
 
 import (
+	"context"
 	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes/fake"
 )
 
 // The socket table is where the client identity an export rule would match
@@ -471,4 +477,76 @@ func TestParseSocketTablesPerFamily(t *testing.T) {
 		"==FAMILY /proc/net/tcp6\n==STATUS absent\n", "ns", "pod"); err == nil {
 		t.Error("a pod where neither family could be read reported no connections instead of an error")
 	}
+}
+
+// TestNodeAddresses covers retrieving internal IP addresses for a node.
+//
+// Why this test exists: NodeAddresses returns a node's internal addresses, which
+// is what an NFS server sees as the client identity. Misparsing or returning
+// external/invalid IPs would cause peer comparison checks to misidentify clients.
+//
+// Steps:
+//  1. Seed a fake clientset with nodes containing various address types and malformed addresses.
+//  2. Call NodeAddresses for a non-existent node, expecting a lookup error.
+//  3. Call NodeAddresses for a node with no internal IPs, expecting an error.
+//  4. Call NodeAddresses for a node with mixed address types (InternalIP, ExternalIP, HostName, invalid IP),
+//     verifying that only valid NodeInternalIPs are returned unmapped.
+func TestNodeAddresses(t *testing.T) {
+	ctx := context.Background()
+
+	nodeWithMixed := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-1"},
+		Status: corev1.NodeStatus{
+			Addresses: []corev1.NodeAddress{
+				{Type: corev1.NodeHostName, Address: "node-1.example.com"},
+				{Type: corev1.NodeExternalIP, Address: "198.51.100.1"},
+				{Type: corev1.NodeInternalIP, Address: "10.0.0.10"},
+				{Type: corev1.NodeInternalIP, Address: "invalid-ip"},
+				{Type: corev1.NodeInternalIP, Address: "10.0.0.11"},
+				{Type: corev1.NodeInternalIP, Address: "::ffff:10.0.0.12"},
+			},
+		},
+	}
+	nodeNoInternal := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-2"},
+		Status: corev1.NodeStatus{
+			Addresses: []corev1.NodeAddress{
+				{Type: corev1.NodeExternalIP, Address: "198.51.100.2"},
+			},
+		},
+	}
+
+	kube := fake.NewSimpleClientset(nodeWithMixed, nodeNoInternal)
+	c := &Client{Kube: kube}
+
+	t.Run("node not found", func(t *testing.T) {
+		_, err := NodeAddresses(ctx, c, "nonexistent-node")
+		if err == nil {
+			t.Error("NodeAddresses for nonexistent node succeeded, want error")
+		}
+	})
+
+	t.Run("node with no internal IP", func(t *testing.T) {
+		_, err := NodeAddresses(ctx, c, "node-2")
+		if err == nil {
+			t.Error("NodeAddresses for node without internal IP succeeded, want error")
+		} else if !strings.Contains(err.Error(), "reports no internal address") {
+			t.Errorf("unexpected error message: %v", err)
+		}
+	})
+
+	t.Run("node with mixed addresses", func(t *testing.T) {
+		addrs, err := NodeAddresses(ctx, c, "node-1")
+		if err != nil {
+			t.Fatalf("NodeAddresses failed: %v", err)
+		}
+		want := []netip.Addr{
+			netip.MustParseAddr("10.0.0.10"),
+			netip.MustParseAddr("10.0.0.11"),
+			netip.MustParseAddr("10.0.0.12"),
+		}
+		if !slices.Equal(addrs, want) {
+			t.Errorf("got %v, want %v", addrs, want)
+		}
+	})
 }
