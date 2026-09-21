@@ -392,6 +392,25 @@ func TestChaosServerProcessKill(t *testing.T) {
 		t.Skipf("blocked: the process serving NFS in %s could not be observed before the fault, so a kill "+
 			"could not be confirmed to have landed on it: %v", s.target.Pod, err)
 	}
+	// Observing it is not enough on its own: the kill is aimed by the name
+	// preflight recorded, so the observation only protects anything if the two
+	// are the same name. They can differ, on a server replaced since preflight
+	// ran by one that serves under another name, and the consequence is the
+	// bystander kill above. Compared here rather than inside KillServerProcess
+	// because the name is the one thing preflight is the single source of; this
+	// checks that source against the running system without becoming a second
+	// one. DATA-12 and DATA-13 make no equivalent check, and the kill is still
+	// aimed by a substring of the whole command line node-wide, which no check
+	// here can fix: see issue #90.
+	aimedAt, err := chaos.ResolveProcess(f, s.target)
+	if err != nil {
+		t.Skipf("blocked: %v", err)
+	}
+	if before.Name != aimedAt.Pattern {
+		t.Skipf("blocked: preflight recorded %q as serving NFS in %s and %q holds the listening socket now, "+
+			"so signalling the recorded name would kill something that is not this server; re-run preflight "+
+			"with -refresh-preflight", aimedAt.Pattern, s.target.Pod, before.Name)
+	}
 	t.Logf("before the fault, %s", before)
 
 	// The fault reference comes from the writer's own clock, because the write
