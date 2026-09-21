@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-14
-Updated: 2026-09-14
+Updated: 2026-09-17
 
 
 **Found:** 2026-09-13, GKE cluster `gke-w1`, Kubernetes v1.37.0-gke.2941000,
@@ -17,6 +17,19 @@ times on this cluster:
 | `pr46-data-20260913` | `make test-data` | 200 of 200 |
 | `pr47-data-20260913` | `make test-data` | 200 of 200 |
 | `pr47-e2e-20260913` | `make test-e2e` | 150 of 200, 0 torn, `appender0` lost records 1-50 |
+| `w1-e2e-20260916-2015` | `make test-e2e` | 150 of 200, 0 torn, `appender3` lost records 1-50 |
+| `w2-e2e-20260916-2015` | `make test-e2e` | 150 of 200, 0 torn, `appender2` lost records 1-50 |
+
+**Updated 2026-09-17**: the last two rows are the first whole-suite runs against
+a **second** cluster, `gke-w2`, on a different server image (locally built
+Ganesha V15.3-mb rather than the upstream v4.0.8), run concurrently with the
+`gke-w1` run above. Both lost fifty records, neither tore one, and in each case a
+single appender lost its entire contribution — a different appender each time,
+which is the third distinct one across the five reds and rules out anything
+particular to `appender0`. Whole-suite runs are now **5 for 5** and data-only
+runs remain 0 for 2. Reproducing on a second deployment makes a defect peculiar
+to one server build the least likely explanation, and the client-side mechanism
+described below the most likely.
 
 **Severity:** a property of this deployment, for the boundary discussion. It is
 not a protocol violation and must not be filed against the server as one.
@@ -138,7 +151,7 @@ added. The diagnostic did its job, which is the only reason this entry can say
 
 Still open: what makes the difference between a run that loses fifty records and
 a run that loses none, and why the client that falls out of step is the one it
-is. The whole-suite runs are 3 for 3 and the data-only runs are 0 for 2, so the
+is. The whole-suite runs are 5 for 5 and the data-only runs are 0 for 2, so the
 next thing to try is a data-only run immediately after a chaos run, which
 separates "the server recently failed over" from "the suite has been running a
 while".
