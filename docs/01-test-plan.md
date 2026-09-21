@@ -436,38 +436,50 @@ marked directly in Section 3: shipped cases carry a ✅, and the rest carry noth
 
 ### 5.2 What the latest runs returned
 
-Delivery says what exists. This says how it did, on the one deployment it has
-been run against: a three-worker GKE cluster `gke-w1`, Kubernetes
-v1.37.0-gke.2941000, Container-Optimized OS with kernel 6.12.94+, StorageClass
-`nfs` backed by an in-cluster `nfs-server-provisioner` v4.0.8, profile `default`
-(lease 60s, grace 90s). Results from one deployment are not results about NFS,
-and every red below is a statement about this deployment.
+Delivery says what exists. This says how it did, on the two deployments it has
+been run against. Both are three-worker GKE clusters, Kubernetes
+v1.37.0-gke.2941000, Container-Optimized OS with kernel 6.12.94+, `e2-medium`
+nodes, StorageClass `nfs`, profile `default` (lease 60s, grace 90s). They differ
+in the server image: `gke-w1` runs the upstream `nfs-server-provisioner` v4.0.8,
+`gke-w2` a locally built `nfs-provisioner:15.3` (Ganesha V15.3-mb). Results from
+two deployments are not results about NFS, and every red below is a statement
+about these deployments.
 
-**Whole suite, 2026-09-13, `make test-e2e`, 62 minutes: 26 passed, 5 failed, 4
-blocked**, over the thirty-five cases that existed then. The seven security
-cases landed afterwards and have not been in a whole-suite run.
+**Whole suite on both clusters, 2026-09-17, `make test-e2e`, run concurrently:
+31 passed, 7 failed, 4 blocked, 1 skipped** over the forty-three cases in the
+tree. `gke-w1` (run `w1-e2e-20260916-2015`) took 67 minutes, `gke-w2` (run
+`w2-e2e-20260916-2015`) 70 minutes. **The two clusters returned the same verdict
+on every case**, which is the first evidence here that any of these results is a
+property of the architecture rather than of one deployment.
 
-**Security category, 2026-09-14, `make test-sec`, run `20260914-011748`, 2m45s:
-7 passed, 1 failed, 1 skipped** over SEC-01 to SEC-09. Five earlier runs returned
-the same verdicts, but each against a case review has since replaced: SEC-04
-twice, then SEC-02, then SEC-03 and SEC-04 again.
+That reconciles with the previous whole-suite run (2026-09-13, `gke-w1`, 35
+cases: 26 passed, 5 failed, 4 blocked) with nothing unexplained: the same five
+reds, the same four blocked, plus SEC-05 and OBS-07, both of which were already
+red in the category runs that shipped them.
 
 None of the reds is a defect in the storage server, and each one has a finding:
 
 | Case | Result | Whose problem |
 |---|---|---|
 | SEC-05 | fail | A node with no claim mounted another claim's export and read its bytes. The exports carry no client rules, nothing in the network path restricts who may connect, and `no_root_squash` is set, so the access control around a claim ends at the mount. [F-018](findings.md) |
-| DATA-02 | fail | Four clients appending to one file landed 150 of 200 records and tore none, one appender losing its whole contribution. NFSv4.1 has no append operation, so this goes to the boundary discussion rather than to the server owner, and it is intermittent. [F-016](findings.md) |
-| OBS-03 | fail | This provisioner announces no grace in its container log stream, so there is no signal to observe. [F-008](findings.md), and [F-022](findings.md) for where the signal actually is |
-| OBS-06 | fail | The export has no per-volume quota, so both capacity sources describe the backing filesystem rather than the claim. [F-009](findings.md) |
+| DATA-02 | fail | Four clients appending to one file landed 150 of 200 records and tore none, one appender losing its whole contribution. Identical on both clusters, a different appender each time. NFSv4.1 has no append operation, so this goes to the boundary discussion rather than to the server owner, and it is intermittent: whole-suite runs are 5 for 5, data-only runs 0 for 2. [F-016](findings.md) |
+| OBS-03 | fail | Neither provisioner announces grace in its container log stream, so there is no signal to observe. [F-008](findings.md), and [F-022](findings.md) for where the signal actually is |
+| OBS-06 | fail | The export has no per-volume quota, so both capacity sources describe the backing filesystem rather than the claim. Both agreed on used bytes and on the movement; only the total is meaningless. [F-009](findings.md) |
+| OBS-07 | fail, for different reasons | On `gke-w1` no endpoint exists to scrape, verdict `absent` ([F-023](findings.md)). On `gke-w2`, whose exposer and scrape annotations were both switched on by hand and so is no longer as-shipped, the case reached its later steps for the first time and returned `never-resumed` over metric families the server had not yet recreated, which is a harness defect rather than a deployment one ([F-025](findings.md)) |
 | PROV-04, PROV-11 | fail | The StorageClass advertises `allowVolumeExpansion` and nothing implements it. [F-004](findings.md) |
 
 The four blocked are CHAOS-01, DATA-12 and DATA-13, which need a process name
-this image does not let the harness discover, and CHAOS-07, which needs the
-grace window OBS-03 could not see. SEC-06 skips because the cluster is
-single-stack. **Blocked and skipped are not passes**: those vectors are
-unexercised here, and a green run against this provisioner is not evidence that
-grace behaves.
+neither image lets the harness discover, and CHAOS-07, which needs the grace
+window OBS-03 could not see. DATA-11's hole-punch subtest is blocked on busybox
+`fallocate`. SEC-06 skips because both clusters are single-stack. **Blocked and
+skipped are not passes**: those vectors are unexercised here, and a green run
+against these provisioners is not evidence that grace behaves.
+
+Failover recovery agreed closely across the two clusters and stayed inside the
+2m0s budget for the default profile: CHAOS-02, CHAOS-06 and OBS-02 recovered in
+1m43s to 1m46s on both. CHAOS-05's five cycles took 8m48s on `gke-w1` and 9m6s
+on `gke-w2`, whose worst single cycle, 1m58s, is the narrowest margin against
+the budget recorded so far and is worth watching rather than acting on.
 
 ### 5.3 Delivery steps
 
@@ -484,7 +496,7 @@ doc, where it has one, is named in its row.
 | 4 | Grace and lock reclaim: CHAOS-05, CHAOS-06, CHAOS-07. [Design](04-grace-and-lock-reclaim-design.md) (historical; consolidated in [doc 03](03-chaos-operations-design.md) and [doc 06](06-observability-design.md)) | done, [PR #8](https://github.com/mikebz/nfs-verification/pull/8) |
 | 5 | Close out PROV: PROV-02, PROV-05 to PROV-11. [Design](02-provisioning-design.md) (serves all PROV cases) | done, [PR #10](https://github.com/mikebz/nfs-verification/pull/10) |
 | 6 | Close out DATA: DATA-06 to DATA-13, `locktool`. [Design](05-data-path-and-locktool-design.md) (serves all DATA cases) | done except the soak, [PR #12](https://github.com/mikebz/nfs-verification/pull/12) onward. DATA-10 has now been run and passes (2026-09-13); DATA-14 is deferred (Section 3.2) |
-| 7 | OBS: OBS-01 through OBS-07. [Design](06-observability-design.md) | **in progress**, two of three PRs done: the kubelet stats reader and OBS-06 ([PR #29](https://github.com/mikebz/nfs-verification/pull/29)), red on the quota check ([F-009](findings.md)); then the server metrics reader and OBS-07 ([PR #74](https://github.com/mikebz/nfs-verification/pull/74)), run against `gke-w1` and `gke-w2` as shipped, red on both because neither deployment declares an endpoint ([F-023](findings.md)), and run end to end on `gke-w2` with Ganesha's exposer enabled by hand, where the first green was a false one ([F-024](findings.md)). OBS-01 and OBS-05 are left. Section 3.5 stays open either way: OBS-01's behavioral half needs a fault from step 10 |
+| 7 | OBS: OBS-01 through OBS-07. [Design](06-observability-design.md) | **in progress**, two of three PRs done: the kubelet stats reader and OBS-06 ([PR #29](https://github.com/mikebz/nfs-verification/pull/29)), red on the quota check ([F-009](findings.md)); then the server metrics reader and OBS-07 ([PR #74](https://github.com/mikebz/nfs-verification/pull/74)), run against `gke-w1` and `gke-w2` as shipped, red on both because neither deployment declares an endpoint ([F-023](findings.md)), and run end to end on `gke-w2` with Ganesha's exposer enabled by hand, where the first green was a false one ([F-024](findings.md)). The whole-suite runs of 2026-09-17 reached OBS-07's later steps for the first time, on a `gke-w2` that has since also been annotated by hand, and found the case scrapes before the server has recreated its traffic-driven metric families ([F-025](findings.md)): fixing that is the open harness item. OBS-01 and OBS-05 are left. Section 3.5 stays open either way: OBS-01's behavioral half needs a fault from step 10 |
 | 8 | SEC: SEC-01 through SEC-09. [Design](07-security-design.md) | **in review**, [PR #57](https://github.com/mikebz/nfs-verification/pull/57): SEC-03 to SEC-09 are in the tree and the whole group was run against `gke-w1` (run `20260914-011748`, 2m45s). SEC-05 is red and stays red ([F-018](findings.md)), SEC-06 skips on a single-stack cluster, the rest pass. Review also rewrote three cases: SEC-04, which no longer reads the server at all and now asks a third node whether the locks survived; SEC-02, which probes a privileged operation rather than what `stat` prints ([F-021](findings.md)); and SEC-03, which now asks its question behind a gated directory, correcting [F-020](findings.md) |
 | 9 | Close out SCALE: SCALE-01 to SCALE-07 | not started |
 | 10 | Close out CHAOS: CHAOS-03, CHAOS-04, CHAOS-08 to CHAOS-18, and OBS-01's behavioral half | not started |
