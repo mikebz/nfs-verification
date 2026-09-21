@@ -294,9 +294,19 @@ func listeningInodes(f listenerFacts, port uint16) ([]string, error) {
 				continue
 			}
 			listening = append(listening, c.Local.Port())
-			if c.Local.Port() == port && c.Inode != "" {
-				inodes = append(inodes, c.Inode)
+			if c.Local.Port() != port {
+				continue
 			}
+			// A listener with no inode is a listener that cannot be
+			// joined to a holder, and dropping it quietly would let a
+			// second socket on this port go unexamined while the first
+			// one names the process to kill. There is no such row on a
+			// healthy system: a TCP socket in LISTEN always has one.
+			if c.Inode == "" {
+				return nil, fmt.Errorf("a socket listening on port %d in %s carries no inode, so which "+
+					"process holds it cannot be established", port, path)
+			}
+			inodes = append(inodes, c.Inode)
 		}
 	}
 	if len(inodes) == 0 {
@@ -347,11 +357,38 @@ func pickHolder(f listenerFacts, inodes []string) (ServerProcess, error) {
 		return ServerProcess{}, fmt.Errorf("the process holding it has no name the kernel will report")
 	}
 	sort.Ints(byName[name])
+	// The name is observed from /proc/<pid>/comm, but the signal is aimed by
+	// matching the command line, so a name that does not appear in the holder's
+	// own command line is a name the signaller will not find. That costs a
+	// blocked case at best; at worst the text matches some unrelated command
+	// line and the fault lands somewhere else entirely. A process that renamed
+	// itself with prctl(PR_SET_NAME) is how the two come apart, and there is no
+	// reason to prefer a guess over saying so.
+	for _, pid := range byName[name] {
+		if !matchableByName(f, pid, name) {
+			return ServerProcess{}, fmt.Errorf("the process holding it reports the name %q, which does not "+
+				"appear in its command line %q, so a signal aimed by name would not reach it",
+				name, strings.TrimSpace(f.argv0[pid]))
+		}
+	}
 	return ServerProcess{
 		Name:  name,
 		PID:   byName[name][0],
 		Inode: strings.Join(inodes, ","),
 	}, nil
+}
+
+// matchableByName reports whether a signal aimed by name would find this pid.
+//
+// The signaller matches a substring of the whole command line, whose first
+// token is argv[0]; a kernel thread has no command line at all and is rendered
+// by ps as its bracketed name, which contains the name by construction.
+func matchableByName(f listenerFacts, pid int, name string) bool {
+	argv0 := strings.TrimSpace(f.argv0[pid])
+	if argv0 == "" {
+		return true
+	}
+	return strings.Contains(argv0, name)
 }
 
 // processName is what to match on the node for a pid.

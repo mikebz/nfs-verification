@@ -93,6 +93,23 @@ func serverAsItIs() readerOutput {
 	}
 }
 
+// rowCutShort ends the socket table row containing match before its tenth
+// column, the inode. The parser reads the inode by column position and leaves
+// it empty when the row is shorter than that, so this is what a row the join
+// cannot use actually looks like to the code under test.
+func rowCutShort(table, match string) string {
+	lines := strings.Split(table, "\n")
+	for i, line := range lines {
+		if !strings.Contains(line, match) {
+			continue
+		}
+		if f := strings.Fields(line); len(f) > 9 {
+			lines[i] = strings.Join(f[:9], " ")
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
 // TestDiscoveryNamesWhatHoldsThePort covers the whole point of the join: on a
 // supervised server the process serving NFS is not PID 1 and is not what the
 // PodSpec declares, and the only thing that distinguishes it is which process
@@ -155,6 +172,16 @@ func TestListeningInodesRefusesWhatItCannotRead(t *testing.T) {
 	halfRead.tables = map[string]string{"/proc/net/tcp6": realProcNetTCP6}
 	halfRead.tableErrors = []string{"/proc/net/tcp Permission denied"}
 
+	// A LISTEN row on 2049 cut short before its inode column, which is what a
+	// partially written read of the table looks like. No healthy system
+	// produces one, which is why it is posed here rather than parsed from a
+	// real table: the point is that it must not be dropped quietly, because
+	// dropping it leaves a listener on the port that nothing examined.
+	inodeless := serverAsItIs()
+	inodeless.tables = map[string]string{
+		"/proc/net/tcp6": rowCutShort(realProcNetTCP6, ":0801 "),
+	}
+
 	for _, tc := range []struct {
 		name string
 		out  readerOutput
@@ -163,6 +190,7 @@ func TestListeningInodesRefusesWhatItCannotRead(t *testing.T) {
 		{"no listener on the NFS port", noListener, "nothing is listening"},
 		{"reader cut short", truncated, "did not run to completion"},
 		{"one family unreadable, the other listening", halfRead, "could not be read"},
+		{"listener on the port with no inode", inodeless, "carries no inode"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := listeningInodes(parseListenerFacts(tc.out.String()), NFSPort)
@@ -198,6 +226,14 @@ func TestPickHolderRefusesWhatItCannotAttribute(t *testing.T) {
 	truncated := serverAsItIs()
 	truncated.truncated = true
 
+	// A holder whose comm and argv[0] disagree about more than length, which
+	// is what prctl(PR_SET_NAME) produces. The name is well formed and the
+	// join is unambiguous; it is unusable anyway, because the signaller
+	// matches command lines and this name is in none of them.
+	renamed := serverAsItIs()
+	renamed.procs = []string{"1 nfs-provisioner", "152 nfsd-worker"}
+	renamed.argv0 = []string{"1 /nfs-provisioner", "152 /usr/bin/ganesha.nfsd"}
+
 	for _, tc := range []struct {
 		name string
 		out  readerOutput
@@ -207,6 +243,7 @@ func TestPickHolderRefusesWhatItCannotAttribute(t *testing.T) {
 		{"no way to resolve an fd", blind, "readlink"},
 		{"socket held by two different programs", disputed, "more than one kind"},
 		{"scan cut short", truncated, "did not run to completion"},
+		{"holder renamed itself away from its command line", renamed, "does not appear in its command line"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := pickHolder(parseListenerFacts(tc.out.String()), []string{"8470545"})

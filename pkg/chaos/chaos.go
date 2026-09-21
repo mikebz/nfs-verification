@@ -250,7 +250,9 @@ func chooseProcess(recorded, whyNotRecorded string, t Target) (Process, error) {
 	// whatever holds the socket, and on some image that could be a wrapper;
 	// what the node would receive is a SIGKILL to every process of that name,
 	// so this guard is the only thing standing between a chaos case and taking
-	// a node out of service. There is no NFS server it rejects.
+	// a node out of service. It rejects no name any known NFS server daemon
+	// runs under, and where it does reject one the case reports blocked rather
+	// than signalling a guess.
 	switch {
 	case recorded == "":
 		why := whyNotRecorded
@@ -273,9 +275,24 @@ func chooseProcess(recorded, whyNotRecorded string, t Target) (Process, error) {
 // usableAsPattern rejects names too generic to signal on. Killing everything
 // matching "sh" on a node takes the node out, and a case that does that is a
 // worse outage than the one it was written to measure.
+//
+// Two of the rejections are not about generic names. "nfs-provisioner" is the
+// reference deployment's supervisor, the process F-026 is about: it is PID 1 in
+// the server pod and it starts the daemon that actually serves, so a fault
+// aimed at it measures a pod restart and reports it as an NFS failover. A name
+// ending ".sh" is a wrapper for the same reason. Socket-holder discovery should
+// never produce either, since neither holds the listening socket; they are
+// rejected anyway because this guard is the last thing to run before a
+// node-wide SIGKILL, and it is worth more as a check on discovery than as a
+// restatement of what discovery already promises. A deployment whose NFS server
+// genuinely runs under one of these names reports blocked here, which is the
+// direction to fail in.
 func usableAsPattern(name string) bool {
 	switch name {
-	case "", "sh", "bash", "dash", "env", "sleep", "tini", "dumb-init", "entrypoint.sh", "start.sh":
+	case "", "sh", "bash", "dash", "env", "sleep", "tini", "dumb-init", "nfs-provisioner":
+		return false
+	}
+	if strings.HasSuffix(name, ".sh") {
 		return false
 	}
 	return len(name) >= 4

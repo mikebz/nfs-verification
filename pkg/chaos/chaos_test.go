@@ -190,16 +190,26 @@ func TestChooseProcessNeedsPreflight(t *testing.T) {
 // is the rule standing between a chaos case and killing the wrong process on
 // somebody's cluster.
 //
+// The supervisor name and the wrapper scripts are here because the guard
+// stopped rejecting them once, when it moved packages: "nfs-provisioner" is the
+// reference deployment's PID 1 (F-026), and an arbitrary ".sh" is the shape a
+// wrapper takes, so a reject list naming only two known scripts is a list that
+// the next image walks around.
+//
 // Steps:
 //  1. Assert the names real NFS servers run under are accepted.
-//  2. Assert shells, wrappers, empty and short names are refused.
+//  2. Assert shells, wrappers, supervisors, empty and short names are refused.
 func TestUsableAsPattern(t *testing.T) {
 	for _, name := range []string{"ganesha.nfsd", "nfsd", "unfsd", "rpc.nfsd"} {
 		if !usableAsPattern(name) {
 			t.Errorf("%q was rejected, but it names a server process", name)
 		}
 	}
-	for _, name := range []string{"", "sh", "bash", "env", "tini", "run", "start.sh", "entrypoint.sh"} {
+	for _, name := range []string{
+		"", "sh", "bash", "env", "tini", "run",
+		"start.sh", "entrypoint.sh", "run-nfs.sh",
+		"nfs-provisioner",
+	} {
 		if usableAsPattern(name) {
 			t.Errorf("%q was accepted; killing everything matching it on a node takes the node out", name)
 		}
