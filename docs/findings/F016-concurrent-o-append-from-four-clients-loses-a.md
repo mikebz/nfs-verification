@@ -7,18 +7,18 @@ Updated: 2026-09-17
 
 **Found:** 2026-09-13, GKE cluster `gke-w1`, Kubernetes v1.37.0-gke.2941000,
 three workers on Container-Optimized OS, kernel 6.12.94+, StorageClass `nfs`
-backed by `nfs-server-provisioner`, profile `default`. DATA-02 has now run five
-times on this cluster:
+backed by `nfs-server-provisioner`, profile `default`. DATA-02 has now run six
+times on that cluster and once on `gke-w2`:
 
-| Run | Target | Result |
-|---|---|---|
-| `e2e-full-20260911` | `make test-e2e` | 150 of 200, 0 torn |
-| `full-e2e-20260912b` | `make test-e2e` | 150 of 200, 0 torn |
-| `pr46-data-20260913` | `make test-data` | 200 of 200 |
-| `pr47-data-20260913` | `make test-data` | 200 of 200 |
-| `pr47-e2e-20260913` | `make test-e2e` | 150 of 200, 0 torn, `appender0` lost records 1-50 |
-| `w1-e2e-20260916-2015` | `make test-e2e` | 150 of 200, 0 torn, `appender3` lost records 1-50 |
-| `w2-e2e-20260916-2015` | `make test-e2e` | 150 of 200, 0 torn, `appender2` lost records 1-50 |
+| Run | Cluster | Target | Result |
+|---|---|---|---|
+| `e2e-full-20260911` | `gke-w1` | `make test-e2e` | 150 of 200, 0 torn |
+| `full-e2e-20260912b` | `gke-w1` | `make test-e2e` | 150 of 200, 0 torn |
+| `pr46-data-20260913` | `gke-w1` | `make test-data` | 200 of 200 |
+| `pr47-data-20260913` | `gke-w1` | `make test-data` | 200 of 200 |
+| `pr47-e2e-20260913` | `gke-w1` | `make test-e2e` | 150 of 200, 0 torn, `appender0` lost records 1-50 |
+| `w1-e2e-20260916-2015` | `gke-w1` | `make test-e2e` | 150 of 200, 0 torn, `appender3` lost records 1-50 |
+| `w2-e2e-20260916-2015` | `gke-w2` | `make test-e2e` | 150 of 200, 0 torn, `appender2` lost records 1-50 |
 
 **Updated 2026-09-17**: the last two rows are the first whole-suite runs against
 a **second** cluster, `gke-w2`, on a different server image (locally built
