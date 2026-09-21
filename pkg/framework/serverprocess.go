@@ -38,6 +38,16 @@ import (
 // nfs-provisioner, which starts and supervises ganesha.nfsd: a harness that
 // took the command would aim CHAOS-01 at the supervisor. See F-026 in
 // docs/findings.md.
+//
+// The name is a name, not a handle, so it scopes a fault to a node and no
+// further: the suite assumes at most one NFS server process per node. Nothing
+// enforces that, and a server pod's own network namespace means two of them on
+// one node would each bind the NFS port without conflict and both die from one
+// signal. It holds against the reference provisioner, which refuses to
+// provision when its Service resolves to more than one endpoint. Test plan
+// section 4.1 has the argument; a deployment that breaks the assumption needs
+// the signal scoped to ServerProcess.PID, which is recorded and, today,
+// evidence only.
 
 // serverProcessProbeTimeout bounds one read. The pod's containers are tried in
 // turn and the node is read once, each on its own clock, so one container that
