@@ -52,6 +52,7 @@ the scope and the status are read there rather than mirrored here:
 | [`05-data-path-and-locktool-design.md`](docs/05-data-path-and-locktool-design.md) | Data path, byte-range locking and `locktool` |
 | [`06-observability-design.md`](docs/06-observability-design.md) | Observability |
 | [`07-security-design.md`](docs/07-security-design.md) | Security and client identity |
+| [`08-cluster-traits-and-preflight-design.md`](docs/08-cluster-traits-and-preflight-design.md) | Cluster traits and preflight architecture |
 
 Every fact has one home: what a case must verify and how far delivery has got
 are the test plan's, how the harness works and how to run it are this file's,
