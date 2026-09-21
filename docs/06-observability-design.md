@@ -2,10 +2,12 @@
 
 Author: mikebz@
 Created: 2026-09-11
-Updated: 2026-09-16
+Updated: 2026-09-17
 Status: **in progress.** Delivery step 7 (OBS-06 shipped in [PR #29](https://github.com/mikebz/nfs-verification/pull/29);
-OBS-07 shipped in step 7 and run against `gke-w1` and `gke-w2`, red on both as shipped ([F-023](findings.md))
-and green only with Ganesha's exposer enabled by hand ([F-024](findings.md)); OBS-01 and OBS-05 designed). OBS-02 and OBS-03 shipped in
+OBS-07 shipped in step 7 and run against `gke-w1` and `gke-w2`, red on both as shipped ([F-023](findings.md)),
+briefly green with Ganesha's exposer enabled by hand and falsely so ([F-024](findings.md)), and red again
+on the whole-suite runs of 2026-09-17 for a reason of the harness's own making ([F-025](findings.md));
+OBS-01 and OBS-05 designed). OBS-02 and OBS-03 shipped in
 Step 4 ([PR #8](https://github.com/mikebz/nfs-verification/pull/8));
 OBS-04 shipped in Step 2b ([PR #4](https://github.com/mikebz/nfs-verification/pull/4)). Consolidated here to serve
 the complete Observability test group.
@@ -367,6 +369,16 @@ specific to the Observability test group:
   idle, so a genuinely restarted process re-derived exactly the same counters. Counters are now split
   three ways, continuity requires a strict advance, and all-equal reports `resumed-indeterminate`. The
   deployment's real counter behaviour across a restart remains unmeasured, which is the honest state.
+- **[F-025](findings.md) (A name with no sample yet is not a lost one)**: the whole-suite runs of
+  2026-09-17 reached OBS-07's later steps for the first time and returned `never-resumed` over 21
+  metric names, every one of them a byte counter, a size histogram or a cache counter. Ganesha creates
+  a family on its first sample, so a scrape taken seconds after the restart, before any client traffic,
+  finds them missing; all 21 were back on the same process once traffic resumed, and the post-restart
+  scrape returns the same 367 series under 66 names every time regardless of what preceded it. That is
+  also what F-024's idle server published on both sides, which is why it saw no loss. The open item
+  ([issue #81](https://github.com/mikebz/nfs-verification/issues/81)) is for the case to drive I/O after
+  the restart before the second scrape, so that a name still missing is one the server really lost;
+  until then the assertion is right and its timing is not.
 
 ## 10. Sources
 

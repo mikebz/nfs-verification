@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-16
-Updated: 2026-09-16
+Updated: 2026-09-17
 
 
 **Found:** 2026-09-15, the first runs of OBS-07, against GKE clusters `gke-w1`
@@ -228,3 +228,21 @@ Read next to F-008 and F-022, both channels the test plan allows for NFS-level
 observability are empty as configured, and in both cases the content exists and
 is being sent somewhere nobody is looking: grace announcements to a log file
 inside the export, and metrics to an exposer that is never started.
+
+### What changed after this was written
+
+**2026-09-17**: `gke-w2` no longer matches the description above. Its server pod
+now carries `prometheus.io/scrape`, `prometheus.io/port` and `prometheus.io/path`
+alongside the `Enable_Metrics` edit, both added by hand after this entry was
+written, so the endpoint is now discoverable as well as live. The sentence
+"as configured, this pod marks no scrape target a scraper could discover" was
+true of `gke-w2` when it was written and is not true of it today.
+
+Nothing here is retracted: both statements still describe the chart and the
+image, which is what the entry is about, and `gke-w1` is unchanged in every
+respect. What is different is that **`gke-w2` is no longer an as-shipped
+deployment**, and a run against it says nothing about what an operator who
+installed this chart would see. The first whole-suite run to reach OBS-07's
+later steps did so only because of that drift, and what it found is
+[F-025](F025-a-metric-name-with-no-sample-yet-is-not-a-lost-one.md).
+
