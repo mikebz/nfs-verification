@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-10
-Updated: 2026-09-18
+Updated: 2026-09-21
 
 End-to-end verification of NFS RWX persistent volumes on Kubernetes.
 
@@ -183,6 +183,21 @@ reused by later runs for `-preflight-max-age` (8h by default). A relative
 from the package directory. Pass `-refresh-preflight`
 to redo it, or `-env-file` to point at a specific record.
 
+Among what it records is the name of the process serving NFS in each server
+pod: whatever holds the listening socket on 2049, which is the one fact that
+identifies a server without reference to any implementation. It is read from
+two places, because neither answers alone. The pod names the socket, since
+which socket is the server's is a question about its network namespace. The
+node agent names the process holding it, since inside the pod the server's file
+descriptors are unreadable without a capability a container does not have, and
+since the node's is the process namespace a kill is matched in
+([F-027](docs/findings.md)). That name is the only thing CHAOS-01, DATA-12 and
+DATA-13 will signal: there is no flag to state it and no fallback to the
+container's declared command, because on a supervised server the command names
+the supervisor and killing that measures a container restart
+([F-026](docs/findings.md)). A server preflight cannot read leaves the name
+empty, preflight says so in a note, and those three cases report blocked.
+
 Nothing runs until preflight passes. Preflight writes
 `artifacts/<run-id>/environment.json`; a failed case writes its own bundle under
 `artifacts/<run-id>/<CASE-ID>/` with pod logs, Kubernetes Events, `/proc/mounts`
@@ -229,6 +244,7 @@ claims.
 | `evidenceReadTimeout` | 10s | One named file's copy, per file |
 | `kubeletReadTimeout` | 30s | One kubelet stats read, per node |
 | `metricsReadTimeout` | 30s | One scrape of the server's metrics endpoint |
+| `serverProcessProbeTimeout` | 20s | One container's probe for the process serving NFS, per container |
 
 Two of these are not round numbers by accident. Test pods carry a 5 second
 termination grace period, so a pod still in the API after
@@ -300,7 +316,6 @@ answer them:
 | `-pvc-size` | claim size | defaults to 1Gi: a backing volume that cannot satisfy the request fails every case, and no case here needs more |
 | `-refresh-preflight` | forcing rediscovery | the cached result is reused until it ages out |
 | `-tools-image` | client pods and the node agent | needs `dd`, `sha256sum`, `flock`, `stat` and `nsenter`; defaults to `alpine:3.20`, whose busybox carries all five. DATA-07 and DATA-11 probe two things this image may not have, `dd`'s `oflag=direct` and `fallocate`'s `-p`, and report blocked naming this flag rather than filing a tool gap as a protocol gap |
-| `-server-process` | CHAOS-01, DATA-12, DATA-13 | discovered during preflight from running processes, probes, or container command; pass only when discovery cannot identify the daemon |
 | `-grace-enter-pattern`, `-grace-exit-pattern` | OBS-03, CHAOS-05, CHAOS-07 | nothing in the Kubernetes API states how a server words grace entry and exit; the built-in rule covers the common wordings, and these state it for a server it does not. Set both or neither: one alone would report every failover as a grace re-entry loop |
 | `-root-squash` | SEC-02 | nothing in the Kubernetes API states the export's squash setting; without it the case records what the export does instead of asserting a value nobody stated |
 

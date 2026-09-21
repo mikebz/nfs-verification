@@ -94,7 +94,7 @@ func Run(ctx context.Context) (*Result, error) {
 	e.HardMount = true
 
 	// Everything past here is recorded, not required, except the timing values.
-	if e.Servers, err = framework.DescribeServers(ctx, c); err != nil {
+	if e.Servers, err = framework.DescribeServers(ctx, c, agent); err != nil {
 		return nil, fmt.Errorf("discovering NFS server pods: %w", err)
 	}
 	e.FanOut = len(e.Servers)
@@ -104,15 +104,17 @@ func Run(ctx context.Context) (*Result, error) {
 			"otherwise every CHAOS case that kills the server will skip, and every case that asserts " +
 			"the server did not restart under its load will report blocked instead")
 	}
-
-	proc, err := framework.DiscoverServerProcess(ctx, c, agent)
-	if err != nil {
-		e.AddNote("discovering NFS server process: %v", err)
-	} else if proc != "" {
-		e.ServerProcess = proc
-	} else if e.FanOut > 0 {
-		e.AddNote("cannot tell which process serves NFS: server containers declare no known command " +
-			"and process inspection found no candidate; in-place kill cases will report blocked unless -server-process is passed")
+	// The cases that signal the server in place read this name rather than
+	// deriving one, so a gap here is worth saying out loud now: it decides
+	// three cases, and finding out at the fault means an hour of a run has
+	// already been spent. Not a preflight failure, since the other forty cases
+	// do not need it.
+	for _, s := range e.Servers {
+		if s.Process == "" {
+			e.AddNote("the process serving NFS in %s/%s could not be named (%s), so CHAOS-01, DATA-12 and "+
+				"DATA-13 will report blocked: there is nothing else to ask, and signalling a guessed name "+
+				"node-wide is worse than not running them", s.Namespace, s.Pod, s.ProcessNote)
+		}
 	}
 
 	e.CSIDriverImages = csiImages(ctx, c, e.CSIDriver)

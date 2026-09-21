@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-10
-Updated: 2026-09-17
+Updated: 2026-09-21
 Version: 1.0 (v1 scope)
 
 This is the requirements and delivery document: what gets verified, why, the
@@ -363,6 +363,7 @@ next phase has to rediscover:
 - **Fault operations live in `pkg/chaos`, not on the per-case fixture.** Faults are the one thing a reader should be able to enumerate in one file, and a fault that records itself cannot be forgotten by the case that injected it.
 - **Targets are resolved live, at case time, never from the cached environment record.** Preflight names the pod that was there when it ran; the chaos cases move pods around. A stale target either fails to act or acts on the wrong thing.
 - **A fault that was not injected is never measured.** An operation that cannot identify its target, or that matched nothing, is an error, and the case reports blocked. A recovery measured from a fault that never landed passes for the wrong reason.
+- **A node runs at most one NFS server process, and the suite assumes it.** A signal is delivered by matching the process name across the whole node, so a node carrying two servers would take one fault and lose both, and the case would attribute a two-server outage to a one-server fault. Nothing in Kubernetes prevents that arrangement: a server pod has its own network namespace, so two of them on one node would each bind 2049 without conflict. What makes the assumption safe against the deployment under test is the provisioner, which advertises a Service address and [refuses to provision at all](https://github.com/kubernetes-sigs/nfs-ganesha-server-and-external-provisioner/blob/master/pkg/volume/provision.go#L425-L444) when that Service resolves to more than one endpoint, capping its fan-out at one pod per cluster. A deployment that genuinely runs several servers needs the signal scoped to the pid discovery already records, and that is work for the case that needs it rather than ahead of it.
 - **A baseline that could not be read blocks the assertion that needs it, not the case that carries it.** A before-and-after reading whose "before" is unavailable returns an error, never a zero: two zeros compare equal and the assertion passes without having measured anything. The assertion reports blocked on its own, so that the rest of the case, which is usually about something else entirely, still returns a verdict. This is why the server restart count refuses to answer where discovery found no server pods, and where the pods it found have not reported a container yet.
 - **Both ends of any measurement come from one clock.** Times that will be compared are read from the same pod, never one from a pod and one from the workstation: a few seconds of skew is invisible and moves every number. Where two clocks are unavoidable, because the two ends are on different nodes by construction, the window is narrowed by a guard band in `pkg/slo` and only an unambiguous violation is reported.
 - **A case waits past its target rather than up to it.** Stopping at the SLO reports "timed out" where the case could report how long recovery actually took, and the second is what a defect report needs.

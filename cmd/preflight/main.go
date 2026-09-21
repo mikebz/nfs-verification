@@ -9,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/mikebz/nfs-verification/pkg/framework"
@@ -30,9 +31,20 @@ func main() {
 	}
 	b, _ := json.MarshalIndent(res.Env, "", "  ")
 	fmt.Println(string(b))
-	proc := res.Env.ServerProcess
+	// One name per server pod, because with fan-out greater than one they
+	// need not be the same process, and a summary that implied they were
+	// would be the first thing to mislead a reader of a failed run.
+	procs := make([]string, 0, len(res.Env.Servers))
+	for _, s := range res.Env.Servers {
+		if s.Process == "" {
+			procs = append(procs, s.Pod+"=undiscovered")
+			continue
+		}
+		procs = append(procs, s.Pod+"="+s.Process)
+	}
+	proc := strings.Join(procs, ",")
 	if proc == "" {
-		proc = "undiscovered"
+		proc = "no servers"
 	}
 	fmt.Fprintf(os.Stderr, "\npreflight passed: storageClass=%s csi=%s servers=%d serverProcess=%s profile=%s(lease=%ds grace=%ds)\n",
 		res.Env.StorageClass, res.Env.CSIDriver, res.Env.FanOut, proc,

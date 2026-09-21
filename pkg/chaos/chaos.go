@@ -13,7 +13,7 @@ package chaos
 import (
 	"context"
 	"fmt"
-	"path"
+	"slices"
 	"strings"
 	"time"
 
@@ -34,8 +34,9 @@ type Target struct {
 	Node      string
 	// Controller is the owning workload, empty when the pod is unmanaged.
 	Controller string
-	// Containers holds the container commands, which is where the process name
-	// comes from when nobody passed one.
+	// Containers is the pod's containers, for a case that has to look inside
+	// one. It is not where the process name comes from: that is preflight's
+	// answer alone, see ResolveProcess.
 	Containers []corev1.Container
 }
 
@@ -138,80 +139,181 @@ func unfitToInjure(p *corev1.Pod) string {
 	return ""
 }
 
-// ProcessPattern is the fixed string that identifies the server process on the
-// node. The flag wins; otherwise it comes from the preflight-discovered
-// environment, probe inspection, or the container's own command.
-func ProcessPattern(t Target) (string, error) {
-	// The flag is checked exactly as a derived name is. An operator who passes
-	// -server-process=sh means a server called sh, but what the node gets is a
-	// SIGKILL to every shell on it, and the guard below is the only thing
-	// standing between a chaos case and taking the node out of service. There
-	// is no NFS server this rejects, so nothing is lost by refusing.
-	if p := framework.Cfg().ServerProcess; p != "" {
-		if !usableAsPattern(p) {
-			return "", fmt.Errorf("-server-process=%q is too generic to signal on: it would match processes "+
-				"that have nothing to do with NFS, and killing those on a node takes the node out of service. "+
-				"Pass the name the server process actually runs under", p)
-		}
-		return p, nil
-	}
-	if e := framework.SuiteEnv(); e != nil && e.ServerProcess != "" {
-		if !usableAsPattern(e.ServerProcess) {
-			return "", fmt.Errorf("discovered server process %q is too generic to signal on: it would match processes "+
-				"that have nothing to do with NFS, and killing those on a node takes the node out of service. "+
-				"Pass -server-process with the name the server process actually runs under", e.ServerProcess)
-		}
-		return e.ServerProcess, nil
-	}
-	for _, c := range t.Containers {
-		for _, cand := range framework.ServerDaemonCandidates {
-			if probeMentions(c, cand) {
-				return cand, nil
-			}
-		}
-	}
-	for _, c := range t.Containers {
-		if len(c.Command) == 0 {
-			continue
-		}
-		if name := path.Base(c.Command[0]); usableAsPattern(name) {
-			return name, nil
-		}
-	}
-	return "", fmt.Errorf("cannot tell which process serves NFS in pod %s: its containers declare no command, "+
-		"so the process name lives in the image entrypoint where the cluster cannot see it; pass -server-process",
-		t.Pod)
+// Process is the process a fault is aimed at: the pattern that will be matched
+// on the node, where that pattern came from, and the evidence for it.
+//
+// There is one source, what preflight observed holding the listening socket,
+// and the source still travels with the pattern. A fault record that says only
+// which name was signalled cannot be audited afterwards, and the field is what
+// would make a later change of source visible in the record rather than only in
+// the code.
+type Process struct {
+	// Pattern is matched against every command line on the node.
+	Pattern string
+	// Source names where the pattern came from, for the fault record.
+	Source string
+	// Evidence is what backs it, empty for a pattern nobody had to derive.
+	Evidence string
 }
 
-func probeMentions(c corev1.Container, pattern string) bool {
-	checkProbe := func(p *corev1.Probe) bool {
-		if p != nil && p.Exec != nil {
-			return strings.Contains(strings.Join(p.Exec.Command, " "), pattern)
+// ResolveProcess names the process a fault will signal. Preflight is the only
+// source. It observed which process holds the listening NFS socket in each
+// server pod and recorded it, and a case reads that record.
+//
+// There is deliberately nothing to fall back to. The two candidates a harness
+// could invent are both wrong often enough to be dangerous: the container's
+// declared command is the supervisor on a supervised server, so killing it
+// stops the pod rather than the NFS server and every recovery measured
+// afterwards describes a container restart (F-026 in docs/findings.md); and a
+// name an operator types is a name nobody checked against the running server,
+// signalled node-wide. A guess that kills the wrong process does not fail the
+// case, it produces a confident measurement of the wrong event.
+//
+// So when preflight could not name it, the case reports blocked and says to run
+// preflight again. Preflight is a precondition for the suite, not an optional
+// step: a run where it cannot read the server pod has a problem no fallback
+// here would fix.
+//
+// Nothing is probed at fault time. The name is a property of the image and
+// cannot have changed since preflight read it, so a case that re-derived it
+// would pay an exec into the server for an answer it already has. The pid is
+// the opposite, it changes on every restart, and that is why none is recorded:
+// a case that needs one observes it live.
+func ResolveProcess(f *framework.Framework, t Target) (Process, error) {
+	recorded, why := recordedProcess(f, t)
+	return chooseProcess(recorded, why, t)
+}
+
+// recordedProcess returns what preflight recorded for the target pod, and why
+// not when it recorded nothing. The pod is matched by name rather than taken
+// first, because with fan-out greater than one the record holds several and a
+// fault is aimed at one of them.
+//
+// A record is reused for up to -preflight-max-age, and a StatefulSet recreates
+// a pod under the same name, so name alone does not establish that the record
+// describes the pod in front of us. The images do: a pod running something else
+// than what preflight looked at may well serve NFS from a differently named
+// process, and the recorded name would then be signalled across the node
+// against whatever else answers to it. The record is refused rather than
+// aged out, because the stale half is the part that matters and a run that
+// silently re-probed would lose the audit trail the fault record depends on.
+func recordedProcess(f *framework.Framework, t Target) (string, string) {
+	if f == nil || f.Env == nil {
+		return "", "no environment record is loaded"
+	}
+	for _, s := range f.Env.Servers {
+		if s.Namespace == t.Namespace && s.Pod == t.Pod {
+			if why := imagesDiffer(s.Images, t.Containers); why != "" {
+				return "", why
+			}
+			if s.Process != "" {
+				return s.Process, ""
+			}
+			return "", s.ProcessNote
 		}
-		return false
 	}
-	if checkProbe(c.LivenessProbe) || checkProbe(c.ReadinessProbe) || checkProbe(c.StartupProbe) {
-		return true
+	return "", fmt.Sprintf("preflight recorded no server pod %s/%s; it was discovered after preflight ran, "+
+		"so re-run it with -refresh-preflight", t.Namespace, t.Pod)
+}
+
+// imagesDiffer says why the recorded images do not describe these containers,
+// or "" when they do. Order is significant because both lists come from the
+// same PodSpec field in the same order, so a difference in order is a
+// difference in the pod.
+func imagesDiffer(recorded []string, containers []corev1.Container) string {
+	live := make([]string, 0, len(containers))
+	for _, ct := range containers {
+		live = append(live, ct.Image)
 	}
-	return strings.Contains(strings.Join(c.Args, " "), pattern)
+	if slices.Equal(recorded, live) {
+		return ""
+	}
+	return fmt.Sprintf("preflight recorded this pod running %s and it now runs %s, so the record describes "+
+		"a pod that has been replaced and the process it named may not be the one serving now; re-run "+
+		"preflight with -refresh-preflight",
+		imageList(recorded), imageList(live))
+}
+
+// imageList renders an image list for a message, naming the empty case rather
+// than printing nothing.
+func imageList(images []string) string {
+	if len(images) == 0 {
+		return "no images"
+	}
+	return strings.Join(images, ", ")
+}
+
+// chooseProcess judges the recorded name, split out so the decision can be
+// tested without a cluster.
+func chooseProcess(recorded, whyNotRecorded string, t Target) (Process, error) {
+	// A recorded name is still checked before it is signalled. Preflight names
+	// whatever holds the socket, and on some image that could be a wrapper;
+	// what the node would receive is a SIGKILL to every process of that name,
+	// so this guard is the only thing standing between a chaos case and taking
+	// a node out of service. It rejects no name any known NFS server daemon
+	// runs under, and where it does reject one the case reports blocked rather
+	// than signalling a guess.
+	switch {
+	case recorded == "":
+		why := whyNotRecorded
+		if why == "" {
+			why = "preflight recorded no process for this pod"
+		}
+		return Process{}, fmt.Errorf("preflight did not name the process serving NFS in pod %s: %s. "+
+			"Re-run preflight with -refresh-preflight", t.Pod, why)
+	case !usableAsPattern(recorded):
+		return Process{}, fmt.Errorf("preflight recorded %q as serving NFS in pod %s, which is too generic to "+
+			"signal on: killing every process of that name on a node takes the node out of service", recorded, t.Pod)
+	}
+	return Process{
+		Pattern:  recorded,
+		Source:   "observed by preflight to be serving NFS",
+		Evidence: "recorded in environment.json as the process holding the listening socket on port 2049",
+	}, nil
 }
 
 // usableAsPattern rejects names too generic to signal on. Killing everything
 // matching "sh" on a node takes the node out, and a case that does that is a
 // worse outage than the one it was written to measure.
+//
+// Two of the rejections are not about generic names. "nfs-provisioner" is the
+// reference deployment's supervisor, the process F-026 is about: it is PID 1 in
+// the server pod and it starts the daemon that actually serves, so a fault
+// aimed at it measures a pod restart and reports it as an NFS failover. A name
+// ending ".sh" is a wrapper for the same reason. Socket-holder discovery should
+// never produce either, since neither holds the listening socket; they are
+// rejected anyway because this guard is the last thing to run before a
+// node-wide SIGKILL, and it is worth more as a check on discovery than as a
+// restatement of what discovery already promises. A deployment whose NFS server
+// genuinely runs under one of these names reports blocked here, which is the
+// direction to fail in.
 func usableAsPattern(name string) bool {
-	return framework.UsableAsPattern(name)
+	switch name {
+	case "", "sh", "bash", "dash", "env", "sleep", "tini", "dumb-init", "nfs-provisioner":
+		return false
+	}
+	if strings.HasSuffix(name, ".sh") {
+		return false
+	}
+	return len(name) >= 4
 }
 
 // KillServerProcess sends a signal to the server process on its node and
 // reports how many processes it hit. It looks before it signals and returns an
 // error when nothing matches, because measuring a recovery from a fault that
 // never happened is the failure mode this whole package has to avoid.
+//
+// The fault record names the source of the pattern as well as the pattern
+// itself, so that months later a reader can tell what the kill was aimed by
+// without rerunning anything. Today there is one source, preflight's
+// observation, and recording it is what would make a kill aimed by anything
+// else visible the moment one appeared.
 func KillServerProcess(ctx context.Context, f *framework.Framework, t Target, signal string) (int, error) {
-	pattern, err := ProcessPattern(t)
+	p, err := ResolveProcess(f, t)
 	if err != nil {
 		return 0, err
 	}
+	pattern := p.Pattern
 	agent, err := framework.NodeAgent(ctx, f.C)
 	if err != nil {
 		return 0, fmt.Errorf("node agent unavailable, so the server process cannot be signalled: %w", err)
@@ -221,18 +323,23 @@ func KillServerProcess(ctx context.Context, f *framework.Framework, t Target, si
 		return 0, fmt.Errorf("listing processes matching %q on %s: %w", pattern, t.Node, err)
 	}
 	if len(procs) == 0 {
-		return 0, fmt.Errorf("no process matching %q on %s (server pod %s); pass -server-process with the name "+
-			"the server actually runs under", pattern, t.Node, t.Pod)
+		return 0, fmt.Errorf("no process matching %q on %s (server pod %s), named by %s; the server preflight "+
+			"observed is gone or runs under another name now, so re-run preflight with -refresh-preflight",
+			pattern, t.Node, t.Pod, p.Source)
 	}
 	killed, err := agent.KillProcess(ctx, t.Node, pattern, signal)
 	if err != nil {
 		return 0, fmt.Errorf("signalling %q on %s: %w", pattern, t.Node, err)
 	}
+	detail := fmt.Sprintf("pattern %q, from %s, hit %d of %d matching processes: %s",
+		pattern, p.Source, killed, len(procs), strings.Join(procs, "; "))
+	if p.Evidence != "" {
+		detail += ". " + p.Evidence
+	}
 	f.RecordFault(framework.FaultEvent{
 		At: time.Now().UTC().Format(time.RFC3339), Action: "kill-" + strings.ToLower(signal),
 		Target: t.Node + "/" + t.Pod,
-		Detail: fmt.Sprintf("pattern %q hit %d of %d matching processes: %s",
-			pattern, killed, len(procs), strings.Join(procs, "; ")),
+		Detail: detail,
 	})
 	if killed == 0 {
 		return 0, fmt.Errorf("matched %d processes for %q on %s but signalled none", len(procs), pattern, t.Node)
