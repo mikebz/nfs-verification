@@ -26,7 +26,6 @@ type Config struct {
 
 	ServerNamespace string
 	ServerSelector  string
-	ServerProcess   string
 
 	ArtifactsDir string
 	RunID        string
@@ -70,7 +69,6 @@ func init() {
 
 	flag.StringVar(&cfg.ServerNamespace, "server-namespace", "", "namespace of the NFS server pods; discovered when empty")
 	flag.StringVar(&cfg.ServerSelector, "server-selector", "", "label selector for NFS server pods; discovered when empty")
-	flag.StringVar(&cfg.ServerProcess, "server-process", "", "process name pattern to signal for in-place kill; discovered when empty")
 
 	flag.StringVar(&cfg.ArtifactsDir, "artifacts-dir", "artifacts", "root directory for run artifacts")
 	flag.StringVar(&cfg.RunID, "run-id", "", "run identifier; defaults to a timestamp")

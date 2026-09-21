@@ -37,3 +37,7 @@ artifacts/
 # Built binaries: make locktool puts one per node architecture here. Never
 # committed; a repository that ships compiled artifacts cannot be reviewed.
 bin/
+
+# macOS Finder metadata. It appears in any directory someone opens in Finder,
+# carries nothing a reader needs, and churns the diff.
+.DS_Store

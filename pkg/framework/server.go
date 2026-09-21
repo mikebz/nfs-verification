@@ -3,7 +3,6 @@ package framework
 import (
 	"context"
 	"fmt"
-	"path"
 	"regexp"
 	"sort"
 	"strconv"
@@ -90,8 +89,23 @@ func looksLikeNFSServer(p *corev1.Pod) bool {
 	return serverNameHint.MatchString(p.Name) && !strings.Contains(strings.ToLower(p.Name), "csi")
 }
 
-// DescribeServers builds the environment record for the server fan-out.
-func DescribeServers(ctx context.Context, c *Client) ([]env.ServerInfo, error) {
+// DescribeServers builds the environment record for the server fan-out,
+// including which process in each pod is serving NFS.
+//
+// The process is observed here, at preflight, and not by the cases that signal
+// it. It is a property of the image rather than of the moment, so three cases
+// re-deriving it would be three execs into the server for an answer that cannot
+// have changed between them; recording it also puts it in front of whoever
+// reads environment.json, which is where the rest of what a fault will act on
+// already is. A pod it cannot be read from leaves the reason in the record
+// rather than an empty field, because "not discovered" and "discovered to be
+// nothing" call for different actions. See F-026 in docs/findings.md.
+//
+// The agent is what reads the server's node. Naming the process needs a
+// privileged read that a container cannot do for itself (F-027), so a nil agent
+// records the reason and leaves the name empty rather than failing: the rest of
+// the record is still worth having.
+func DescribeServers(ctx context.Context, c *Client, agent *Agent) ([]env.ServerInfo, error) {
 	pods, err := ServerPods(ctx, c)
 	if err != nil {
 		return nil, err
@@ -100,10 +114,22 @@ func DescribeServers(ctx context.Context, c *Client) ([]env.ServerInfo, error) {
 	for i := range pods {
 		p := &pods[i]
 		info := env.ServerInfo{Namespace: p.Namespace, Pod: p.Name, Node: p.Spec.NodeName}
+		names := make([]string, 0, len(p.Spec.Containers))
 		for _, ct := range p.Spec.Containers {
 			info.Images = append(info.Images, ct.Image)
+			names = append(names, ct.Name)
 		}
 		info.Exports = exportsOf(p)
+		// A pod that is not running has no process to find, and saying so is
+		// more useful than an exec that fails for a reason of its own.
+		if p.Status.Phase != corev1.PodRunning {
+			info.ProcessNote = "pod is " + string(p.Status.Phase)
+		} else if sp, err := DiscoverServerProcess(ctx, c, agent,
+			p.Namespace, p.Name, p.Spec.NodeName, names, NFSPort); err != nil {
+			info.ProcessNote = err.Error()
+		} else {
+			info.Process = sp.Name
+		}
 		out = append(out, info)
 	}
 	return out, nil
@@ -353,177 +379,4 @@ func Profile() (slo.Profile, error) {
 		return slo.Profile{}, fmt.Errorf("environment carries unknown profile %q", e.Timing.Profile)
 	}
 	return p, nil
-}
-
-// UsableAsPattern rejects names too generic to signal on. Killing everything
-// matching "sh" on a node takes the node out, and a case that does that is a
-// worse outage than the one it was written to measure.
-func UsableAsPattern(name string) bool {
-	switch name {
-	case "", "sh", "bash", "dash", "env", "sleep", "tini", "dumb-init", "nfs-provisioner":
-		return false
-	}
-	if strings.HasSuffix(name, ".sh") {
-		return false
-	}
-	return len(name) >= 4
-}
-
-// ServerDaemonCandidates is the list of known NFS server daemon process names
-// (as they appear in /proc/<pid>/comm), ordered from most specific to least.
-var ServerDaemonCandidates = []string{
-	"ganesha.nfsd",
-	"rpc.nfsd",
-	"unfsd",
-	"nfsd",
-}
-
-// DiscoverServerProcess identifies the NFS server daemon process name running
-// in the server pods. If -server-process is explicitly passed, it validates it
-// and returns it. Otherwise it inspects the server pods in the following order:
-//  1. In-container process table via exec (/proc/[0-9]*/comm).
-//  2. Node agent host process table scoped to the server container's cgroup.
-//  3. Node agent host process table matching exact candidate comm names.
-//  4. Container probes and command arguments for daemon references.
-//
-// An empty result is returned if no known daemon can be identified.
-func DiscoverServerProcess(ctx context.Context, c *Client, agent *Agent) (string, error) {
-	if p := Cfg().ServerProcess; p != "" {
-		if !UsableAsPattern(p) {
-			return "", fmt.Errorf("-server-process=%q is too generic to signal on: it would match processes "+
-				"that have nothing to do with NFS, and killing those on a node takes the node out of service. "+
-				"Pass the name the server process actually runs under", p)
-		}
-		return p, nil
-	}
-
-	pods, err := ServerPods(ctx, c)
-	if err != nil {
-		return "", err
-	}
-	if len(pods) == 0 {
-		return "", nil
-	}
-
-	// 1. Try reading /proc/*/comm directly from the server container(s) via exec.
-	for i := range pods {
-		p := &pods[i]
-		if p.Status.Phase != corev1.PodRunning {
-			continue
-		}
-		for _, ct := range p.Spec.Containers {
-			if isIgnoredContainer(ct.Name, ct.Image) {
-				continue
-			}
-			r := c.Sh(ctx, p.Namespace, p.Name, ct.Name, `cat /proc/[0-9]*/comm 2>/dev/null`)
-			if r.Err == nil && r.Stdout != "" {
-				if match := matchCandidate(r.Stdout); match != "" {
-					return match, nil
-				}
-			}
-		}
-	}
-
-	// 2. Try node agent host process inspection for the server pod's node.
-	if agent != nil {
-		for i := range pods {
-			p := &pods[i]
-			if p.Status.Phase != corev1.PodRunning || p.Spec.NodeName == "" {
-				continue
-			}
-			// Check cgroup-scoped processes for the server containers.
-			for _, cs := range p.Status.ContainerStatuses {
-				cid := stripContainerIDPrefix(cs.ContainerID)
-				if cid != "" {
-					script, err := RunScript("cgroup-comm.sh", "serverproc", cid)
-					if err != nil {
-						continue
-					}
-					out, err := agent.Run(ctx, p.Spec.NodeName, script)
-					if err == nil && out != "" {
-						if match := matchCandidate(out); match != "" {
-							return match, nil
-						}
-					}
-				}
-			}
-		}
-	}
-
-	// 3. Inspect container probes and command arguments for daemon references.
-	for i := range pods {
-		p := &pods[i]
-		for _, ct := range p.Spec.Containers {
-			if isIgnoredContainer(ct.Name, ct.Image) {
-				continue
-			}
-			blob := containerProbeBlob(ct)
-			if match := matchCandidateInText(blob); match != "" {
-				return match, nil
-			}
-			if len(ct.Command) > 0 {
-				name := path.Base(ct.Command[0])
-				if UsableAsPattern(name) {
-					return name, nil
-				}
-			}
-		}
-	}
-
-	return "", nil
-}
-
-func isIgnoredContainer(name, image string) bool {
-	lowerName := strings.ToLower(name)
-	lowerImg := strings.ToLower(image)
-	return lowerName == "pause" || strings.Contains(lowerName, "pause") ||
-		strings.Contains(lowerImg, "pause")
-}
-
-func matchCandidate(blob string) string {
-	lines := strings.Split(blob, "\n")
-	commSet := make(map[string]bool, len(lines))
-	for _, l := range lines {
-		if trimmed := strings.TrimSpace(l); trimmed != "" {
-			commSet[trimmed] = true
-		}
-	}
-	for _, cand := range ServerDaemonCandidates {
-		if commSet[cand] {
-			return cand
-		}
-	}
-	return ""
-}
-
-func matchCandidateInText(text string) string {
-	for _, cand := range ServerDaemonCandidates {
-		if strings.Contains(text, cand) {
-			return cand
-		}
-	}
-	return ""
-}
-
-func containerProbeBlob(ct corev1.Container) string {
-	var b strings.Builder
-	checkProbe := func(p *corev1.Probe) {
-		if p != nil && p.Exec != nil {
-			b.WriteString(strings.Join(p.Exec.Command, " "))
-			b.WriteString("\n")
-		}
-	}
-	checkProbe(ct.LivenessProbe)
-	checkProbe(ct.ReadinessProbe)
-	checkProbe(ct.StartupProbe)
-	b.WriteString(strings.Join(ct.Args, " ") + "\n")
-	b.WriteString(strings.Join(ct.Command, " ") + "\n")
-	return b.String()
-}
-
-func stripContainerIDPrefix(id string) string {
-	if idx := strings.Index(id, "://"); idx != -1 {
-		return id[idx+3:]
-	}
-	return id
 }

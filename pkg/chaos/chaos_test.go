@@ -15,60 +15,174 @@ import (
 // namespace. Getting it wrong does not fail a test, it kills the wrong process
 // on a real cluster, so the rules are unit tested.
 
-// TestProcessPatternFromContainerCommand covers the ordinary case: the process
-// to signal comes from the container's own command, which is the only place the
-// cluster states it.
+// TestChooseProcessUsesWhatPreflightObserved covers the rule and the deployment
+// that made it matter. A supervised server declares the supervisor's command,
+// or no command at all, while the process actually serving NFS is its child:
+// aiming at the declared command kills the wrong process and reports the result
+// as an NFS server fault. So the observed name is not merely preferred over the
+// declared command, it is the only thing that can name a process to kill. See
+// F-026.
 //
 // Steps:
-//  1. Offer a container whose command is a server binary with arguments.
-//  2. Assert the pattern is the base name of that binary.
-func TestProcessPatternFromContainerCommand(t *testing.T) {
-	got, err := ProcessPattern(Target{Pod: "nfs-server-0", Containers: []corev1.Container{
-		{Command: []string{"/usr/bin/ganesha.nfsd", "-F", "-L", "/dev/stdout"}},
-	}})
+//  1. Offer a target whose declared command is the supervisor, plus the name
+//     preflight observed holding the listening socket.
+//  2. Assert the recorded name wins, and that the source says where it came from.
+//  3. Drop the recorded name, leaving the declared command in place, and assert
+//     that nothing is signalled: the command must not stand in for an
+//     observation, however plausible it looks.
+func TestChooseProcessUsesWhatPreflightObserved(t *testing.T) {
+	target := Target{Pod: "nfs-server-0", Containers: []corev1.Container{
+		{Name: "nfs", Command: []string{"/usr/bin/nfs-provisioner", "-provisioner=example.com/nfs"}},
+	}}
+
+	got, err := chooseProcess("ganesha.nfsd", "", target)
 	if err != nil {
-		t.Fatalf("deriving the process pattern: %v", err)
+		t.Fatalf("choosing a process to signal: %v", err)
 	}
-	if got != "ganesha.nfsd" {
-		t.Errorf("pattern is %q, want the base name of the container command", got)
+	if got.Pattern != "ganesha.nfsd" {
+		t.Errorf("pattern is %q, want the process holding the socket rather than the container command", got.Pattern)
 	}
-}
+	if !strings.Contains(got.Source, "observed") {
+		t.Errorf("source is %q, want it to say the name was observed", got.Source)
+	}
 
-// TestProcessPatternSkipsWrappers covers the case that would do real damage. A
-// container started through a shell says nothing about which process ends up
-// serving NFS, and killing everything matching "sh" on a node takes the node
-// out of service.
-//
-// Steps:
-//  1. Offer a container that starts through a shell.
-//  2. Assert it is refused, and that the error says how to fix it.
-func TestProcessPatternSkipsWrappers(t *testing.T) {
-	// A container that starts through a shell says nothing about which process
-	// ends up serving NFS, and killing everything matching "sh" on a node takes
-	// the node out.
-	_, err := ProcessPattern(Target{Pod: "nfs-server-0", Containers: []corev1.Container{
-		{Command: []string{"/bin/sh", "-c", "exec /usr/bin/ganesha.nfsd -F"}},
-	}})
+	got, err = chooseProcess("", "exec forbidden", target)
 	if err == nil {
-		t.Fatal("a shell wrapper was accepted as the server process")
+		t.Fatalf("with nothing observed, the declared command was signalled as %q; killing the supervisor "+
+			"stops the pod and every recovery measured afterwards is a container restart (F-026)", got.Pattern)
 	}
-	if !strings.Contains(err.Error(), "-server-process") {
-		t.Errorf("the error does not say how to fix it: %v", err)
+	if !strings.Contains(err.Error(), "exec forbidden") {
+		t.Errorf("the failure does not say why nothing was recorded: %v", err)
 	}
 }
 
-// TestProcessPatternNeedsACommand covers the server whose command lives in the
-// image entrypoint, where the cluster cannot see it. The case reports blocked
-// rather than guessing at a name to kill.
+// TestRecordedProcessMatchesTheTargetPod covers the lookup between a fault's
+// target and what preflight wrote down. With fan-out greater than one the
+// record holds several servers, and taking the first would name the process in
+// a pod the fault is not aimed at, which is a kill aimed at a server that was
+// never under test. The reason string matters as much as the name: it is what
+// the blocked message carries.
 //
 // Steps:
-//  1. Offer a container with an image and no command.
+//  1. Offer a record of two server pods and ask for the second.
+//  2. Assert its own name comes back.
+//  3. Ask for a pod the record does not hold, and assert the reason says to
+//     re-run preflight rather than implying the server has no process.
+func TestRecordedProcessMatchesTheTargetPod(t *testing.T) {
+	f := &framework.Framework{Env: &env.Environment{Servers: []env.ServerInfo{
+		{Namespace: "nfs", Pod: "server-0", Process: "unfsd"},
+		{Namespace: "nfs", Pod: "server-1", Process: "ganesha.nfsd"},
+		{Namespace: "nfs", Pod: "server-2", ProcessNote: "pod is Pending"},
+	}}}
+
+	if got, why := recordedProcess(f, Target{Namespace: "nfs", Pod: "server-1"}); got != "ganesha.nfsd" {
+		t.Errorf("named %q (%s), want the process recorded for that pod and not for another", got, why)
+	}
+	if got, why := recordedProcess(f, Target{Namespace: "nfs", Pod: "server-2"}); got != "" || why != "pod is Pending" {
+		t.Errorf("named %q because %q, want the recorded reason for having no process", got, why)
+	}
+	got, why := recordedProcess(f, Target{Namespace: "nfs", Pod: "server-9"})
+	if got != "" {
+		t.Errorf("named %q for a pod preflight never saw", got)
+	}
+	if !strings.Contains(why, "refresh-preflight") {
+		t.Errorf("the reason does not say how to fix a record that predates this pod: %q", why)
+	}
+}
+
+// TestRecordedProcessRefusesAReplacedPod covers the one way a record can be
+// about the wrong pod while still matching it by name. Records are reused for
+// up to -preflight-max-age, and a StatefulSet recreates a pod under the same
+// name, so a server upgraded mid-run answers to the name preflight wrote down
+// while running something else entirely. Signalling the old name then sends a
+// node-wide SIGKILL after whatever else on that node happens to answer to it.
+//
+// The images are what settles it, since they are the part of a pod that changes
+// when it is replaced by a different one. A run that quietly re-probed instead
+// would lose the audit trail, so the record is refused and preflight is told to
+// run again.
+//
+// Steps:
+//  1. Offer a record of a pod, and a target of the same name running the images
+//     it was recorded with. Assert the recorded name comes back.
+//  2. Change one image on the target, as an upgrade would.
+//  3. Assert nothing is named, and that the reason names both image sets and
+//     says to re-run preflight.
+func TestRecordedProcessRefusesAReplacedPod(t *testing.T) {
+	f := &framework.Framework{Env: &env.Environment{Servers: []env.ServerInfo{
+		{Namespace: "nfs", Pod: "server-0", Process: "ganesha.nfsd", Images: []string{"provisioner:15.3"}},
+	}}}
+	asRecorded := Target{Namespace: "nfs", Pod: "server-0", Containers: []corev1.Container{
+		{Name: "nfs", Image: "provisioner:15.3"},
+	}}
+	if got, why := recordedProcess(f, asRecorded); got != "ganesha.nfsd" {
+		t.Fatalf("named %q (%s) for the pod the record is about", got, why)
+	}
+
+	upgraded := Target{Namespace: "nfs", Pod: "server-0", Containers: []corev1.Container{
+		{Name: "nfs", Image: "provisioner:16.0"},
+	}}
+	got, why := recordedProcess(f, upgraded)
+	if got != "" {
+		t.Fatalf("named %q from a record written before this pod was replaced; that name would be "+
+			"SIGKILLed node-wide against a server it was never observed on", got)
+	}
+	for _, want := range []string{"provisioner:15.3", "provisioner:16.0", "refresh-preflight"} {
+		if !strings.Contains(why, want) {
+			t.Errorf("the reason does not mention %q, so a reader cannot tell what changed: %q", want, why)
+		}
+	}
+}
+
+// TestChooseProcessRefusesAGenericName covers the case that would do real
+// damage. Preflight names whatever holds the socket, and on an image that
+// serves through a wrapper that name could be "sh"; the pattern is matched
+// node-wide in the host PID namespace, so signalling it kills every shell on
+// the node and takes it out of service. Observed is not the same as safe, and
+// the guard applies to a recorded name exactly as it would to any other.
+//
+// Steps:
+//  1. Offer a generic recorded name.
+//  2. Assert it is refused rather than signalled because preflight wrote it down.
+//  3. Assert the refusal names what was recorded and says what it would cost.
+func TestChooseProcessRefusesAGenericName(t *testing.T) {
+	target := Target{Pod: "nfs-server-0", Containers: []corev1.Container{
+		{Name: "nfs", Command: []string{"/bin/sh", "-c", "exec /usr/bin/ganesha.nfsd -F"}},
+	}}
+	for _, generic := range []string{"sh", "bash", "env", "run", "tini"} {
+		got, err := chooseProcess(generic, "", target)
+		if err == nil {
+			t.Errorf("%q was accepted and would be signalled as %q; killing every process of that name on "+
+				"a node takes the node out", generic, got.Pattern)
+			continue
+		}
+		if !strings.Contains(err.Error(), "node") {
+			t.Errorf("the refusal of %q does not say what it would cost: %v", generic, err)
+		}
+	}
+}
+
+// TestChooseProcessNeedsPreflight covers the server preflight could not read:
+// no listener it could attribute, or a record written before this pod existed.
+// The case reports blocked rather than guessing at a name to kill, and the
+// message has to send the reader to preflight, since that is now the only place
+// the answer can come from.
+//
+// Steps:
+//  1. Ask for a pattern with nothing recorded and a reason for it.
 //  2. Assert no pattern is produced.
-func TestProcessPatternNeedsACommand(t *testing.T) {
-	// The command is in the image entrypoint, where the cluster cannot see it.
-	_, err := ProcessPattern(Target{Pod: "nfs-server-0", Containers: []corev1.Container{{Image: "nfs:1"}}})
+//  3. Assert the failure carries that reason and says to re-run preflight.
+func TestChooseProcessNeedsPreflight(t *testing.T) {
+	_, err := chooseProcess("", "nothing is listening on port 2049 here",
+		Target{Pod: "nfs-server-0", Containers: []corev1.Container{{Name: "nfs", Image: "nfs:1"}}})
 	if err == nil {
-		t.Fatal("a container with no command yielded a pattern to kill")
+		t.Fatal("a pattern to kill was produced with nothing recorded")
+	}
+	if !strings.Contains(err.Error(), "nothing is listening") {
+		t.Errorf("the failure does not say why nothing was recorded: %v", err)
+	}
+	if !strings.Contains(err.Error(), "refresh-preflight") {
+		t.Errorf("the failure does not say how to get an answer: %v", err)
 	}
 }
 
@@ -76,157 +190,29 @@ func TestProcessPatternNeedsACommand(t *testing.T) {
 // is the rule standing between a chaos case and killing the wrong process on
 // somebody's cluster.
 //
+// The supervisor name and the wrapper scripts are here because the guard
+// stopped rejecting them once, when it moved packages: "nfs-provisioner" is the
+// reference deployment's PID 1 (F-026), and an arbitrary ".sh" is the shape a
+// wrapper takes, so a reject list naming only two known scripts is a list that
+// the next image walks around.
+//
 // Steps:
 //  1. Assert the names real NFS servers run under are accepted.
-//  2. Assert shells, wrappers, empty and short names are refused.
+//  2. Assert shells, wrappers, supervisors, empty and short names are refused.
 func TestUsableAsPattern(t *testing.T) {
 	for _, name := range []string{"ganesha.nfsd", "nfsd", "unfsd", "rpc.nfsd"} {
 		if !usableAsPattern(name) {
 			t.Errorf("%q was rejected, but it names a server process", name)
 		}
 	}
-	for _, name := range []string{"", "sh", "bash", "env", "tini", "run", "start.sh", "entrypoint.sh", "nfs-provisioner", "nfs-entry.sh"} {
+	for _, name := range []string{
+		"", "sh", "bash", "env", "tini", "run",
+		"start.sh", "entrypoint.sh", "run-nfs.sh",
+		"nfs-provisioner",
+	} {
 		if usableAsPattern(name) {
 			t.Errorf("%q was accepted; killing everything matching it on a node takes the node out", name)
 		}
-	}
-}
-
-// TestProcessPatternPrecedence covers the priority order between the flag, the
-// preflight-discovered environment, container probes, and the container command.
-//
-// Steps:
-//  1. Assert the -server-process flag wins over SuiteEnv and the container command.
-//  2. Assert SuiteEnv wins over container probes and command when flag is unset.
-//  3. Assert container probes win when SuiteEnv is unset and command is empty.
-//  4. Assert container command is used when no flag, SuiteEnv or probe is present.
-//  5. Assert an undiscoverable pod reports an error directing the operator to -server-process.
-func TestProcessPatternPrecedence(t *testing.T) {
-	origFlag := framework.Cfg().ServerProcess
-	origEnv := framework.SuiteEnv()
-	origCaps := framework.SuiteCaps()
-	t.Cleanup(func() {
-		framework.Cfg().ServerProcess = origFlag
-		framework.SetSuite(nil, origEnv, origCaps)
-	})
-
-	target := Target{
-		Pod: "nfs-server-0",
-		Containers: []corev1.Container{
-			{
-				Name:    "nfs",
-				Command: []string{"/usr/sbin/rpc.nfsd"},
-				LivenessProbe: &corev1.Probe{
-					ProbeHandler: corev1.ProbeHandler{
-						Exec: &corev1.ExecAction{
-							Command: []string{"dbus-send", "--dest=org.ganesha.nfsd"},
-						},
-					},
-				},
-			},
-		},
-	}
-
-	// 1. Flag wins over everything.
-	framework.Cfg().ServerProcess = "unfsd"
-	framework.SetSuite(nil, &env.Environment{ServerProcess: "ganesha.nfsd"}, framework.Capabilities{})
-	got, err := ProcessPattern(target)
-	if err != nil || got != "unfsd" {
-		t.Errorf("ProcessPattern with flag set = (%q, %v), want (%q, nil)", got, err, "unfsd")
-	}
-
-	// 2. SuiteEnv wins over container probes and command.
-	framework.Cfg().ServerProcess = ""
-	got, err = ProcessPattern(target)
-	if err != nil || got != "ganesha.nfsd" {
-		t.Errorf("ProcessPattern with SuiteEnv set = (%q, %v), want (%q, nil)", got, err, "ganesha.nfsd")
-	}
-
-	// 3. Probes win when SuiteEnv has no ServerProcess and command is empty or a shell wrapper.
-	framework.SetSuite(nil, &env.Environment{}, framework.Capabilities{})
-	targetProbeOnly := Target{
-		Pod: "robin-nfs-0",
-		Containers: []corev1.Container{
-			{
-				Name:    "robin-nfs",
-				Command: []string{"/nfs-entry.sh"},
-				LivenessProbe: &corev1.Probe{
-					ProbeHandler: corev1.ProbeHandler{
-						Exec: &corev1.ExecAction{
-							Command: []string{"/bin/sh", "-c", "timeout 25 dbus-send --dest=org.ganesha.nfsd /org/ganesha/nfsd"},
-						},
-					},
-				},
-			},
-		},
-	}
-	got, err = ProcessPattern(targetProbeOnly)
-	if err != nil || got != "ganesha.nfsd" {
-		t.Errorf("ProcessPattern from probe = (%q, %v), want (%q, nil)", got, err, "ganesha.nfsd")
-	}
-
-	// 4. Container command is used when no flag, SuiteEnv or probe matches.
-	targetCmdOnly := Target{
-		Pod: "nfs-0",
-		Containers: []corev1.Container{
-			{Name: "nfs", Command: []string{"/usr/sbin/rpc.nfsd"}},
-		},
-	}
-	got, err = ProcessPattern(targetCmdOnly)
-	if err != nil || got != "rpc.nfsd" {
-		t.Errorf("ProcessPattern from command = (%q, %v), want (%q, nil)", got, err, "rpc.nfsd")
-	}
-
-	// 5. Undiscoverable pod returns an informative error.
-	targetEmpty := Target{
-		Pod: "nfs-provisioner-0",
-		Containers: []corev1.Container{
-			{Name: "nfs", Args: []string{"-provisioner=cluster.local"}},
-		},
-	}
-	got, err = ProcessPattern(targetEmpty)
-	if err == nil {
-		t.Errorf("ProcessPattern on empty target returned %q, want error", got)
-	} else if !strings.Contains(err.Error(), "-server-process") {
-		t.Errorf("ProcessPattern error %q does not prompt for -server-process", err.Error())
-	}
-}
-
-// TestProcessPatternValidatesTheFlag covers the override. A derived name is
-// checked, so a passed one has to be checked too: otherwise the guard that
-// stops a chaos case taking a node out of service is one flag away from being
-// bypassed, and the flag is the path a hurried operator reaches for.
-//
-// Steps:
-//  1. Pass a generic name through -server-process and assert it is refused.
-//  2. Assert the refusal explains the consequence rather than just saying no.
-//  3. Pass a real server name and assert it wins over the container command.
-func TestProcessPatternValidatesTheFlag(t *testing.T) {
-	target := Target{Pod: "nfs-server-0", Containers: []corev1.Container{
-		{Command: []string{"/usr/bin/ganesha.nfsd"}},
-	}}
-	original := framework.Cfg().ServerProcess
-	defer func() { framework.Cfg().ServerProcess = original }()
-
-	for _, generic := range []string{"sh", "bash", "env", "run"} {
-		framework.Cfg().ServerProcess = generic
-		got, err := ProcessPattern(target)
-		if err == nil {
-			t.Errorf("-server-process=%q was accepted and would be signalled as %q", generic, got)
-			continue
-		}
-		if !strings.Contains(err.Error(), "node") {
-			t.Errorf("the refusal of %q does not say what it would cost: %v", generic, err)
-		}
-	}
-
-	framework.Cfg().ServerProcess = "nfsd"
-	got, err := ProcessPattern(target)
-	if err != nil {
-		t.Fatalf("a real server name was refused: %v", err)
-	}
-	if got != "nfsd" {
-		t.Errorf("pattern is %q, want the flag to win over the container command", got)
 	}
 }
 
