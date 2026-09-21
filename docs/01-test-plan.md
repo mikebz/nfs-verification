@@ -26,18 +26,15 @@ The suite refuses to run unless all of the following hold. `make preflight` exit
 | Two pods on two different nodes both mount it read-write | `RWX PVC not simultaneously mountable` |
 | The mount is NFS and negotiates 4.1 | `mount is not nfs4 vers=4.1` |
 | Cluster has >= 2 schedulable nodes | `insufficient nodes for cross-node cases` |
-| Schedulable nodes have >= 4GiB allocatable memory | `schedulable node has insufficient allocatable memory (< 4GiB)` |
 | Privileged DaemonSet can be scheduled | `node-level assertions unavailable (Autopilot?)` |
 
 Preflight also records, and does not require as input:
 
 - Server implementation and version, read from the server pod image tag and, where exposed, from the server's own version endpoint.
-- Server process name (holding listening socket on 2049) and server pod owner controller (F-026, doc 08).
 - CSI driver version, Kubernetes version, node kernel, container runtime, per node.
 - Actual mount options as the driver sets them, read from `/proc/mounts` on the node.
 - Server fan-out: number of server pods, and export-to-PVC mapping.
 - IP families present (single-stack vs dual-stack).
-- Tools image capabilities (direct I/O, hole punching, locktool architecture matching) and API proxy permissions (`nodes/proxy`, `pods/proxy`).
 - Lease and grace values in force, matched against the two profiles in Section 3.8. Unset or off-profile values fail preflight, because every timing assertion depends on them.
 - Whether delegations are enabled. Gates CHAOS-18.
 - Whether the recovery state path is backed by persistent storage or ephemeral pod storage. **Recorded for triage only.** Lock survival is still measured empirically by CHAOS-02 and CHAOS-06, not inferred from this. The value exists so that a reclaim failure is diagnosed in one minute instead of one day.
@@ -374,7 +371,6 @@ next phase has to rediscover:
 - **Timing and correctness bounds live in `pkg/slo`**, against the profile preflight pinned. No case carries a literal.
 - **What a case reports** (passed, failed, blocked, skipped) is defined in the repository `README.md`, and the same four words mean the same four things in every section.
 - **A case names the file it argues from, and the harness keeps a copy.** The two things every claim rests on are destroyed by teardown: the workload's record stream, which lives on the pod's own filesystem, and the file on the share a data case is about. Both are copied into the bundle before anything is deleted, on a pass as well as a failure, because a passing case's numbers are exactly the ones nobody can re-derive later. One named file per registration, capped, and nothing walks the share: a rule that collected a directory would try to bring DATA-10's hundred thousand entries home.
-- **Cluster traits are evaluated during preflight, decoupling cluster discovery from runner flags.** Static properties of the cluster, nodes, storage class, and server workload are evaluated once by preflight and recorded in `environment.json` and `Capabilities`. The test runner targets (`make test-*`) do not accept cluster trait flags; runner flags focus strictly on test selection, logging, and artifact retention. Details in [doc 08](08-cluster-traits-and-preflight-design.md).
 
 ### 4.2 Execution by Category
 
