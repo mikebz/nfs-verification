@@ -90,6 +90,50 @@ func TestRecordedProcessMatchesTheTargetPod(t *testing.T) {
 	}
 }
 
+// TestRecordedProcessRefusesAReplacedPod covers the one way a record can be
+// about the wrong pod while still matching it by name. Records are reused for
+// up to -preflight-max-age, and a StatefulSet recreates a pod under the same
+// name, so a server upgraded mid-run answers to the name preflight wrote down
+// while running something else entirely. Signalling the old name then sends a
+// node-wide SIGKILL after whatever else on that node happens to answer to it.
+//
+// The images are what settles it, since they are the part of a pod that changes
+// when it is replaced by a different one. A run that quietly re-probed instead
+// would lose the audit trail, so the record is refused and preflight is told to
+// run again.
+//
+// Steps:
+//  1. Offer a record of a pod, and a target of the same name running the images
+//     it was recorded with. Assert the recorded name comes back.
+//  2. Change one image on the target, as an upgrade would.
+//  3. Assert nothing is named, and that the reason names both image sets and
+//     says to re-run preflight.
+func TestRecordedProcessRefusesAReplacedPod(t *testing.T) {
+	f := &framework.Framework{Env: &env.Environment{Servers: []env.ServerInfo{
+		{Namespace: "nfs", Pod: "server-0", Process: "ganesha.nfsd", Images: []string{"provisioner:15.3"}},
+	}}}
+	asRecorded := Target{Namespace: "nfs", Pod: "server-0", Containers: []corev1.Container{
+		{Name: "nfs", Image: "provisioner:15.3"},
+	}}
+	if got, why := recordedProcess(f, asRecorded); got != "ganesha.nfsd" {
+		t.Fatalf("named %q (%s) for the pod the record is about", got, why)
+	}
+
+	upgraded := Target{Namespace: "nfs", Pod: "server-0", Containers: []corev1.Container{
+		{Name: "nfs", Image: "provisioner:16.0"},
+	}}
+	got, why := recordedProcess(f, upgraded)
+	if got != "" {
+		t.Fatalf("named %q from a record written before this pod was replaced; that name would be "+
+			"SIGKILLed node-wide against a server it was never observed on", got)
+	}
+	for _, want := range []string{"provisioner:15.3", "provisioner:16.0", "refresh-preflight"} {
+		if !strings.Contains(why, want) {
+			t.Errorf("the reason does not mention %q, so a reader cannot tell what changed: %q", want, why)
+		}
+	}
+}
+
 // TestChooseProcessRefusesAGenericName covers the case that would do real
 // damage. Preflight names whatever holds the socket, and on an image that
 // serves through a wrapper that name could be "sh"; the pattern is matched

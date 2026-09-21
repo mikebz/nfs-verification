@@ -254,13 +254,23 @@ func socketInode(link string) (string, bool) {
 // listeningInodes returns the inodes of the sockets listening on port, read
 // from a server pod's own socket tables.
 //
-// Both families are considered. A server bound to IPv6 serves IPv4 clients and
-// appears in tcp6 alone, which is F-019 in docs/findings.md and is exactly what
-// the reference deployment does on 2049.
+// Both families are considered, and both must be readable. A server bound to
+// IPv6 serves IPv4 clients and appears in tcp6 alone, which is F-019 in
+// docs/findings.md and is exactly what the reference deployment does on 2049.
+// So a listener found in the family that could be read says nothing about the
+// family that could not: the socket this names might not be the one the server
+// is serving on, and the process about to be SIGKILLed node-wide would be
+// whatever holds the wrong one. A partial read is refused for the same reason
+// pickHolder refuses two names, that the join has to be unambiguous before a
+// name is handed to a kill.
 func listeningInodes(f listenerFacts, port uint16) ([]string, error) {
 	if !f.complete {
 		return nil, fmt.Errorf("the socket reader did not run to completion, so a listening socket would "+
 			"read here as absent%s", tableErrSuffix(f))
+	}
+	if len(f.tableErrors) > 0 {
+		return nil, fmt.Errorf("a socket table could not be read%s, so a second listener on port %d in the "+
+			"family it covers would go unseen", tableErrSuffix(f), port)
 	}
 	var inodes []string
 	var listening []uint16

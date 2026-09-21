@@ -366,6 +366,8 @@ func waitGraceWindow(ctx context.Context, t *testing.T, f *framework.Framework, 
 //  1. Find a server pod to injure, start a workload on a client pod, and let
 //     it commit a few writes.
 //  2. Observe which process is serving NFS, and read the writer's clock.
+//     Report blocked if the process cannot be named, rather than signalling a
+//     name nothing confirms is the listener's.
 //  3. SIGKILL the server process on its node, through the node agent. Report
 //     blocked if the fault cannot be injected, rather than measuring a
 //     recovery from a fault that never happened.
@@ -380,13 +382,17 @@ func TestChaosServerProcessKill(t *testing.T) {
 	defer cancel()
 
 	s := startChaosCase(ctx, t, f, "chaos01")
-	// Best effort, and the confirmation in step 5 says so when it is missing.
-	// A server the suite cannot look inside can still be killed by name, and
-	// the recovery measured after that kill is still a real measurement.
-	before, beforeErr := observeServerProcess(ctx, f, s.target)
-	if beforeErr == nil {
-		t.Logf("before the fault, %s", before)
+	// Required, not best effort. This is the only check that the name about to
+	// be signalled node-wide is the name of the process actually holding the
+	// listening socket right now. Without it the kill can land on a same-named
+	// bystander while the server carries on serving, and step 4 then measures a
+	// recovery from an outage that never happened and passes.
+	before, err := observeServerProcess(ctx, f, s.target)
+	if err != nil {
+		t.Skipf("blocked: the process serving NFS in %s could not be observed before the fault, so a kill "+
+			"could not be confirmed to have landed on it: %v", s.target.Pod, err)
 	}
+	t.Logf("before the fault, %s", before)
 
 	// The fault reference comes from the writer's own clock, because the write
 	// that ends the outage is timestamped by that same clock. Reading it just
@@ -407,13 +413,21 @@ func TestChaosServerProcessKill(t *testing.T) {
 
 	assertRecovered(ctx, t, s, faultAt)
 
-	confirmServerProcessReplaced(ctx, t, f, s.target, before, beforeErr)
+	confirmServerProcessReplaced(ctx, t, f, s.target, before)
 }
 
 // listenerReturnTimeout bounds the wait for a process to be serving NFS again
 // after the kill. Recovery has already been asserted by the time this runs, so
 // the listener is back; this covers the gap between a client's write being
 // served and the socket being attributable to a process again.
+//
+// Not in pkg/slo, deliberately. That package holds what the cases assert the
+// deployment against, and nothing here is measured against this: the recovery
+// bound came from slo.Recovery and has already passed or failed. This is how
+// long the harness waits to be able to look, in the same family as
+// dataPathProbeTimeout and the framework's probe timeouts. Putting it in slo
+// would say a deployment is being judged on how quickly a socket becomes
+// attributable, which is a property of how fast the node agent gets scheduled.
 const listenerReturnTimeout = 60 * time.Second
 
 // observeServerProcess names the process serving NFS in the target pod, live.
@@ -451,16 +465,8 @@ func observeServerProcess(ctx context.Context, f *framework.Framework, t chaos.T
 // naming the process at all needs the node agent, since the server's file
 // descriptors are unreadable from inside its own pod (F-027).
 func confirmServerProcessReplaced(ctx context.Context, t *testing.T, f *framework.Framework,
-	target chaos.Target, before framework.ServerProcess, beforeErr error) {
+	target chaos.Target, before framework.ServerProcess) {
 	t.Helper()
-	if beforeErr != nil {
-		// Not a failure of the deployment: the case could not see who was
-		// serving, so it cannot say whether the right process died. The
-		// recovery assertions above stand on their own.
-		t.Logf("the kill could not be confirmed by observation, because the process serving NFS was not "+
-			"visible before the fault: %v", beforeErr)
-		return
-	}
 
 	var after framework.ServerProcess
 	err := framework.Poll(ctx, framework.PollInterval, listenerReturnTimeout, func(ctx context.Context) (bool, error) {

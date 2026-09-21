@@ -13,6 +13,7 @@ package chaos
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -141,11 +142,11 @@ func unfitToInjure(p *corev1.Pod) string {
 // Process is the process a fault is aimed at: the pattern that will be matched
 // on the node, where that pattern came from, and the evidence for it.
 //
-// The source travels with the pattern because the three sources are not equally
-// good. What was observed holding the socket is a fact about the running
-// server; a container's declared command is a proxy for it that is wrong on any
-// server that is supervised rather than being PID 1. A fault record that does
-// not say which one it used cannot be audited afterwards.
+// There is one source, what preflight observed holding the listening socket,
+// and the source still travels with the pattern. A fault record that says only
+// which name was signalled cannot be audited afterwards, and the field is what
+// would make a later change of source visible in the record rather than only in
+// the code.
 type Process struct {
 	// Pattern is matched against every command line on the node.
 	Pattern string
@@ -187,12 +188,24 @@ func ResolveProcess(f *framework.Framework, t Target) (Process, error) {
 // not when it recorded nothing. The pod is matched by name rather than taken
 // first, because with fan-out greater than one the record holds several and a
 // fault is aimed at one of them.
+//
+// A record is reused for up to -preflight-max-age, and a StatefulSet recreates
+// a pod under the same name, so name alone does not establish that the record
+// describes the pod in front of us. The images do: a pod running something else
+// than what preflight looked at may well serve NFS from a differently named
+// process, and the recorded name would then be signalled across the node
+// against whatever else answers to it. The record is refused rather than
+// aged out, because the stale half is the part that matters and a run that
+// silently re-probed would lose the audit trail the fault record depends on.
 func recordedProcess(f *framework.Framework, t Target) (string, string) {
 	if f == nil || f.Env == nil {
 		return "", "no environment record is loaded"
 	}
 	for _, s := range f.Env.Servers {
 		if s.Namespace == t.Namespace && s.Pod == t.Pod {
+			if why := imagesDiffer(s.Images, t.Containers); why != "" {
+				return "", why
+			}
 			if s.Process != "" {
 				return s.Process, ""
 			}
@@ -201,6 +214,33 @@ func recordedProcess(f *framework.Framework, t Target) (string, string) {
 	}
 	return "", fmt.Sprintf("preflight recorded no server pod %s/%s; it was discovered after preflight ran, "+
 		"so re-run it with -refresh-preflight", t.Namespace, t.Pod)
+}
+
+// imagesDiffer says why the recorded images do not describe these containers,
+// or "" when they do. Order is significant because both lists come from the
+// same PodSpec field in the same order, so a difference in order is a
+// difference in the pod.
+func imagesDiffer(recorded []string, containers []corev1.Container) string {
+	live := make([]string, 0, len(containers))
+	for _, ct := range containers {
+		live = append(live, ct.Image)
+	}
+	if slices.Equal(recorded, live) {
+		return ""
+	}
+	return fmt.Sprintf("preflight recorded this pod running %s and it now runs %s, so the record describes "+
+		"a pod that has been replaced and the process it named may not be the one serving now; re-run "+
+		"preflight with -refresh-preflight",
+		imageList(recorded), imageList(live))
+}
+
+// imageList renders an image list for a message, naming the empty case rather
+// than printing nothing.
+func imageList(images []string) string {
+	if len(images) == 0 {
+		return "no images"
+	}
+	return strings.Join(images, ", ")
 }
 
 // chooseProcess judges the recorded name, split out so the decision can be
@@ -246,9 +286,11 @@ func usableAsPattern(name string) bool {
 // error when nothing matches, because measuring a recovery from a fault that
 // never happened is the failure mode this whole package has to avoid.
 //
-// The fault record names the source of the pattern as well as the pattern, so
-// that a kill aimed by observation and one aimed by an operator's flag can be
-// told apart months later without rerunning anything.
+// The fault record names the source of the pattern as well as the pattern
+// itself, so that months later a reader can tell what the kill was aimed by
+// without rerunning anything. Today there is one source, preflight's
+// observation, and recording it is what would make a kill aimed by anything
+// else visible the moment one appeared.
 func KillServerProcess(ctx context.Context, f *framework.Framework, t Target, signal string) (int, error) {
 	p, err := ResolveProcess(f, t)
 	if err != nil {

@@ -134,16 +134,19 @@ taken out of service.
 CHAOS-01's step 5 now compares the process serving before the fault with the one
 serving after. That pair **is** observed live, because a pid is the one thing
 here that changes on every restart, and the pid is the whole question. The
-restart count is still checked where the server **is** PID 1, because there the
-container really must have restarted.
+restart count is not consulted at all, not even where the server is the
+container's PID 1: the pid compared here comes from the node's process
+namespace, since naming the process needs the node agent
+([F-027](F027-a-container-cannot-read-the-file-descriptors-of-its.md)), and a
+containerized process never has node pid 1.
 
 ### What it implies
 
 For the harness: a fact about the running system beats a field in a manifest
 whenever both are available, and the cost of not looking was three cases
 unexercised for the life of the project. The guard against killing something
-generic (`usableAsPattern`) applies to what is observed exactly as it applies to
-what an operator passes, because "I saw it holding the socket" is not a reason
+generic (`usableAsPattern`) applies to what is observed, and not only to a name
+somebody might have typed, because "I saw it holding the socket" is not a reason
 to SIGKILL everything on a node called `sh`.
 
 For the deployment: nothing. A supervised NFS server is an ordinary way to

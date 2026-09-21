@@ -43,12 +43,14 @@ const (
 // TestNFSListenerScriptJoinsSocketToProcess covers, and the two must stay
 // paired for either to mean anything.
 type readerOutput struct {
-	tables     map[string]string
-	procs      []string // "pid comm"
-	argv0      []string // "pid argv0"
-	fds        []string // "pid socket:[inode]"
-	noReadlink bool
-	truncated  bool
+	tables map[string]string
+	// tableErrors are tables that exist and could not be read, "path reason".
+	tableErrors []string
+	procs       []string // "pid comm"
+	argv0       []string // "pid argv0"
+	fds         []string // "pid socket:[inode]"
+	noReadlink  bool
+	truncated   bool
 }
 
 func (r readerOutput) String() string {
@@ -58,6 +60,9 @@ func (r readerOutput) String() string {
 	}
 	for path, body := range r.tables {
 		b.WriteString("==TABLE " + path + "\n" + body + "==ENDTABLE\n")
+	}
+	for _, e := range r.tableErrors {
+		b.WriteString("==TABLEERROR " + e + "\n")
 	}
 	for _, p := range r.procs {
 		b.WriteString("==PROC " + p + "\n")
@@ -127,10 +132,17 @@ func TestDiscoveryNamesWhatHoldsThePort(t *testing.T) {
 // is the key the node is searched by, so a wrong one is worse than none: it
 // would send the scan looking for a socket that is not the server's.
 //
+// The half-read case is the subtle one, and it is the mirror of F-019. There,
+// reading only tcp found no NFS server because the listener was in tcp6. Here
+// tcp6 is readable and has a listener, so an answer is available; it is refused
+// anyway, because the family that could not be read might hold a second
+// listener on the same port held by a differently named process, and that name
+// is the one a node-wide SIGKILL would have missed.
+//
 // Steps:
-//  1. Pose a pod with no listener on the NFS port, and one whose reader was cut
-//     short.
-//  2. Assert neither yields an inode.
+//  1. Pose a pod with no listener on the NFS port, one whose reader was cut
+//     short, and one where a listener was found but a table could not be read.
+//  2. Assert none of them yields an inode.
 //  3. Assert the refusal says which it was, since the actions differ.
 func TestListeningInodesRefusesWhatItCannotRead(t *testing.T) {
 	noListener := serverAsItIs()
@@ -139,6 +151,10 @@ func TestListeningInodesRefusesWhatItCannotRead(t *testing.T) {
 	truncated := serverAsItIs()
 	truncated.truncated = true
 
+	halfRead := serverAsItIs()
+	halfRead.tables = map[string]string{"/proc/net/tcp6": realProcNetTCP6}
+	halfRead.tableErrors = []string{"/proc/net/tcp Permission denied"}
+
 	for _, tc := range []struct {
 		name string
 		out  readerOutput
@@ -146,6 +162,7 @@ func TestListeningInodesRefusesWhatItCannotRead(t *testing.T) {
 	}{
 		{"no listener on the NFS port", noListener, "nothing is listening"},
 		{"reader cut short", truncated, "did not run to completion"},
+		{"one family unreadable, the other listening", halfRead, "could not be read"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := listeningInodes(parseListenerFacts(tc.out.String()), NFSPort)
