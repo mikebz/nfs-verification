@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-13
-Updated: 2026-09-14
+Updated: 2026-09-17
 Status: **in review**, [PR #57](https://github.com/mikebz/nfs-verification/pull/57).
 SEC-03 to SEC-09 landed in delivery step 8; SEC-01 shipped in Step 2
 ([PR #3](https://github.com/mikebz/nfs-verification/pull/3)) and SEC-02 in Step 2b
