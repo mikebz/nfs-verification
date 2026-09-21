@@ -74,15 +74,15 @@ func (f *Framework) dumpPods(ctx context.Context, dir, ns, selector, kind string
 			_ = os.WriteFile(filepath.Join(sub, p.Name+".json"), b, 0o644)
 		}
 		for _, c := range p.Spec.Containers {
-			f.writeLogs(ctx, sub, ns, p.Name, c.Name, false)
+			_ = f.writeLogs(ctx, sub, ns, p.Name, c.Name, false)
 			// Previous-container logs are where a crash actually shows up.
-			f.writeLogs(ctx, sub, ns, p.Name, c.Name, true)
+			_ = f.writeLogs(ctx, sub, ns, p.Name, c.Name, true)
 		}
 	}
 	return nil
 }
 
-func (f *Framework) writeLogs(ctx context.Context, dir, ns, pod, container string, previous bool) {
+func (f *Framework) writeLogs(ctx context.Context, dir, ns, pod, container string, previous bool) error {
 	suffix := ".log"
 	if previous {
 		suffix = ".previous.log"
@@ -90,15 +90,16 @@ func (f *Framework) writeLogs(ctx context.Context, dir, ns, pod, container strin
 	req := f.C.Kube.CoreV1().Pods(ns).GetLogs(pod, &corev1.PodLogOptions{Container: container, Previous: previous})
 	rc, err := req.Stream(ctx)
 	if err != nil {
-		return
+		return err
 	}
 	defer rc.Close()
 	out, err := os.Create(filepath.Join(dir, pod+"-"+container+suffix))
 	if err != nil {
-		return
+		return err
 	}
 	defer out.Close()
-	_, _ = io.Copy(out, rc)
+	_, err = io.Copy(out, rc)
+	return err
 }
 
 func (f *Framework) dumpEvents(ctx context.Context, dir string) error {
