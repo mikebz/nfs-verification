@@ -116,14 +116,9 @@ func (a *Agent) Nodes(ctx context.Context) ([]string, error) {
 
 // Run executes a shell snippet in the host namespaces of a node.
 func (a *Agent) Run(ctx context.Context, node, script string) (string, error) {
-	pod, ok := a.pods[node]
-	if !ok {
-		if err := a.refresh(ctx); err != nil {
-			return "", err
-		}
-		if pod, ok = a.pods[node]; !ok {
-			return "", fmt.Errorf("no node agent running on %s", node)
-		}
+	pod, err := a.podOn(ctx, node)
+	if err != nil {
+		return "", err
 	}
 	// nsenter into PID 1 puts the command in the host mount, network, IPC, UTS
 	// and PID namespaces, which is what makes /proc/mounts and signals real.
@@ -133,6 +128,49 @@ func (a *Agent) Run(ctx context.Context, node, script string) (string, error) {
 		return r.Combined(), fmt.Errorf("node %s: %w: %s", node, r.Err, r.Combined())
 	}
 	return r.Stdout, nil
+}
+
+// RunScript ships one of the embedded scripts to a node and runs it there.
+//
+// Unlike Run it does not nsenter. The agent pod is declared hostPID, so the
+// /proc it already sees is the node's: every process on the node is there, and
+// privileged means their file descriptors can actually be read, which is the
+// whole reason a scan runs here rather than inside the pod being inspected
+// (F-027 in docs/findings.md). Entering the host mount namespace would take the
+// script file away with it, since the file is written in the agent's own
+// namespace.
+//
+// Anything needing the node's mounts, network or signals wants Run instead.
+func (a *Agent) RunScript(ctx context.Context, node, name, id string, args ...string) (string, error) {
+	pod, err := a.podOn(ctx, node)
+	if err != nil {
+		return "", err
+	}
+	script, err := RunScript(name, id, args...)
+	if err != nil {
+		return "", err
+	}
+	r := a.c.Sh(ctx, Namespace, pod, "agent", script)
+	if r.Err != nil {
+		return r.Combined(), fmt.Errorf("node %s: %w: %s", node, r.Err, r.Combined())
+	}
+	return r.Stdout, nil
+}
+
+// podOn names the agent pod on a node, refreshing once when the mapping looks
+// stale. Pods move, and a chaos case is the reason they moved.
+func (a *Agent) podOn(ctx context.Context, node string) (string, error) {
+	if pod, ok := a.pods[node]; ok {
+		return pod, nil
+	}
+	if err := a.refresh(ctx); err != nil {
+		return "", err
+	}
+	pod, ok := a.pods[node]
+	if !ok {
+		return "", fmt.Errorf("no node agent running on %s", node)
+	}
+	return pod, nil
 }
 
 // ReadFile reads a file from the node's root filesystem.

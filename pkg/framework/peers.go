@@ -44,6 +44,10 @@ type Conn struct {
 	// sees every IPv4 client in this form, and whether a rule written as a
 	// plain IPv4 address matches it is a question a case has to be able to ask.
 	Mapped bool
+	// Inode is the socket's inode as the kernel wrote it, the only thing that
+	// ties a row here to the process holding it in /proc/<pid>/fd. Empty when
+	// the row was too short to carry one.
+	Inode string
 }
 
 // String renders a connection the way a failure message wants it.
@@ -207,9 +211,18 @@ func ParseProcNetTCP(contents string) ([]Conn, error) {
 		if !ok {
 			state = "state-" + fields[3]
 		}
+		// The inode is the tenth column. Rows are only ever shorter than that
+		// in a fixture, so a missing one is left empty rather than refused:
+		// every caller that needs it says so, and the callers that read
+		// addresses and states do not.
+		inode := ""
+		if len(fields) >= 10 {
+			inode = fields[9]
+		}
 		out = append(out, Conn{
 			Local: local, Peer: peer, State: state,
 			Mapped: local.Addr().Is4In6() || peer.Addr().Is4In6(),
+			Inode:  inode,
 		})
 	}
 	return out, nil

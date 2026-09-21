@@ -365,13 +365,14 @@ func waitGraceWindow(ctx context.Context, t *testing.T, f *framework.Framework, 
 // Steps:
 //  1. Find a server pod to injure, start a workload on a client pod, and let
 //     it commit a few writes.
-//  2. Record the server's restart count and read the writer's clock.
+//  2. Observe which process is serving NFS, and read the writer's clock.
 //  3. SIGKILL the server process on its node, through the node agent. Report
 //     blocked if the fault cannot be injected, rather than measuring a
 //     recovery from a fault that never happened.
 //  4. Assert recovery, zero I/O errors and no lost committed writes.
-//  5. Confirm the server container actually restarted, since a recovery
-//     measured after killing the wrong process means nothing.
+//  5. Confirm the process that was serving NFS is gone and another one is
+//     serving now, since a recovery measured after killing the wrong process
+//     means nothing.
 func TestChaosServerProcessKill(t *testing.T) {
 	f := framework.New(t, "CHAOS-01")
 	requireCap(t, f.Caps.NodeAgent, "signalling a process on a node needs the privileged node agent")
@@ -379,9 +380,12 @@ func TestChaosServerProcessKill(t *testing.T) {
 	defer cancel()
 
 	s := startChaosCase(ctx, t, f, "chaos01")
-	restartsBefore, err := framework.ServerRestartCount(ctx, f.C)
-	if err != nil {
-		failOrBlock(t, err, "reading server restart counts")
+	// Best effort, and the confirmation in step 5 says so when it is missing.
+	// A server the suite cannot look inside can still be killed by name, and
+	// the recovery measured after that kill is still a real measurement.
+	before, beforeErr := observeServerProcess(ctx, f, s.target)
+	if beforeErr == nil {
+		t.Logf("before the fault, %s", before)
 	}
 
 	// The fault reference comes from the writer's own clock, because the write
@@ -403,17 +407,78 @@ func TestChaosServerProcessKill(t *testing.T) {
 
 	assertRecovered(ctx, t, s, faultAt)
 
-	// A confirmation, not the assertion: the container should have been
-	// restarted by the kill. If it was not, the process that died was not the
-	// one serving NFS, and the recovery measured above means nothing.
-	restartsAfter, err := framework.ServerRestartCount(ctx, f.C)
+	confirmServerProcessReplaced(ctx, t, f, s.target, before, beforeErr)
+}
+
+// listenerReturnTimeout bounds the wait for a process to be serving NFS again
+// after the kill. Recovery has already been asserted by the time this runs, so
+// the listener is back; this covers the gap between a client's write being
+// served and the socket being attributable to a process again.
+const listenerReturnTimeout = 60 * time.Second
+
+// observeServerProcess names the process serving NFS in the target pod, live.
+//
+// This is the one thing the preflight record cannot supply: the pid, which
+// changes on every restart and is the whole of what step 5 compares.
+func observeServerProcess(ctx context.Context, f *framework.Framework, t chaos.Target) (framework.ServerProcess, error) {
+	agent, err := framework.NodeAgent(ctx, f.C)
 	if err != nil {
-		failOrBlock(t, err, "re-reading server restart counts")
+		return framework.ServerProcess{}, fmt.Errorf("node agent unavailable: %w", err)
 	}
-	if restartsAfter <= restartsBefore {
-		t.Errorf("server container restart count is still %d after SIGKILL, so the process that was killed "+
-			"was not the one serving NFS; pass -server-process to name it", restartsAfter)
+	names := make([]string, 0, len(t.Containers))
+	for _, c := range t.Containers {
+		names = append(names, c.Name)
 	}
+	return framework.DiscoverServerProcess(ctx, f.C, agent, t.Namespace, t.Pod, t.Node, names, framework.NFSPort)
+}
+
+// confirmServerProcessReplaced is CHAOS-01's step 5: evidence that the SIGKILL
+// landed on the process that was serving NFS, rather than on something else
+// while the server carried on.
+//
+// It compares the process serving before the fault with the one serving after,
+// because that is the question, and it is the one that survives contact with
+// how a server is packaged. The container's restart count cannot answer it: in
+// the reference deployment PID 1 is nfs-provisioner, which supervises
+// ganesha.nfsd and restarts it in place, so the container never restarts and a
+// correct kill read as a failure for months. See F-026 in docs/findings.md and
+// issue #82.
+//
+// The count is not consulted even as a cross-check for a server that is its
+// container's PID 1, because the pid compared here is the node's and a
+// containerized process never has node pid 1. An earlier version of this
+// branched on the container's pid, which is not a thing this discovery can see:
+// naming the process at all needs the node agent, since the server's file
+// descriptors are unreadable from inside its own pod (F-027).
+func confirmServerProcessReplaced(ctx context.Context, t *testing.T, f *framework.Framework,
+	target chaos.Target, before framework.ServerProcess, beforeErr error) {
+	t.Helper()
+	if beforeErr != nil {
+		// Not a failure of the deployment: the case could not see who was
+		// serving, so it cannot say whether the right process died. The
+		// recovery assertions above stand on their own.
+		t.Logf("the kill could not be confirmed by observation, because the process serving NFS was not "+
+			"visible before the fault: %v", beforeErr)
+		return
+	}
+
+	var after framework.ServerProcess
+	err := framework.Poll(ctx, framework.PollInterval, listenerReturnTimeout, func(ctx context.Context) (bool, error) {
+		var err error
+		after, err = observeServerProcess(ctx, f, target)
+		return err == nil, err
+	})
+	if err != nil {
+		t.Errorf("nothing is serving NFS in %s/%s after the SIGKILL, though the client recovered: %v",
+			target.Namespace, target.Pod, err)
+		return
+	}
+	if after.PID == before.PID {
+		t.Errorf("the process serving NFS in %s is still %s, so the SIGKILL did not land on it and the "+
+			"recovery measured above is not a recovery from this fault", target.Pod, after)
+		return
+	}
+	t.Logf("after the fault, %s, replacing pid %d", after, before.PID)
 }
 
 // CHAOS-02: delete the server pod during an active write. Everything CHAOS-01

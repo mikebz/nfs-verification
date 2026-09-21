@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-10
-Updated: 2026-09-16
+Updated: 2026-09-21
 
 Things learned by running the suite against a real cluster that are worth
 remembering. Each entry is dated, and says what happened, why, what changed in
@@ -28,6 +28,8 @@ that is the one that means anything.
 
 | # | Found | What it says | Cited by |
 |---|---|---|---|
+| [F-027](findings/F027-a-container-cannot-read-the-file-descriptors-of-its.md) | 2026-09-20 | Inside a server pod, root without `CAP_SYS_PTRACE` cannot read the NFS server's file descriptors, so the socket-to-process join F-026 introduced fails, on both deployments, on every server that had been up more than a few minutes and on none that had just started. Capabilities do not explain it and traffic does not trigger it; what does is unestablished. Discovery now reads the socket in the pod and the holder on the node, through the node agent | CHAOS-01, DATA-12, DATA-13, `DiscoverServerProcess`, `Agent.RunScript`, F-026 |
+| [F-026](findings/F026-the-process-serving-nfs-is-not-the-containers-command.md) | 2026-09-18 | The process serving NFS is `ganesha.nfsd`, a child of the `nfs-provisioner` supervisor at PID 1, so the container's declared command names the wrong process and the container's restart count cannot see the right one die. CHAOS-01, DATA-12 and DATA-13 were blocked for the life of the project over a name the pod could have been asked for: the harness now joins the listening socket on 2049 to the process holding it, and has no fallback because every candidate fallback names a process nobody checked | CHAOS-01, DATA-12, DATA-13, `DiscoverServerProcess`, `ResolveProcess`, F-027 |
 | [F-024](findings/F024-identical-counters-after-a-restart-are-not-continuity.md) | 2026-09-15 | OBS-07's first end-to-end run passed with `resumed-continuous` and claimed the server keeps its counts, on a process whose uptime was 1 second: Ganesha's startup is deterministic and the server idle, so a restart re-derives identical counters. Classification now splits advanced from unchanged and reports `resumed-indeterminate` | OBS-07, `ClassifyMetrics`, doc 06 |
 | [F-023](findings/F023-neither-nfs-deployment-declares-a-metrics-endpoint.md) | 2026-09-15 | Neither deployment publishes metrics as shipped, but for different reasons: `gke-w1` is built without `USE_MONITORING`, while `gke-w2` has `libganesha_monitoring` linked and is off only because `Enable_Metrics` defaults to false. Turning it on served 39 families including lease, lock and client-state metrics; the chart still declares no port or annotation, so a scraper finds nothing either way | OBS-07, doc 06 |
 | [F-022](findings/F022-the-servers-grace-announcements-were-in-a-log-file.md) | 2026-09-13 | The grace lines F-008 said do not exist do exist, in the NFS daemon's own log file inside the export volume; `kubectl logs` carries only the Go provisioner's output | F-008, doc 07 |

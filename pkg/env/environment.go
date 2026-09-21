@@ -32,6 +32,16 @@ type ServerInfo struct {
 	ReportedVersion string `json:"reportedVersion,omitempty"`
 	// Exports is the export-to-PVC mapping this pod serves, when discoverable.
 	Exports []string `json:"exports,omitempty"`
+	// Process is the process observed holding the listening NFS socket in this
+	// pod. It is what an in-place kill is aimed at, and it is discovered once
+	// here rather than by each case that injects one: the name is a property of
+	// the image, so a case that re-derived it would be paying an exec into the
+	// server for an answer that cannot have changed. What does change on every
+	// restart is the pid, so no pid is recorded; a case that needs to know
+	// whether a particular process died observes that for itself. See F-026.
+	Process string `json:"process,omitempty"`
+	// ProcessNote is why Process is empty, when it is.
+	ProcessNote string `json:"processNote,omitempty"`
 }
 
 // MountInfo is one line of /proc/mounts on a node, for an NFS mount the suite
@@ -83,10 +93,6 @@ type Environment struct {
 	// IndependentlyVersioned reports whether server and CSI driver come from
 	// different release trains. Gates the SKEW cases.
 	IndependentlyVersioned bool `json:"independentlyVersioned"`
-
-	// ServerProcess is the process name pattern to signal for in-place kill.
-	// Discovered during preflight and pinned for the run.
-	ServerProcess string `json:"serverProcess,omitempty"`
 
 	Mounts           []MountInfo `json:"mounts"`
 	NFSVersion       string      `json:"nfsVersion"`
