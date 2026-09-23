@@ -7,7 +7,6 @@ import (
 	"runtime"
 	"strings"
 	"testing"
-	"time"
 )
 
 // The tool itself, run for real. Everything above tests the parser; this tests
@@ -185,12 +184,7 @@ func TestLockToolWaitsRatherThanBlocking(t *testing.T) {
 		t.Fatalf("launching the second holder: %v\n%s", err, out)
 	}
 	defer os.Remove(secondRun)
-	// Long enough for several acquire attempts, each a second apart.
-	time.Sleep(2500 * time.Millisecond)
-	if got := readState(t, secondState); got != "waiting" {
-		t.Fatalf("the refused holder reports %q, want waiting: a holder that reported held would have "+
-			"taken a lock someone else has, and one that reported failed would hide a live contender", got)
-	}
+	waitForState(t, secondState, "waiting")
 
 	if err := os.Remove(secondRun); err != nil {
 		t.Fatalf("removing the second run file: %v", err)
