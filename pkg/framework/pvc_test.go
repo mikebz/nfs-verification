@@ -48,6 +48,35 @@ func TestCheckObjectNameEdgeCases(t *testing.T) {
 	}
 }
 
+func BenchmarkDescribeResizeConditions(b *testing.B) {
+	pvc := &corev1.PersistentVolumeClaim{
+		Status: corev1.PersistentVolumeClaimStatus{
+			Conditions: []corev1.PersistentVolumeClaimCondition{
+				{
+					Type:    corev1.PersistentVolumeClaimConditionType("Unused"),
+					Status:  corev1.ConditionFalse,
+					Message: "A pod is currently referencing this PVC",
+				},
+				{
+					Type:    corev1.PersistentVolumeClaimConditionType("CustomCondition1"),
+					Status:  corev1.ConditionTrue,
+					Message: "Custom condition 1 message",
+				},
+				{
+					Type:    corev1.PersistentVolumeClaimConditionType("CustomCondition2"),
+					Status:  corev1.ConditionTrue,
+					Message: "Custom condition 2 message",
+				},
+			},
+		},
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = describeResizeConditions(pvc)
+	}
+}
+
 // TestPVCSpecWithDataSource covers building claim specifications that restore
 // from VolumeSnapshot references.
 //
