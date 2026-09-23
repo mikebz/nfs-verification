@@ -230,3 +230,48 @@ func TestParseGraceLogSurvivesAnEnormousLine(t *testing.T) {
 		t.Errorf("signals are %+v, want an entry then an exit", obs.Signals)
 	}
 }
+
+// TestFirstDated covers FirstDated finding the chronologically earliest dated log
+// line from a slice of log lines, ignoring lines without timestamps.
+//
+// Steps:
+//  1. Assert an empty slice returns found=false.
+//  2. Assert a slice with only undated lines (zero time) returns found=false.
+//  3. Assert a slice with dated lines out of chronological order and undated lines
+//     returns the earliest dated line and found=true.
+func TestFirstDated(t *testing.T) {
+	// 1. Empty slice
+	if _, found := FirstDated(nil); found {
+		t.Error("FirstDated(nil) returned found=true, want false")
+	}
+
+	// 2. Only zero-timestamp (undated) lines
+	undated := []LogLine{
+		{Text: "line 1"},
+		{Text: "line 2"},
+	}
+	if _, found := FirstDated(undated); found {
+		t.Error("FirstDated with only undated lines returned found=true, want false")
+	}
+
+	// 3. Mixed dated and undated lines out of order
+	t1 := time.Unix(1700000010, 0)
+	t2 := time.Unix(1700000005, 0) // earliest
+	t3 := time.Unix(1700000020, 0)
+
+	lines := []LogLine{
+		{Text: "undated 1"},
+		{At: t1, Text: "dated t1"},
+		{Text: "undated 2"},
+		{At: t2, Text: "dated t2 (earliest)"},
+		{At: t3, Text: "dated t3"},
+	}
+
+	best, found := FirstDated(lines)
+	if !found {
+		t.Fatal("FirstDated returned found=false for dated lines, want true")
+	}
+	if !best.At.Equal(t2) || best.Text != "dated t2 (earliest)" {
+		t.Errorf("FirstDated returned line %+v, want earliest line with timestamp %v and text %q", best, t2, "dated t2 (earliest)")
+	}
+}
