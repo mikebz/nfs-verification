@@ -21,10 +21,11 @@ the code cites: a comment reading "see F-009 in docs/findings.md" should land a
 reader somewhere that still exists. A new finding takes the next number, gets a
 file of its own, and a row at the top of the table below.
 
-The entry files were split out of a single log on 2026-09-14, so every one of
-them carries that date as `Created:` while describing something found earlier.
-The date the finding was made is the `**Found:**` line inside the entry, and
-that is the one that means anything.
+F-001 to F-022 were split out of a single log on 2026-09-14, so each of them
+carries that date as `Created:` while describing something found earlier. Every
+later entry carries the date its own file landed. Either way, the date the
+finding was made is the `**Found:**` line inside the entry, and that is the one
+that means anything.
 
 | # | Found | What it says | Cited by |
 |---|---|---|---|
