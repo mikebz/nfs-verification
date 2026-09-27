@@ -1,4 +1,4 @@
-# F-029: Grace always runs its full length on both deployments, for different reasons, so every recovery is grace plus restart
+# F-029: Neither deployment ever lifts grace early, for different reasons, so every recovery is grace plus restart
 
 Author: mikebz@
 Created: 2026-09-27
@@ -19,9 +19,11 @@ the pod restart leaves, and one cycle left one second.
 ### What happened
 
 Across the six runs the servers entered grace 94 times, 45 on `gke-w1` and 49 on
-`gke-w2`. Every grace period in the servers' logs ran for 90 or 91 seconds, except one on `gke-w2` that
-a second restart cut short a second after it began (23:16:08Z). No grace period
-ended early. The reason differs by deployment.
+`gke-w2`. 93 of those grace periods ran for 90 or 91 seconds. The 94th, on
+`gke-w2` at 23:16:08Z, was cut short a second after it began by a second
+restart, which started a grace period of its own. Neither server ever lifted
+grace early, that is, ended it before the timer because reclaim was complete.
+The reason differs by deployment.
 
 **`gke-w1`, Ganesha 4.0.8, keeps grace for its full length even when every
 client it knows has reclaimed.** A typical window:
@@ -61,7 +63,8 @@ Recovery is therefore grace plus restart, on both deployments, as simple sums:
 
 | Fault | Recovery observed | = grace | + restart |
 |---|---|---|---|
-| SIGKILL of `ganesha.nfsd` (CHAOS-01, DATA-12, DATA-13) | 92–93s, twice 107s | 90s | about 2s for the supervisor to respawn it |
+| SIGKILL of `ganesha.nfsd` (CHAOS-01 in four of six runs, DATA-12, DATA-13) | 92–93s | 90s | about 2s for the supervisor to respawn it |
+| SIGKILL of `ganesha.nfsd` (CHAOS-01 in `w1-e2e-run2` and `w2-e2e-run1`) | 107s | 90s | about 17s, unexplained: the grace window itself was 90s, and a passing case keeps no timeline to show where the other 15s went (#101) |
 | Server pod delete (CHAOS-02, -05, -06, -07, OBS-02, -03) | 102–106s | 90s | about 13s to reschedule and start |
 | Worst single cycle (CHAOS-05, `w2-e2e-run1`, cycle 4) | **119s** | 90s | about 29s |
 
