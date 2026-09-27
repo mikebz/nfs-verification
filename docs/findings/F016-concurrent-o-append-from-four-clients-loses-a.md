@@ -75,8 +75,8 @@ the file back from a pod that never wrote to it:
 the file holds 150 lines, want 200 from 4 appenders writing 50 records each; 150 whole, 0 torn
 ```
 
-Fifty records lost. **Zero torn.** Three times now, with the same count every
-time, and on the third the message named what went:
+Fifty records lost. **Zero torn.** By 2026-09-13 that had happened three times,
+with the same count every time, and on the third the message named what went:
 
 ```
 the file holds 150 lines, want 200 from 4 appenders writing 50 records each; 150 whole, 0 torn. Missing: appender0 lost 50 of 50 (records 1-50)
@@ -85,18 +85,21 @@ the file holds 150 lines, want 200 from 4 appenders writing 50 records each; 150
 **One appender's entire contribution, contiguously, and none of the other
 three's.** Not fifty singles scattered across four writers, which would have
 been a different mechanism and a worse one. Three of the four appenders landed
-every record they wrote; the fourth landed none.
+every record they wrote; the fourth landed none. Every red since has had the
+same shape (see the table).
 
 In between, it passed twice on the same cluster and the same day with every
 record present. **The loss is intermittent, and a green DATA-02 does not clear
 this deployment** — it means the race did not fire that time.
 
-All three reds were whole-suite runs and both greens were data-only runs, which
-is 3-2 and still a hypothesis rather than a cause, though a harder one to
-dismiss than it was at 2-2. It is testable: in `make test-e2e` the chaos cases
-run before the data cases and delete the server pod repeatedly, so DATA-02 there
-starts against a server that has recently failed over, and the appenders' cached
-sizes are that much staler. Nothing yet rules out plain timing.
+At that point all three reds were whole-suite runs and both greens were
+data-only runs. The entry proposed that 3-2 split as a hypothesis: in
+`make test-e2e` the chaos cases run before the data cases and delete the server
+pod repeatedly, so DATA-02 there starts against a server that has recently
+failed over, and the appenders' cached sizes are that much staler. **That
+hypothesis has since failed.** Whole-suite runs are now 9 red of 13, identical
+runs disagree, and run shape does not separate red from green (see the
+2026-09-27 update above).
 
 Those two numbers point in opposite directions and both matter:
 
