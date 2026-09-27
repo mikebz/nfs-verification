@@ -459,7 +459,7 @@ forty-three cases, per run:
 | Blocked | 1 | 1 | 1 | 1 | 1 | 1 |
 | Skipped | 1 | 1 | 1 | 1 | 1 | 1 |
 
-Thirty-five cases returned the same verdict in all six runs and passed. That now
+Thirty-three cases passed in all six runs. That now
 includes **CHAOS-01, DATA-12 and DATA-13**, which were blocked in every earlier
 whole-suite run. The block was the harness's inability to name the process
 serving NFS, and it was the harness's defect, not the deployments' (F-026,
@@ -490,8 +490,10 @@ not passes**: those vectors are unexercised here, and a green run against these
 provisioners is not evidence that grace behaves.
 
 Failover recovery is grace plus restart on both deployments, because neither
-server ever ends grace early ([F-029](findings.md)). A SIGKILL of the server
-process recovered in 92 to 93s (twice 107s). A server pod delete recovered in
+server ever lifts grace early ([F-029](findings.md)). A SIGKILL of the server
+process recovered in 92 to 93s, except in two CHAOS-01 runs (`w1-e2e-run2`,
+`w2-e2e-run1`) that took 107s. Those extra 15s are unexplained, because a
+passing case keeps no fault timeline (#101). A server pod delete recovered in
 102 to 106s. CHAOS-05's five cycles took 8m36s to 9m05s. **One CHAOS-05 cycle on
 `gke-w2` took 1m59s against the 2m0s budget**, where the pod restart took about
 29s rather than 13s. That is the narrowest margin recorded, and F-029 is why it
