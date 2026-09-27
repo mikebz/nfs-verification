@@ -94,8 +94,8 @@ On every node, the `/etc` count is a power of two and the
 `/run/systemd/resolve` count is one below it, the doubling this entry describes,
 frozen wherever the node stood when the wrapper was patched. The `/proc/mounts`
 totals are those two plus everything else the node mounts, and follow no such
-pattern. None of the counts moved between the first run and the last, so the
-fix holds. The
+pattern. No node's `/etc` or `/run/systemd/resolve` count moved between the
+first run and the last, so the fix holds. The
 nodes were never cleaned up, and doing that is a reboot or an unmount loop on
 each node. That is a change for the cluster owner, and it has not been made.
 
