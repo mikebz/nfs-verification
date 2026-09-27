@@ -1098,7 +1098,9 @@ func TestProvVolumeNameEdgeCases(t *testing.T) {
 			//
 			// The pods have to exist before the bind check, because a class that
 			// binds on first consumer has nothing to bind to until something is
-			// scheduled (F-002). Waiting for them here would spend the pod-ready
+			// scheduled (volumeBindingMode: WaitForFirstConsumer,
+			// https://kubernetes.io/docs/concepts/storage/storage-classes/#volume-binding-mode).
+			// Waiting for them here would spend the pod-ready
 			// timeout on a claim that never bound and then fail with a pod
 			// message, so the bind verdict below, which is the one that names
 			// the provisioner, would never be printed. PROV-07 starts its

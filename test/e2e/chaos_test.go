@@ -399,9 +399,10 @@ func TestChaosServerProcessKill(t *testing.T) {
 	// bystander kill above. Compared here rather than inside KillServerProcess
 	// because the name is the one thing preflight is the single source of; this
 	// checks that source against the running system without becoming a second
-	// one. DATA-12 and DATA-13 make no equivalent check, and the kill is still
-	// aimed by a substring of the whole command line node-wide, which no check
-	// here can fix: see issue #90.
+	// one. DATA-12 and DATA-13 make no equivalent check yet (#99). The kill is
+	// still aimed by a substring of the whole command line node-wide, which no
+	// check here can fix; #90 records why that is accepted: a second NFS server
+	// on the same node is not reachable against this provisioner.
 	aimedAt, err := chaos.ResolveProcess(f, s.target)
 	if err != nil {
 		t.Skipf("blocked: %v", err)
