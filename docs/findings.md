@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-10
-Updated: 2026-09-21
+Updated: 2026-09-27
 
 Things learned by running the suite against a real cluster that are worth
 remembering. Each entry is dated, and says what happened, why, what changed in
@@ -39,7 +39,7 @@ that is the one that means anything.
 | [F-019](findings/F019-the-client-an-nfs-server-can-name-is-the-node-and.md) | 2026-09-13 | The server sees node addresses, never pod addresses, and an IPv4 client on its IPv6 listener appears as `::ffff:a.b.c.d`, so `/proc/net/tcp` alone shows no NFS connections at all | `peers.go`, SEC-06, SEC-08 |
 | [F-018](findings/F018-the-export-admits-any-client-that-can-reach-it-so-a.md) | 2026-09-13 | A node with no claim mounted another claim's export and read its bytes; the exports carry no client rules and nothing in the network path restricts who may try | SEC-05's failure, SEC-08's record, doc 07 |
 | [F-017](findings/F017-a-sleeping-workstation-understates-every-duration.md) | 2026-09-13 | A Mac asleep mid-run freezes Go's monotonic clock but not the pods, so the suite under-reports its own durations while cluster-side measurements stay right | the README's note on long runs |
-| [F-016](findings/F016-concurrent-o-append-from-four-clients-loses-a.md) | 2026-09-13 | Four clients appending to one file landed 150 of 200, none torn, on five whole-suite runs across two clusters and two server builds: one appender loses its whole contribution while the rest lose none, a different appender each time. Two data-only runs lost nothing, so it is intermittent | DATA-02's failure message, `CompactRanges` |
+| [F-016](findings/F016-concurrent-o-append-from-four-clients-loses-a.md) | 2026-09-13 | Four clients appending to one file landed 150 of 200, none torn, on 9 of 13 whole-suite runs across two clusters and two server builds: one appender loses its whole contribution while the rest lose none. The run shape does not predict it. Every named loser (7 of 7) shared its node with another pod on the share, and the one appender alone on its node never lost. Intermittent | DATA-02's failure message, `CompactRanges` |
 | [F-015](findings/F015-a-checksum-that-failed-came-back-as-an-empty-string.md) | 2026-09-13 | A checksum pipeline ending in `cut` exits zero when `sha256sum` fails, so a helper returned an empty string as a digest | `io.go`'s `sumCmd` and `parseSum`, `io_parse_test.go` |
 | [F-014](findings/F014-recovery-was-measured-to-a-write-that-committed.md) | 2026-09-12 | Time to first I/O after a fault returned a write from before service was lost, reporting a 1m43s failover as 0s | `load.go`'s stall measurement, `slo.LoadStallFloor`, CHAOS-02/05/06/07 |
 | [F-013](findings/F013-a-terminating-server-pod-counted-as-the-server.md) | 2026-09-11 | A gracefully deleted pod stays Running and ready, so the wait for a replacement was satisfied by the pod it was waiting past | `server.go`'s readiness check, `server_test.go` |
