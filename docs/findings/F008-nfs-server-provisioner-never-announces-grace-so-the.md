@@ -2,8 +2,19 @@
 
 Author: mikebz@
 Created: 2026-09-14
-Updated: 2026-09-14
+Updated: 2026-09-27
 
+
+> **Refined by [F-022](F022-the-servers-grace-announcements-were-in-a-log-file.md).**
+> What follows is true of the container's log stream, which is what `kubectl logs`
+> and this suite read. It is not true of the server. The NFS daemon writes its
+> grace entry and exit to `/export/ganesha.log` inside the export volume. On
+> 2026-09-25, six whole-suite runs found those lines, `nfs_start_grace … IN GRACE,
+> duration 90` and `nfs_lift_grace_locked … NOT IN GRACE`, for every restart on
+> this deployment and on `gke-w2`'s Ganesha 15.3. The verdicts here are
+> unchanged: OBS-03 failed and CHAOS-07 reported blocked in all six runs, because
+> neither reads that file. Whether a case may read it is the open question in
+> F-022 and #21.
 
 **Found:** 2026-09-11, GKE cluster `gke-w1`, Kubernetes v1.37, StorageClass `nfs`
 backed by `cluster.local/nfs-provisioner-nfs-server-provisioner:v4.0.8`. First
