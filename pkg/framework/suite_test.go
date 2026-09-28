@@ -9,12 +9,12 @@ import (
 	"testing"
 )
 
-// TestClaimCaseDirRefusesASecondExecution exists because a reused run id fails
-// silently otherwise. Two executions of one case in one directory read as one
-// bundle: the second's evidence beside the first's failure, a node file from
-// the first describing a node the second never touched (#71). Nothing fails
-// and nothing says so, so this is found here or by someone arguing from the
-// wrong run's dmesg.
+// TestClaimCaseDirRefusesReuse exists because a reused run id fails silently
+// otherwise. Two executions of one case in one directory read as one bundle:
+// the second's evidence beside the first's failure, a node file from the first
+// describing a node the second never touched (#71). Nothing fails and nothing
+// says so, so this is found here or by someone arguing from the wrong run's
+// dmesg.
 //
 // Steps:
 //  1. Point the artifacts directory and run id at a temp dir, with no run
@@ -24,7 +24,7 @@ import (
 //  3. Claim the first case again: it must fail, name the directory and the run
 //     id so the reader knows what to change, and leave the earlier
 //     execution's files untouched.
-func TestClaimCaseDirRefusesASecondExecution(t *testing.T) {
+func TestClaimCaseDirRefusesReuse(t *testing.T) {
 	originalDir, originalRun := cfg.ArtifactsDir, cfg.RunID
 	defer func() { cfg.ArtifactsDir, cfg.RunID = originalDir, originalRun }()
 	cfg.ArtifactsDir = filepath.Join(t.TempDir(), "artifacts")
@@ -59,31 +59,52 @@ func TestClaimCaseDirRefusesASecondExecution(t *testing.T) {
 	}
 }
 
-// TestClaimCaseDirReportsAnUnusableRunDir covers the other refusal. A run
-// directory that cannot be created must not read as "already ran": that
-// message sends the reader off to choose a new run id when the problem is the
-// artifacts path.
+// TestClaimCaseDirReportsObstruction covers the refusals that are not reuse. A
+// regular file where the run or case directory should be was put there by
+// hand, and no execution owns it. Reporting it as "already run" would send the
+// reader off to choose a new run id when the fix is to remove the file.
 //
 // Steps:
-//  1. Put a regular file where the run directory should be.
-//  2. Claim a case, and assert it fails without the already-ran wording.
-func TestClaimCaseDirReportsAnUnusableRunDir(t *testing.T) {
-	originalDir, originalRun := cfg.ArtifactsDir, cfg.RunID
-	defer func() { cfg.ArtifactsDir, cfg.RunID = originalDir, originalRun }()
-	cfg.ArtifactsDir = t.TempDir()
-	cfg.RunID = "blocked-run"
-	if err := os.WriteFile(RunDir(), []byte("not a directory\n"), 0o644); err != nil {
-		t.Fatalf("seeding the obstruction: %v", err)
-	}
+//  1. For each of the run directory and the case directory, put a regular
+//     file at that path under a fresh artifacts directory.
+//  2. Claim the case, and assert it fails, names the path, does not use the
+//     already-run wording and does not wrap ErrExist, which is what a caller
+//     checking for reuse would test.
+func TestClaimCaseDirReportsObstruction(t *testing.T) {
+	for _, tc := range []struct {
+		what    string
+		blocked func() string
+	}{
+		{"the run directory", RunDir},
+		{"the case directory", func() string { return CaseDir("PROV-01") }},
+	} {
+		t.Run(tc.what, func(t *testing.T) {
+			originalDir, originalRun := cfg.ArtifactsDir, cfg.RunID
+			defer func() { cfg.ArtifactsDir, cfg.RunID = originalDir, originalRun }()
+			cfg.ArtifactsDir = t.TempDir()
+			cfg.RunID = "blocked-run"
 
-	err := claimCaseDir("PROV-01")
-	if err == nil {
-		t.Fatal("a claim under a run directory that is a regular file succeeded")
-	}
-	if strings.Contains(err.Error(), "already run") {
-		t.Errorf("an unusable run directory was reported as a reused run id: %v", err)
-	}
-	if errors.Is(err, fs.ErrExist) {
-		t.Errorf("the error wraps ErrExist, so a caller checking for reuse would misread it: %v", err)
+			path := tc.blocked()
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				t.Fatalf("preparing the parent of %s: %v", path, err)
+			}
+			if err := os.WriteFile(path, []byte("not a directory\n"), 0o644); err != nil {
+				t.Fatalf("seeding the obstruction: %v", err)
+			}
+
+			err := claimCaseDir("PROV-01")
+			if err == nil {
+				t.Fatalf("a claim succeeded with a regular file at %s", path)
+			}
+			if !strings.Contains(err.Error(), path) {
+				t.Errorf("the error does not name the path in the way: %v", err)
+			}
+			if strings.Contains(err.Error(), "already run") || strings.Contains(err.Error(), "RUN_ID") {
+				t.Errorf("an obstruction was reported as a reused run id: %v", err)
+			}
+			if errors.Is(err, fs.ErrExist) {
+				t.Errorf("the error wraps ErrExist, so a caller checking for reuse would misread it: %v", err)
+			}
+		})
 	}
 }

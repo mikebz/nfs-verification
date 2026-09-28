@@ -70,18 +70,26 @@ func CaseDir(caseID string) string { return filepath.Join(RunDir(), caseID) }
 // run id; mixing costs every reader the ability to trust the bundle.
 //
 // Mkdir rather than a check followed by MkdirAll, so the check and the claim are
-// one step, and two executions started together cannot both win it.
+// one step, and two executions started together cannot both win it. Only a
+// directory at the path is an earlier execution: anything else there was put by
+// hand, no run owns it, and telling the reader to change RUN_ID would send them
+// to the wrong fix.
 func claimCaseDir(caseID string) error {
 	if err := os.MkdirAll(RunDir(), 0o755); err != nil {
 		return fmt.Errorf("creating the run directory: %w", err)
 	}
 	dir := CaseDir(caseID)
-	if err := os.Mkdir(dir, 0o755); err != nil {
-		if errors.Is(err, fs.ErrExist) {
-			return fmt.Errorf("%s already exists: run id %q has already run %s, and a second execution "+
-				"would mix its bundle with the first's; run it again under a new RUN_ID", dir, Cfg().RunID, caseID)
-		}
+	err := os.Mkdir(dir, 0o755)
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, fs.ErrExist) {
 		return fmt.Errorf("creating the case directory: %w", err)
 	}
-	return nil
+	if info, statErr := os.Stat(dir); statErr != nil || !info.IsDir() {
+		return fmt.Errorf("%s exists but is not a directory, so no execution of %s owns it; remove it "+
+			"and run again", dir, caseID)
+	}
+	return fmt.Errorf("%s already exists: run id %q has already run %s, and a second execution "+
+		"would mix its bundle with the first's; run it again under a new RUN_ID", dir, Cfg().RunID, caseID)
 }

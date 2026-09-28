@@ -111,7 +111,10 @@ the generated run ID. A run ID runs each case once: a case whose
 a second execution would mix its bundle with the first's (#71). Splitting one
 run across several targets under one `RUN_ID` works, since each case gets its
 own directory; a re-run of a case needs a new ID, and so does each cluster,
-because `environment.json` at the top of the run describes one cluster.
+because `environment.json` at the top of the run describes one cluster. The
+default ID is a UTC timestamp to the second, so two invocations of one case
+started in the same second, such as the same case on two clusters at once,
+share it and the second is refused: give parallel runs their own `RUN_ID`.
 `make unit` needs no cluster, no network and no
 kubeconfig, and unit tests must stay that way: a test under `pkg/` that needs a
 cluster belongs in `test/e2e` behind a capability check.
