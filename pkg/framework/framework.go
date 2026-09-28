@@ -116,10 +116,19 @@ func (f *Framework) unprovenClaims() map[string]string {
 // "DATA-05"; it prefixes every object the case creates, lands in labels, and
 // names the artifact bundle, so a stray object can be traced back to the case
 // and the run that made it.
+//
+// It claims artifacts/<run-id>/<CASE-ID>/ first, and stops the case if that
+// directory already exists: a run id runs each case once. The claim comes
+// before the teardown is registered, because that teardown writes evidence and
+// the failure bundle into the directory, and a directory that already existed
+// belongs to an earlier execution.
 func New(t *testing.T, caseID string) *Framework {
 	t.Helper()
 	if suiteErr != nil {
 		t.Fatalf("suite not initialized: %v", suiteErr)
+	}
+	if err := claimCaseDir(caseID); err != nil {
+		t.Fatalf("%s did not start: %v", caseID, err)
 	}
 	f := &Framework{T: t, C: suiteClient, Env: suiteEnv, Caps: suiteCaps, CaseID: caseID, state: &caseState{}}
 

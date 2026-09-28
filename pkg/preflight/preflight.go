@@ -155,7 +155,7 @@ func Run(ctx context.Context) (*Result, error) {
 
 	e.Capabilities = caps.AsMap()
 	e.Context = c.Context
-	if _, err := e.Write(framework.RunDir()); err != nil {
+	if err := framework.WriteRunEnvironment(e); err != nil {
 		return nil, fmt.Errorf("writing environment.json: %w", err)
 	}
 	// Remember it for the next run against this cluster.

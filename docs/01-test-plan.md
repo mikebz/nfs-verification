@@ -371,6 +371,7 @@ next phase has to rediscover:
 - **Timing and correctness bounds live in `pkg/slo`**, against the profile preflight pinned. No case carries a literal.
 - **What a case reports** (passed, failed, blocked, skipped) is defined in the repository `README.md`, and the same four words mean the same four things in every section.
 - **A case names the file it argues from, and the harness keeps a copy.** The two things every claim rests on are destroyed by teardown: the workload's record stream, which lives on the pod's own filesystem, and the file on the share a data case is about. Both are copied into the bundle before anything is deleted, on a pass as well as a failure, because a passing case's numbers are exactly the ones nobody can re-derive later. One named file per registration, capped, and nothing walks the share: a rule that collected a directory would try to bring DATA-10's hundred thousand entries home.
+- **One bundle directory holds one execution of one case.** A case claims `artifacts/<run-id>/<CASE-ID>/` before it creates anything, and a directory that already exists stops it: a run ID runs each case once. Two executions in one directory read as one bundle, with the second's evidence beside the first's failure and nothing to say which file belongs to which, and that happened to DATA-12 and DATA-13 before this rule (#71). Splitting a run across several invocations by case is unaffected; a re-run takes a new run ID. The run-level `environment.json` follows the same rule: the first invocation under a run ID writes it, from a fresh or a cached preflight, a later one against the same cluster leaves it alone, and one against another cluster stops before any case runs, because a run ID describes one cluster.
 
 ### 4.2 Execution by Category
 
@@ -398,7 +399,7 @@ Every run, failed or not, also leaves the files each case named as its evidence:
 
 Triage order:
 
-1. **Is it the harness?** Re-run the single case in isolation. Flaky-on-isolation means harness bug; file against the suite.
+1. **Is it the harness?** Re-run the single case in isolation (`make test-case`), under a new run ID so its bundle stays apart from the failure's. Flaky-on-isolation means harness bug; file against the suite.
 2. **Which side of the mount?** Compare client `/proc/mounts` and dmesg against server logs at the fault timestamp. Client stuck with a healthy server means client or network. Server restarted means server.
 3. **Is it grace?** Look for repeated grace entry in the window. Grace re-entry loops present as "hung client, healthy server" and are the single most common false diagnosis in this architecture.
 4. **Provisioning or data path?** Provisioning failures go to the CSI driver owner. Data path failures go to the server owner.
