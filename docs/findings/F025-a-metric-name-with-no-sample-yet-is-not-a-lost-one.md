@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-17
-Updated: 2026-09-17
+Updated: 2026-09-27
 
 
 **Found:** 2026-09-17, the first whole-suite runs against two clusters,
@@ -118,3 +118,36 @@ Both statements are about a cluster that is **not** in its as-shipped state:
 by hand, per
 [F-023](F023-neither-nfs-deployment-declares-a-metrics-endpoint.md). On `gke-w1`
 OBS-07 still fails at discovery with `absent`, and nothing here applies to it.
+
+### Updated 2026-09-27
+
+**Reproduced three out of three, identically after the restart.** OBS-07 ran in
+three whole-suite runs on `gke-w2` on 2026-09-25
+(`w2-e2e-run{1,2,3}-20260925-222955`), with the exposer and annotations still
+hand-enabled. Every run returned the same verdict and the same post-restart
+figures as this entry's first occurrence. Only the pre-restart series count
+varied, with the traffic that came before: 1632 in run 1 and 1633 in runs 2 and
+3, against 1634 the first time. Run 2:
+
+```
+never-resumed: 1633 series under 87 names before, 367 under 66 after; 21 names lost, 0 new;
+61 counters reset, 0 advanced, 133 unchanged, 1126 series lost under a surviving name
+```
+
+The 21 lost names are the same byte, size and cache families listed above. The
+367 series under 66 names are the same cold-start set. The 1126 series lost
+under a surviving name are per-status and per-client labels. They include
+`status="NFS4ERR_GRACE"`, `"NFS4ERR_BADSESSION"` and `"NFS4ERR_STALE_CLIENTID"`,
+which a server returns only to clients recovering from a restart. The process
+scraped before the restart had accumulated them over the chaos cases' earlier
+failovers. The fresh process, scraped before any client had come back to it, had
+returned none of them yet. That is the same mechanism reaching labels rather
+than names. The fix in #81, which drives traffic before the second scrape,
+covers both only as far as that traffic recreates them: ordinary I/O that never
+meets grace will not bring the `NFS4ERR_GRACE` series back, so the case needs to
+say which label sets it expects to return.
+
+On `gke-w1`, OBS-07 failed at discovery with `absent` in all three runs, per
+F-023.
+
+"Nothing in the code yet" is still true.
