@@ -109,11 +109,20 @@ func claimCaseDir(caseID string) error {
 //     overwriting would attribute every earlier case to a cluster it never ran
 //     on; keeping the old record would do the same to every later case.
 //
+// The record is written with this run's id. A cached preflight or an -env-file
+// record carries the id of the run that discovered it, and a record in one
+// run's directory naming another run is the mis-attribution this exists to
+// stop. Timestamp is left alone: it says when discovery ran, which is what the
+// preflight cache expires on, and on a reused result it predates the run.
+// e itself is not changed.
+//
 // Before this, every fresh preflight overwrote the record, so a reused run id
 // could re-attribute a whole run without a word (#71).
 func WriteRunEnvironment(e *env.Environment) error {
 	path := filepath.Join(RunDir(), "environment.json")
-	err := e.Create(path)
+	rec := *e
+	rec.RunID = Cfg().RunID
+	err := rec.Create(path)
 	if err == nil || !errors.Is(err, fs.ErrExist) {
 		return err
 	}

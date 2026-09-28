@@ -76,7 +76,11 @@ type NodeLossConfig struct {
 
 // Environment is the full record written to artifacts/<run-id>/environment.json.
 type Environment struct {
-	RunID     string    `json:"runId"`
+	// RunID is the run the record belongs to. In a run's directory that is
+	// the run itself; in the preflight cache it is the run that discovered it.
+	RunID string `json:"runId"`
+	// Timestamp is when discovery ran, which on a reused result predates the
+	// run whose directory holds the record.
 	Timestamp time.Time `json:"timestamp"`
 
 	Context           string     `json:"context"`

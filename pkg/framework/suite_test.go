@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mikebz/nfs-verification/pkg/env"
 )
@@ -176,5 +177,45 @@ func TestWriteRunEnvironmentWritesOnce(t *testing.T) {
 	}
 	if got := read(); got != first {
 		t.Errorf("the refused preflight rewrote the record anyway:\n%s", got)
+	}
+}
+
+// TestWriteRunEnvironmentStampsRunID exists because most runs start from a
+// cached preflight, and the cached record carries the id of whichever run
+// discovered it. Written as-is, the record in one run's directory names
+// another run, and whoever triages the bundle goes looking for the wrong one:
+// the mis-attribution #71 is about, arriving through the cache. Nothing fails
+// when this is wrong, so it is found here or not at all.
+//
+// Steps:
+//  1. Write a record whose RunID and Timestamp come from an earlier run, as a
+//     cached preflight would supply it.
+//  2. Assert the record on disk carries this run's id and the original
+//     discovery time.
+//  3. Assert the caller's record is unchanged, since the cache path shares it.
+func TestWriteRunEnvironmentStampsRunID(t *testing.T) {
+	originalDir, originalRun := cfg.ArtifactsDir, cfg.RunID
+	defer func() { cfg.ArtifactsDir, cfg.RunID = originalDir, originalRun }()
+	cfg.ArtifactsDir = t.TempDir()
+	cfg.RunID = "w1-split-20260928"
+	discovered := time.Date(2026, 9, 28, 1, 28, 0, 0, time.UTC)
+	cached := &env.Environment{RunID: "w1-preflight-20260927", Timestamp: discovered, Context: "gke-w1"}
+
+	if err := WriteRunEnvironment(cached); err != nil {
+		t.Fatalf("writing the run's record from a cached preflight: %v", err)
+	}
+	got, err := env.Load(filepath.Join(RunDir(), "environment.json"))
+	if err != nil {
+		t.Fatalf("reading the run's record back: %v", err)
+	}
+	if got.RunID != cfg.RunID {
+		t.Errorf("the record in run %q's directory names run %q", cfg.RunID, got.RunID)
+	}
+	if !got.Timestamp.Equal(discovered) {
+		t.Errorf("Timestamp is %s, want the discovery time %s: it is what the preflight cache expires on",
+			got.Timestamp, discovered)
+	}
+	if cached.RunID != "w1-preflight-20260927" {
+		t.Errorf("the caller's record was changed to RunID %q", cached.RunID)
 	}
 }
