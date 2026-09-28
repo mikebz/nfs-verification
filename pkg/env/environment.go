@@ -149,8 +149,10 @@ func (e *Environment) WriteTo(path string) error {
 // directory first, and a hard link publishes it under path: the link fails if
 // path exists, so of two writers racing for it exactly one wins, and a reader
 // sees either no record or the whole of one. The loser gets an error wrapping
-// fs.ErrExist and the winner's file is untouched. A write that fails leaves
-// nothing at path.
+// fs.ErrExist and the winner's file is untouched. A write that fails before the
+// link leaves nothing at path. The one error that can follow publication is
+// failing to remove the temporary file: the whole record is then at path and
+// the error is still returned, naming the stray file, rather than discarded.
 //
 // O_EXCL alone reserves the name before the bytes are in it, and a split run
 // started in parallel on one cluster would read the half-written record and
