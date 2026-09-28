@@ -110,8 +110,10 @@ the generated run ID. A run ID runs each case once: a case whose
 `artifacts/<run-id>/<CASE-ID>/` already exists stops before it starts, because
 a second execution would mix its bundle with the first's (#71). Splitting one
 run across several targets under one `RUN_ID` works, since each case gets its
-own directory; a re-run of a case needs a new ID, and so does each cluster,
-because `environment.json` at the top of the run describes one cluster. The
+own directory; a re-run of a case needs a new ID, and so does each cluster:
+the first invocation under a run ID writes `environment.json` at the top of the
+run, nothing rewrites it, and an invocation against a different context under
+the same ID stops before any case runs. The
 default ID is a UTC timestamp to the second, so two invocations of one case
 started in the same second, such as the same case on two clusters at once,
 share it and the second is refused: give parallel runs their own `RUN_ID`.
@@ -207,8 +209,8 @@ the supervisor and killing that measures a container restart
 ([F-026](docs/findings.md)). A server preflight cannot read leaves the name
 empty, preflight says so in a note, and those three cases report blocked.
 
-Nothing runs until preflight passes. Preflight writes
-`artifacts/<run-id>/environment.json`; a failed case writes its own bundle under
+Nothing runs until preflight passes. The first invocation under a run ID
+writes `artifacts/<run-id>/environment.json`, from a fresh or a cached preflight; a failed case writes its own bundle under
 `artifacts/<run-id>/<CASE-ID>/` with pod logs, Kubernetes Events, `/proc/mounts`
 and dmesg from every involved node, and the injected-fault timeline.
 

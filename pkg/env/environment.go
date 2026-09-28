@@ -5,6 +5,7 @@ package env
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -132,11 +133,42 @@ func (e *Environment) WriteTo(path string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	b, err := json.MarshalIndent(e, "", "  ")
+	b, err := e.encode()
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, append(b, '\n'), 0o644)
+	return os.WriteFile(path, b, 0o644)
+}
+
+// Create serializes the environment to path only if nothing is there yet. The
+// existence check and the create are one step, so of two writers racing for
+// the same path exactly one wins; the other gets an error wrapping
+// fs.ErrExist and the file is left as the winner wrote it.
+func (e *Environment) Create(path string) error {
+	b, err := e.encode()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(b); err != nil {
+		return errors.Join(err, f.Close())
+	}
+	return f.Close()
+}
+
+// encode is the one serialization both writers use.
+func (e *Environment) encode() ([]byte, error) {
+	b, err := json.MarshalIndent(e, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return append(b, '\n'), nil
 }
 
 // Load reads an environment record back, for reruns that skip discovery.
