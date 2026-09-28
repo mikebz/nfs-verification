@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-19
-Updated: 2026-09-27
+Updated: 2026-09-28
 
 
 **Found:** 2026-09-18, GKE cluster `gke-w2`, Kubernetes v1.37.0-gke.2941000,
@@ -176,3 +176,15 @@ places:
 
 None of these changes a verdict today. They are greens that could not have been
 reds, which is the kind of result this suite is built not to report.
+
+### Updated 2026-09-28
+
+**The third row is closed.** The gap was in how the harness injects a kill, not
+in anything about this server: DATA-12 and DATA-13 signalled without confirming
+what they signalled. They now make CHAOS-01's before and after checks, through
+helpers the three cases share, so every case that kills the server process in
+place confirms the kill landed, whatever process serves NFS (#99). The rule is
+in the test plan's harness design section. Run twice each on `gke-w1` on
+2026-09-28 (`w1-pr99-*` and, after review made the after check stop the case,
+`w1-pr99r2-*`): all six passed, each observing the serving process before the
+kill and a new pid serving after it.
