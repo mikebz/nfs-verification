@@ -140,26 +140,38 @@ func (e *Environment) WriteTo(path string) error {
 	return os.WriteFile(path, b, 0o644)
 }
 
-// Create serializes the environment to path only if nothing is there yet. The
-// existence check and the create are one step, so of two writers racing for
-// the same path exactly one wins; the other gets an error wrapping
-// fs.ErrExist and the file is left as the winner wrote it.
+// Create serializes the environment to path only if nothing is there yet, and
+// never exposes a partial record. The bytes go to a temporary file in the same
+// directory first, and a hard link publishes it under path: the link fails if
+// path exists, so of two writers racing for it exactly one wins, and a reader
+// sees either no record or the whole of one. The loser gets an error wrapping
+// fs.ErrExist and the winner's file is untouched. A write that fails leaves
+// nothing at path.
+//
+// O_EXCL alone reserves the name before the bytes are in it, and a split run
+// started in parallel on one cluster would read the half-written record and
+// stop for no reason.
 func (e *Environment) Create(path string) error {
 	b, err := e.encode()
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	tmp, err := os.CreateTemp(dir, ".environment-*.json")
 	if err != nil {
 		return err
 	}
-	if _, err := f.Write(b); err != nil {
-		return errors.Join(err, f.Close())
+	_, writeErr := tmp.Write(b)
+	if err := errors.Join(writeErr, tmp.Close()); err != nil {
+		return errors.Join(err, os.Remove(tmp.Name()))
 	}
-	return f.Close()
+	if err := os.Chmod(tmp.Name(), 0o644); err != nil {
+		return errors.Join(err, os.Remove(tmp.Name()))
+	}
+	return errors.Join(os.Link(tmp.Name(), path), os.Remove(tmp.Name()))
 }
 
 // encode is the one serialization both writers use.
