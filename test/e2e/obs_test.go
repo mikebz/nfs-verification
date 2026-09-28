@@ -683,10 +683,10 @@ func TestObsMetricsSurviveServerRestart(t *testing.T) {
 	t.Logf("after the restart, %s: %s", afterPod, after.Describe())
 	report.After = after
 
-	exercised, rounds, err := exerciseReplacement(ctx, t, f, afterEndpoint, "client", &before, &after, within)
-	report.Rounds = rounds
+	exercised, judgedAfter, rounds, err := exerciseReplacement(ctx, t, f, afterEndpoint, "client", &report, within)
 	if exercised == nil {
-		// No verdict is recorded. Judging names against the first answer alone
+		// No verdict is recorded, and report keeps whatever body the last
+		// scrape returned. Judging names against the first answer alone
 		// is the comparison F-025 showed cannot tell a lost name from one the
 		// server has not recorded yet, and a never-resumed verdict in the
 		// bundle from it would say something this run did not observe.
@@ -699,15 +699,16 @@ func TestObsMetricsSurviveServerRestart(t *testing.T) {
 			pvc.Name, client.Name, clientNode, within, profile(t).Name, rounds, err)
 	}
 	if err != nil {
-		t.Logf("the rounds ended at the %s bound rather than settling, so the names are judged on the last "+
-			"scrape that followed a completed round: %v", within, err)
+		t.Logf("the rounds ended at the %s bound rather than settling, after %d rounds, so the names are "+
+			"judged on the scrape that followed round %d, the last with series: %v",
+			within, rounds, judgedAfter, err)
 	}
-	t.Logf("after %d rounds of traffic through the replacement: %s", rounds, exercised.Describe())
+	t.Logf("after %d rounds of traffic through the replacement: %s", judgedAfter, exercised.Describe())
 
 	report = framework.ClassifyMetrics(framework.MetricScrapes{
 		Idle: &idle, Before: &before, After: &after, Exercised: exercised,
 	})
-	report.Rounds = rounds
+	report.Rounds = judgedAfter
 	t.Logf("%s", report)
 
 	switch report.Verdict {
@@ -723,7 +724,7 @@ func TestObsMetricsSurviveServerRestart(t *testing.T) {
 			"published across a failover takes every rule written on it with it. Scraped from %s on the %s "+
 			"profile. This is what the test plan requires of a deployment (Section 3.5), not an NFS "+
 			"protocol guarantee",
-			rounds, pvc.Name, client.Name, clientNode, len(before.MetricNames())-len(report.LostMetricNames),
+			judgedAfter, pvc.Name, client.Name, clientNode, len(before.MetricNames())-len(report.LostMetricNames),
 			len(before.MetricNames()), len(report.LostMetricNames), report.LostMetricNames, afterPod,
 			profile(t).Name)
 	case framework.MetricsResumedReset:
@@ -825,8 +826,17 @@ func driveExportTraffic(ctx context.Context, f *framework.Framework, pod string,
 // exerciseReplacement drives OBS-07's traffic through the replacement server
 // and scrapes it after every round, until every metric name published before
 // the restart is back or a round brings back no name the round before it had
-// not. It returns the last scrape taken after a completed round, nil if there
-// was none, and how many rounds completed.
+// not. It returns the last scrape with series taken after a completed round,
+// nil if there was none, how many rounds preceded that scrape, and how many
+// rounds completed in all. The two counts differ when a later round's scrape
+// failed or came back empty, and the bundle has to name the round the judged
+// scrape actually followed.
+//
+// Every scrape that returns a body, series or not, is written into
+// report.Exercised with its round as it is taken, since report is what the
+// cleanup writes: when no scrape had series, the body that came back is the
+// evidence, and a bundle saying no scrape was taken would be wrong. The same
+// rule scrapeBeforeFault follows, from the review of PR #116.
 //
 // Why rounds rather than one: Ganesha records a sample as it serves the
 // request, so one round should be enough, but the scrape can race the counter
@@ -842,7 +852,7 @@ func driveExportTraffic(ctx context.Context, f *framework.Framework, pod string,
 // refuses new opens until grace ends, so a budget below grace would fail a
 // server that is behaving lawfully.
 func exerciseReplacement(ctx context.Context, t *testing.T, f *framework.Framework, e framework.MetricsEndpoint,
-	pod string, before, after *framework.MetricSet, within time.Duration) (*framework.MetricSet, int, error) {
+	pod string, report *framework.MetricsComparison, within time.Duration) (*framework.MetricSet, int, int, error) {
 	t.Helper()
 	// The rounds run on a mount that is hard, so a server that never comes back
 	// would hold an exec forever. The context is what stops it at the bound.
@@ -851,7 +861,7 @@ func exerciseReplacement(ctx context.Context, t *testing.T, f *framework.Framewo
 
 	var exercised *framework.MetricSet
 	var refused, last error
-	rounds := 0
+	rounds, judgedAfter := 0, 0
 	err := framework.Poll(ctx, framework.PollInterval, within, func(ctx context.Context) (bool, error) {
 		if err := driveExportTraffic(ctx, f, pod, rounds+1); err != nil {
 			last = fmt.Errorf("round %d did not complete: %w", rounds+1, err)
@@ -867,14 +877,16 @@ func exerciseReplacement(ctx context.Context, t *testing.T, f *framework.Framewo
 			last = fmt.Errorf("scraping after round %d: %w", rounds, err)
 			return false, last
 		}
+		report.Exercised, report.Rounds = m, rounds
 		if m.Len() == 0 {
 			last = fmt.Errorf("after round %d: %s", rounds, m.Describe())
 			return false, last
 		}
 		grew := exercised == nil || publishesNewName(m, *exercised)
-		exercised = &m
-		lost := framework.ClassifyMetrics(framework.MetricScrapes{Before: before, After: after, Exercised: &m}).
-			LostMetricNames
+		exercised, judgedAfter = &m, rounds
+		lost := framework.ClassifyMetrics(framework.MetricScrapes{
+			Before: &report.Before, After: &report.After, Exercised: &m,
+		}).LostMetricNames
 		if len(lost) == 0 || !grew {
 			return true, nil
 		}
@@ -890,7 +902,7 @@ func exerciseReplacement(ctx context.Context, t *testing.T, f *framework.Framewo
 		// mid-exec, and the round is what a reader needs.
 		err = fmt.Errorf("%w; the last round said: %v", err, last)
 	}
-	return exercised, rounds, err
+	return exercised, judgedAfter, rounds, err
 }
 
 // publishesNewName reports whether m carries a metric name prev did not.

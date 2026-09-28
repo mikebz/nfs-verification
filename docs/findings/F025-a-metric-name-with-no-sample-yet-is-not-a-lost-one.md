@@ -124,9 +124,10 @@ watches is the green nobody earned that F-024 is about.
 `make test-case CASE=TestObsMetricsSurviveServerRestart`, Kubernetes
 v1.37.0-gke.3165000 control plane with v1.37.0-gke.2941000 e2-medium nodes,
 StorageClass `nfs`, profile `default` (`-lease-seconds=60 -grace-seconds=90`).
-Three runs, all passing with `resumed-reset` after a single round. The third
+Four runs, all passing with `resumed-reset` after a single round. The third
 was taken after the review fix that keeps a failed pre-fault scrape in the
-bundle, which does not change what a passing run does:
+bundle, and the fourth after the one that does the same for the rounds after
+the restart; neither changes what a passing run does:
 
 ```
 w2-issue81-obs07-20260928-025244:
@@ -143,6 +144,11 @@ w2-issue81-obs07-20260928-030620:
 resumed-reset: 1350 series under 87 names before, 369 under 67 after, 1134 under 87 once exercised
 by 1 rounds of traffic; 0 names lost, 0 new; 62 counters reset, 0 advanced, 107 unchanged;
 215 series lost under a surviving name, 0 of them touched by the case's own traffic
+
+w2-issue81-obs07-20260928-032320:
+resumed-reset: 1350 series under 87 names before, 369 under 67 after, 1134 under 87 once exercised
+by 1 rounds of traffic; 0 names lost, 0 new; 62 counters reset, 0 advanced, 107 unchanged;
+215 series lost under a surviving name, 0 of them touched by the case's own traffic
 ```
 
 The first answer is the cold-start set again, give or take a name. One round
@@ -154,8 +160,8 @@ The touched series that did not come back are the reason label sets are not
 asserted. In the first run all 35 were `op="CREATE"`: the round files sat in a
 subdirectory, so only the pre-fault round made it, and the harness was fixed
 to write at the top of the mount. In the second run they were all
-`op="LOOKUP"`, which the first run had brought back. In the third, on the same
-harness as the second, there were none. Whether a lookup reaches
+`op="LOOKUP"`, which the first run had brought back. In the third and fourth,
+on the same harness as the second, there were none. Whether a lookup reaches
 the server is the client's dentry cache deciding
 ([`nfs(5)`](https://man7.org/linux/man-pages/man5/nfs.5.html)), not the server
 forgetting a label, and asserting on it would have swapped this entry's false
@@ -174,7 +180,7 @@ the names return once traffic does, and the counters reset from zero, which is
 what a restarted process is supposed to look like and what every monitoring
 system already knows how to read. Since the fix for #81 that last part is
 measured rather than inferred: 62 counters reset and none advanced, on all
-three runs above.
+four runs above.
 
 What an operator does lose is the ability to distinguish, in the first moments
 after a failover, "this server is serving nothing" from "this series no longer

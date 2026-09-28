@@ -416,12 +416,12 @@ specific to the Observability test group:
   also what F-024's idle server published on both sides, which is why it saw no loss. The fix for
   [issue #81](https://github.com/mikebz/nfs-verification/issues/81) drives the case's own I/O through
   the export on both sides of the restart, judges names only after it, and still reads counters off
-  the replacement's first answer (section 6, OBS-07). Three runs on `gke-w2` since then returned
+  the replacement's first answer (section 6, OBS-07). Four runs on `gke-w2` since then returned
   `resumed-reset`: 0 names lost after one round of traffic, 62 counters reset, none advanced. The
   series the case's own traffic touched and did not bring back were `CREATE` in the first run, from
   a directory only the pre-fault round made (fixed in the harness), `LOOKUP` in the second, which is
-  the client's cache deciding, and none in the third. That is why label sets are reported and not
-  asserted.
+  the client's cache deciding, and none in the third and fourth. That is why label sets are reported
+  and not asserted.
 
 ## 10. Sources
 
