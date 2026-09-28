@@ -621,16 +621,17 @@ func TestObsMetricsSurviveServerRestart(t *testing.T) {
 	t.Logf("claim %s is mounted by %s on node %s, and every round of traffic below goes through that export",
 		pvc.Name, client.Name, clientNode)
 
-	var idle, before framework.MetricSet
-	scrapeBeforeFault(ctx, t, f, endpoint, &idle, "before this case drove any traffic")
-	report.Idle = idle
+	// Scraped straight into the report the cleanup writes, not into locals
+	// copied across afterwards: scrapeBeforeFault ends the case on a body with
+	// no series, and that body is the evidence the bundle has to keep.
+	scrapeBeforeFault(ctx, t, f, endpoint, &report.Idle, "before this case drove any traffic")
 	if err := driveExportTraffic(ctx, f, "client", 0); err != nil {
 		t.Fatalf("driving traffic through claim %s from %s on node %s before any fault was injected: %v. "+
 			"Nothing was restarted yet, so this is the export failing ordinary I/O, not anything about "+
 			"metrics", pvc.Name, client.Name, clientNode, err)
 	}
-	scrapeBeforeFault(ctx, t, f, endpoint, &before, "after this case drove its traffic")
-	report.Before = before
+	scrapeBeforeFault(ctx, t, f, endpoint, &report.Before, "after this case drove its traffic")
+	idle, before := report.Idle, report.Before
 	t.Logf("before the restart: %s", before.Describe())
 
 	budget, err := slo.Recovery(profile(t), slo.EventServerRestart)
