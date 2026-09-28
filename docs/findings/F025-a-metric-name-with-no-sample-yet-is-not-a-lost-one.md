@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-17
-Updated: 2026-09-27
+Updated: 2026-09-28
 
 
 **Found:** 2026-09-17, the first whole-suite runs against two clusters,
@@ -77,24 +77,98 @@ before the fault, and the case controls neither end of that today.
 
 ### What changed
 
-**Nothing in the code yet, and the case stays red for now.** This entry is the
-record; the harness change is the open item below, tracked as
+Until 2026-09-28 nothing in the code had changed and the case stayed red; this
+entry was the record, and the harness change was open as
 [issue #81](https://github.com/mikebz/nfs-verification/issues/81).
 
-The assertion itself is right and is not being relaxed: a metric name that
+The assertion itself was right and has not been relaxed: a metric name that
 disappears across a restart breaks every dashboard and alert built on it, which
-is exactly what the test plan asks OBS-07 to check. What is wrong is the moment
-the second scrape is taken. The case must put the server back into a state
-comparable with the one it measured before the fault — drive I/O through the
-mount it already holds, then scrape — so that a name still missing afterwards is
-a name the server really lost. Until that lands, a `never-resumed` verdict
-carrying only lazily-created families in its lost list should be read against
-this entry rather than filed against the deployment.
+is exactly what the test plan asks OBS-07 to check. What was wrong was the
+moment the second scrape was taken. The fix for #81 changes that moment and
+nothing else about what fails:
+
+- OBS-07 now provisions a claim and a pod of its own and drives one round of
+  I/O through that export before the fault: write and sync a file, stat it,
+  read it back. It scrapes either side of that round, so the case controls
+  the pre-fault end instead of inheriting whatever the suite happened to do.
+- After the restart it takes the replacement's first answer as before, then
+  drives the same round through the same mount and scrapes again. It repeats
+  until every name from before is back, or a round brings back no name the one
+  before it had not, inside the restart budget plus `slo.ObservationMargin`
+  counted from the replacement's first answer. That is a bound of its own, the
+  same length the replacement and its first answer were each given, not what
+  is left of theirs.
+- `ClassifyMetrics` takes all four scrapes. A name is lost only when neither
+  post-restart scrape publishes it. Counter direction is still read off the
+  first answer alone, because the case's own traffic would push counters
+  upward and turn a restarted process into `resumed-continuous`, which is
+  [F-024](F024-identical-counters-after-a-restart-are-not-continuity.md)
+  reached from the other side.
+- The label sets the case expects back are stated: the series its own traffic
+  touched before the fault. They are reported apart from the rest of the lost
+  series, which is where the `NFS4ERR_GRACE`, `NFS4ERR_BADSESSION` and
+  `NFS4ERR_STALE_CLIENTID` labels from the update below land. Neither group is
+  asserted, and the first run showed why (see below).
+- `TestClassifyMetricsJudgesNamesAfterTraffic` is the regression test.
+  `TestClassifyMetricsLostNameSurvivesTraffic` checks that a name missing even
+  after traffic still fails. `TestClassifyMetricsDirectionIgnoresOwnTraffic`
+  covers the continuity hazard, and `TestClassifyMetricsSaysWhichLabelsItExpects`
+  the label split.
 
 The narrower alternative, comparing only names present in both cold-start sets,
 was considered and rejected: it would exclude precisely the traffic counters an
 operator cares most about, and a case that asserts only over metrics nobody
 watches is the green nobody earned that F-024 is about.
+
+**Run on `gke-w2` on 2026-09-28**, exposer and annotations still hand-enabled,
+`make test-case CASE=TestObsMetricsSurviveServerRestart`, Kubernetes
+v1.37.0-gke.3165000 control plane with v1.37.0-gke.2941000 e2-medium nodes,
+StorageClass `nfs`, profile `default` (`-lease-seconds=60 -grace-seconds=90`).
+Four runs, all passing with `resumed-reset` after a single round. The third
+was taken after the review fix that keeps a failed pre-fault scrape in the
+bundle, and the fourth after the one that does the same for the rounds after
+the restart; neither changes what a passing run does:
+
+```
+w2-issue81-obs07-20260928-025244:
+resumed-reset: 1738 series under 87 names before, 369 under 67 after, 1169 under 87 once exercised
+by 1 rounds of traffic; 0 names lost, 0 new; 62 counters reset, 0 advanced, 107 unchanged;
+571 series lost under a surviving name, 35 of them touched by the case's own traffic
+
+w2-issue81-obs07-20260928-025525:
+resumed-reset: 1351 series under 87 names before, 369 under 67 after, 1134 under 87 once exercised
+by 1 rounds of traffic; 0 names lost, 0 new; 62 counters reset, 0 advanced, 107 unchanged;
+216 series lost under a surviving name, 35 of them touched by the case's own traffic
+
+w2-issue81-obs07-20260928-030620:
+resumed-reset: 1350 series under 87 names before, 369 under 67 after, 1134 under 87 once exercised
+by 1 rounds of traffic; 0 names lost, 0 new; 62 counters reset, 0 advanced, 107 unchanged;
+215 series lost under a surviving name, 0 of them touched by the case's own traffic
+
+w2-issue81-obs07-20260928-032320:
+resumed-reset: 1350 series under 87 names before, 369 under 67 after, 1134 under 87 once exercised
+by 1 rounds of traffic; 0 names lost, 0 new; 62 counters reset, 0 advanced, 107 unchanged;
+215 series lost under a surviving name, 0 of them touched by the case's own traffic
+```
+
+The first answer is the cold-start set again, give or take a name. One round
+of traffic brought the name count back to exactly 87 on every run. That is the
+expected reading this entry predicted and the one #81 left for the run to
+decide.
+
+The touched series that did not come back are the reason label sets are not
+asserted. In the first run all 35 were `op="CREATE"`: the round files sat in a
+subdirectory, so only the pre-fault round made it, and the harness was fixed
+to write at the top of the mount. In the second run they were all
+`op="LOOKUP"`, which the first run had brought back. In the third and fourth,
+on the same harness as the second, there were none. Whether a lookup reaches
+the server is the client's dentry cache deciding
+([`nfs(5)`](https://man7.org/linux/man-pages/man5/nfs.5.html)), not the server
+forgetting a label, and asserting on it would have swapped this entry's false
+failure over names for one over labels.
+
+On `gke-w1` the case still fails at discovery with `absent` (run
+`w1-issue81-obs07-20260928-025533`), before it provisions anything, per F-023.
 
 ### What it means for the system under test
 
@@ -104,7 +178,9 @@ the harness bug is subtracted.
 `gke-w2`'s telemetry **does** come back after a restart: the endpoint answers,
 the names return once traffic does, and the counters reset from zero, which is
 what a restarted process is supposed to look like and what every monitoring
-system already knows how to read.
+system already knows how to read. Since the fix for #81 that last part is
+measured rather than inferred: 62 counters reset and none advanced, on all
+four runs above.
 
 What an operator does lose is the ability to distinguish, in the first moments
 after a failover, "this server is serving nothing" from "this series no longer
@@ -150,4 +226,5 @@ say which label sets it expects to return.
 On `gke-w1`, OBS-07 failed at discovery with `absent` in all three runs, per
 F-023.
 
-"Nothing in the code yet" is still true.
+"Nothing in the code yet" was still true then. It stopped being true with the fix
+for #81 on 2026-09-28, described under "What changed" above.

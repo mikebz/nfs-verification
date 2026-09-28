@@ -500,16 +500,35 @@ func csiDriver(f *framework.Framework) string {
 //
 // Both deployments this has been run against publish nothing as shipped, which
 // is F-023 in docs/findings.md, and on those the case stops at step 2 with the
-// absent verdict. It has been run end to end once, against gke-w2 with
-// Ganesha's exposer switched on by hand: see F-023 for what that took and
-// F-024 for the false pass the first such run produced. The red stays red on an
-// unconfigured deployment; see F-023 for what is and is not being claimed by an
-// absent verdict.
+// absent verdict. It has been run end to end only against gke-w2 with Ganesha's
+// exposer switched on by hand: see F-023 for what that took, F-024 for the
+// false pass the first such run produced, and F-025 for the false failure the
+// whole-suite runs produced after it. The red stays red on an unconfigured
+// deployment; see F-023 for what is and is not being claimed by an absent
+// verdict.
+//
+// When the name comparison is made is the half of this case F-025 is about.
+// Ganesha creates a metric family on its first sample, so a process that has
+// served nothing publishes a cold-start set, and a scrape of it reads every
+// byte, size and cache family as lost. The case therefore drives its own I/O
+// through the export on both sides of the restart and judges names only once it
+// has. The counters are read off the replacement's first answer instead,
+// before that traffic, because the case's own writes would push them upward and
+// a restarted process would read as one that kept its counts (F-024).
 //
 // The gap in the series across the outage is not a defect and is not asserted
 // on. Neither is the exact label set: per-client and per-export labels come and
-// go with the clients and exports themselves, so what must survive is the
-// metric name, which is what a dashboard query or an alert rule selects.
+// go with the clients and exports themselves, and some statuses, NFS4ERR_GRACE
+// among them, exist only because an earlier failover produced them. What must
+// survive is the metric name, which is what a dashboard query or an alert rule
+// selects. The case does say which label sets it expects back, the ones its own
+// traffic touched before the fault, and reports those that did not return
+// apart from the rest. It does not assert on them either: whether a read in a
+// pod reaches the server at all is the Linux client's decision, made from its
+// cache under close-to-open consistency (nfs(5)), so a series such as a READ
+// count can be touched on one side of the restart and not on the other with
+// nothing lost, and failing on it would file the client's caching against the
+// server.
 //
 // Steps:
 //  1. Find the server pod, and register the bundle against it before anything
@@ -517,14 +536,23 @@ func csiDriver(f *framework.Framework) string {
 //     pod is gone by teardown.
 //  2. Read where it says its metrics are: the prometheus.io annotations a
 //     scraper reads, or a container port named for metrics.
-//  3. Scrape it. No endpoint, an endpoint that does not answer, or a body that
-//     is not the exposition format all fail here, each saying which it was.
+//  3. Provision an RWX claim and a pod on it. Scrape, drive one round of
+//     traffic through the export (write and sync a file, stat it, read it
+//     back), and scrape again. What moved between the two scrapes is what the
+//     case's traffic touches. No endpoint, an endpoint that does not answer, or
+//     a body that is not the exposition format all fail here, each saying
+//     which it was.
 //  4. Record which server pods exist, then delete the target and wait for a
 //     replacement to be ready.
 //  5. Scrape the replacement, which is a pod that was not in step 4's set,
-//     until it answers, inside the restart budget.
-//  6. Fail on a metric name published before the restart and not after. Pass on
-//     counters reset and on counters carried across, saying which happened.
+//     until it answers, inside the restart budget. Counters are read from this
+//     answer.
+//  6. Drive the same traffic through the same mount and scrape again, round
+//     after round, until every metric name from step 3 is back or a round
+//     brings back no name the one before it had not, inside the same budget.
+//  7. Fail on a metric name published before the restart and in neither scrape
+//     after it. Pass on counters reset, carried across or unchanged, saying
+//     which happened.
 func TestObsMetricsSurviveServerRestart(t *testing.T) {
 	f := framework.New(t, "OBS-07")
 	ctx, cancel := caseCtx(t, 30*time.Minute)
@@ -584,20 +612,26 @@ func TestObsMetricsSurviveServerRestart(t *testing.T) {
 	source = fmt.Sprintf("%s, declared by %s", endpoint, framework.DescribePodPorts(pod))
 	t.Logf("server pod %s on %s says its metrics are at %s", target.Pod, target.Node, endpoint)
 
-	before, err := framework.ScrapeMetrics(ctx, f.C, endpoint)
-	switch {
-	case framework.IsBlocked(err):
-		blocked(t, "%v", err)
-	case err != nil:
-		t.Fatalf("the server declares a metrics endpoint and it did not answer before any fault was "+
-			"injected: %v. A declared endpoint nothing can reach is the same gap as no endpoint, and "+
-			"the scraper an operator runs here would record the same thing", err)
+	// The claim is provisioned only now, after the endpoint check, so that a
+	// deployment with nothing to scrape fails exactly as it did before this
+	// case drove any traffic (F-023), without a volume created for nothing.
+	pvc := f.MustRWXPVC(ctx, "obs07")
+	client := f.MustPod(ctx, toolsPod("client", pvc.Name, ""))
+	clientNode := client.Spec.NodeName
+	t.Logf("claim %s is mounted by %s on node %s, and every round of traffic below goes through that export",
+		pvc.Name, client.Name, clientNode)
+
+	// Scraped straight into the report the cleanup writes, not into locals
+	// copied across afterwards: scrapeBeforeFault ends the case on a body with
+	// no series, and that body is the evidence the bundle has to keep.
+	scrapeBeforeFault(ctx, t, f, endpoint, &report.Idle, "before this case drove any traffic")
+	if err := driveExportTraffic(ctx, f, "client", 0); err != nil {
+		t.Fatalf("driving traffic through claim %s from %s on node %s before any fault was injected: %v. "+
+			"Nothing was restarted yet, so this is the export failing ordinary I/O, not anything about "+
+			"metrics", pvc.Name, client.Name, clientNode, err)
 	}
-	report.Before = before
-	if before.Len() == 0 {
-		t.Fatalf("the metrics endpoint answered and published no series: %s. Nothing was restarted yet, "+
-			"so this is what an operator's scraper collects from this deployment at rest", before.Describe())
-	}
+	scrapeBeforeFault(ctx, t, f, endpoint, &report.Before, "after this case drove its traffic")
+	idle, before := report.Idle, report.Before
 	t.Logf("before the restart: %s", before.Describe())
 
 	budget, err := slo.Recovery(profile(t), slo.EventServerRestart)
@@ -629,12 +663,7 @@ func TestObsMetricsSurviveServerRestart(t *testing.T) {
 			within, target.Pod, err)
 	}
 
-	after, afterPod, resumed := waitMetricsBack(ctx, t, f, preFault, within)
-	var scraped *framework.MetricSet
-	if resumed {
-		scraped = &after
-		t.Logf("after the restart, %s: %s", afterPod, after.Describe())
-	}
+	after, afterEndpoint, afterPod, resumed := waitMetricsBack(ctx, t, f, preFault, within)
 	// Which process each scrape came from, by UID, in the bundle. A
 	// StatefulSet's replacement reuses the pod's name, so the name alone cannot
 	// show that the second scrape read a different process, and that is the
@@ -643,56 +672,251 @@ func TestObsMetricsSurviveServerRestart(t *testing.T) {
 	// still there; after teardown it would not have been.
 	source = fmt.Sprintf("%s. Scraped before from %s/%s, after from %s",
 		source, pod.Name, pod.UID, afterPod)
+	if !resumed {
+		report = framework.ClassifyMetrics(framework.MetricScrapes{Idle: &idle, Before: &before})
+		t.Fatalf("the metrics endpoint published %d series before the restart and nothing answered "+
+			"at it within %s afterwards, while a replacement server pod is ready. Every dashboard "+
+			"and every alert built on those series goes dark at the moment it is needed, which is "+
+			"the failover. The endpoint was %s",
+			before.Len(), within, endpoint)
+	}
+	t.Logf("after the restart, %s: %s", afterPod, after.Describe())
+	report.After = after
 
-	report = framework.ClassifyMetrics(&before, scraped)
+	exercised, judgedAfter, rounds, err := exerciseReplacement(ctx, t, f, afterEndpoint, "client", &report, within)
+	if exercised == nil {
+		// No verdict is recorded, and report keeps whatever body the last
+		// scrape returned. Judging names against the first answer alone
+		// is the comparison F-025 showed cannot tell a lost name from one the
+		// server has not recorded yet, and a never-resumed verdict in the
+		// bundle from it would say something this run did not observe.
+		t.Fatalf("this case's own traffic through claim %s from %s on node %s did not complete and get "+
+			"scraped within %s of the replacement answering, on the %s profile, after %d rounds: %v. "+
+			"Without it the case cannot tell a metric name this server lost from one it has not yet "+
+			"had a sample for (F-025), so it says nothing about the names. An export that does not "+
+			"serve a write this long after the server came back is a recovery failure, which is what "+
+			"the CHAOS cases measure",
+			pvc.Name, client.Name, clientNode, within, profile(t).Name, rounds, err)
+	}
+	if err != nil {
+		t.Logf("the rounds ended at the %s bound rather than settling, after %d rounds, so the names are "+
+			"judged on the scrape that followed round %d, the last with series: %v",
+			within, rounds, judgedAfter, err)
+	}
+	t.Logf("after %d rounds of traffic through the replacement: %s", judgedAfter, exercised.Describe())
+
+	report = framework.ClassifyMetrics(framework.MetricScrapes{
+		Idle: &idle, Before: &before, After: &after, Exercised: exercised,
+	})
+	report.Rounds = judgedAfter
 	t.Logf("%s", report)
 
 	switch report.Verdict {
 	case framework.MetricsNeverResumed:
-		if !resumed {
-			t.Fatalf("the metrics endpoint published %d series before the restart and nothing answered "+
-				"at it within %s afterwards, while a replacement server pod is ready. Every dashboard "+
-				"and every alert built on those series goes dark at the moment it is needed, which is "+
-				"the failover. The endpoint was %s",
-				before.Len(), within, endpoint)
-		}
-		t.Errorf("the server came back publishing %d of the %d metric names it published before the "+
-			"restart, and %d are gone: %v. A name that stops being published across a failover takes "+
-			"every rule written on it with it, and an operator watching this deployment sees the series "+
-			"end rather than the server recover. Scraped from %s. This is what the test plan requires of "+
-			"a deployment (Section 3.5), not an NFS protocol guarantee",
-			len(after.MetricNames()), len(before.MetricNames()), len(report.LostMetricNames), report.LostMetricNames,
-			afterPod)
+		t.Errorf("after the restart, and after %d rounds of this case's traffic through claim %s from %s on "+
+			"node %s, the server publishes %d of the %d metric names it published before, and %d are "+
+			"gone: %v. Each round wrote, synced, stat'd and read back a file through the export, which is "+
+			"what brings back the byte, size and cache families a fresh process has not recorded yet "+
+			"(F-025), and the last round brought back nothing the one before it had not. So these are "+
+			"not names waiting for their first sample of that kind: either the server stopped publishing "+
+			"them, or they are fed only by requests this traffic does not make, such as locks or failover "+
+			"recovery, and the before scrape in the bundle shows what they held. A name that stops being "+
+			"published across a failover takes every rule written on it with it. Scraped from %s on the %s "+
+			"profile. This is what the test plan requires of a deployment (Section 3.5), not an NFS "+
+			"protocol guarantee",
+			judgedAfter, pvc.Name, client.Name, clientNode, len(before.MetricNames())-len(report.LostMetricNames),
+			len(before.MetricNames()), len(report.LostMetricNames), report.LostMetricNames, afterPod,
+			profile(t).Name)
 	case framework.MetricsResumedReset:
-		t.Logf("the endpoint came back with %d counters reset, %d advanced and %d unchanged, which is "+
-			"what a restarted process is supposed to look like and what every monitoring system knows "+
-			"how to read", len(report.Reset), len(report.Advanced), len(report.Unchanged))
+		t.Logf("the endpoint came back with %d counters reset, %d advanced and %d unchanged in its first "+
+			"answer, which is what a restarted process is supposed to look like and what every monitoring "+
+			"system knows how to read", len(report.Reset), len(report.Advanced), len(report.Unchanged))
 	case framework.MetricsResumedContinuous:
-		t.Logf("the endpoint came back with %d counters strictly higher than before and none lower, so "+
-			"this server carries counts across a restart (%d more were unchanged)",
+		t.Logf("the endpoint came back with %d counters strictly higher than before and none lower in its "+
+			"first answer, before this case drove anything through it, so this server carries counts "+
+			"across a restart (%d more were unchanged)",
 			len(report.Advanced), len(report.Unchanged))
 	case framework.MetricsResumedIndeterminate:
-		t.Logf("the endpoint came back publishing the same %d metric names, and all %d comparable counters "+
-			"are identical to before. No claim is made about continuity: on an idle server a restarted "+
-			"process re-derives the same values, so this reading is equally consistent with a reset. "+
-			"See F-024. To distinguish them the server would have to be doing work across the restart, "+
-			"which is not what this case drives", len(after.MetricNames()), len(report.Unchanged))
+		t.Logf("the endpoint came back publishing every metric name it did before, and all %d counters "+
+			"its first answer shares with the scrape before the restart are identical. No claim is made "+
+			"about continuity: on an idle server a restarted process re-derives the same values, so this "+
+			"reading is equally consistent with a reset. See F-024. The counters are read before this "+
+			"case's own traffic on purpose, since that traffic would move them upward",
+			len(report.Unchanged))
 	default:
 		t.Errorf("the comparison produced the verdict %q, which this case has no reading for", report.Verdict)
 	}
 
-	// Diagnostics, deliberately not assertions. More metric names than before
-	// is a server publishing more, and a label set that changed is a client or
-	// an export that has not come back yet, neither of which is a defect.
+	// Diagnostics, deliberately not assertions; the case comment says why the
+	// label sets the case's own traffic touched are not asserted either.
 	if len(report.NewMetricNames) > 0 {
 		t.Logf("%d metric names appeared only after the restart: %v",
 			len(report.NewMetricNames), report.NewMetricNames)
 	}
-	if len(report.LostSeries) > 0 {
-		t.Logf("%d series changed their labels across the restart while their metric name survived, which is "+
-			"what a per-client or per-export label does when the clients reconnect: %v",
-			len(report.LostSeries), report.LostSeries)
+	if len(report.LostTouchedSeries) > 0 {
+		t.Logf("%d of the %d series this case's own traffic touched before the fault did not come back "+
+			"after it drove the same traffic through the replacement: %v. Not asserted, because the "+
+			"Linux client decides from its cache whether a request reaches the server at all, but these "+
+			"are the label sets to read first",
+			len(report.LostTouchedSeries), len(report.Touched), report.LostTouchedSeries)
 	}
+	if n := len(report.LostSeries) - len(report.LostTouchedSeries); n > 0 {
+		t.Logf("%d more series under a surviving metric name did not come back, none of which this case's "+
+			"traffic touched before the fault: history this process was never asked to recreate, such as "+
+			"clients and exports from earlier cases and statuses only a failover produces. The full list "+
+			"is in the bundle", n)
+	}
+}
+
+// scrapeBeforeFault takes one of OBS-07's scrapes before the fault into dst,
+// and ends the case when there is nothing to compare against.
+//
+// dst is filled before any check can end the case, so that the bundle holds
+// what came back even when what came back is the reason for the failure.
+func scrapeBeforeFault(ctx context.Context, t *testing.T, f *framework.Framework, e framework.MetricsEndpoint,
+	dst *framework.MetricSet, when string) {
+	t.Helper()
+	m, err := framework.ScrapeMetrics(ctx, f.C, e)
+	switch {
+	case framework.IsBlocked(err):
+		blocked(t, "%v", err)
+	case err != nil:
+		t.Fatalf("the server declares a metrics endpoint and it did not answer %s, before any fault was "+
+			"injected: %v. A declared endpoint nothing can reach is the same gap as no endpoint, and "+
+			"the scraper an operator runs here would record the same thing", when, err)
+	}
+	*dst = m
+	if m.Len() == 0 {
+		t.Fatalf("the metrics endpoint answered %s and published no series: %s. Nothing was restarted yet, "+
+			"so this is what an operator's scraper collects from this deployment at rest", when, m.Describe())
+	}
+}
+
+// driveExportTraffic is one round of the I/O OBS-07 puts through the export
+// under test: write a file and sync it, stat it, and read it back.
+//
+// Those are the write, read and metadata paths, which between them feed the
+// byte counters, the request and response size histograms and the metadata
+// cache counters F-025 found missing from a fresh process. Whether the read
+// reaches the server is the client's decision (nfs(5), close-to-open), which is
+// why nothing here depends on it doing so. Each round writes its own file, so
+// that every round creates one rather than overwriting the last and the rounds
+// either side of the restart do the same operations.
+//
+// The files sit at the top of the mount, not in a directory of their own. The
+// first run on gke-w2 put them in obs07/, and WriteBytes' mkdir -p then sent a
+// CREATE in the round before the fault and in none after it, so 35 CREATE
+// series showed as touched and not brought back with nothing lost. The two
+// sides have to do the same operations for the expectation to mean anything.
+func driveExportTraffic(ctx context.Context, f *framework.Framework, pod string, round int) error {
+	path := fileIn(fmt.Sprintf("obs07-round-%d.bin", round))
+	n, err := f.WriteBytes(ctx, pod, path, slo.MetricsTrafficBytes, fmt.Sprintf("obs07-round-%d", round))
+	if err != nil {
+		return fmt.Errorf("writing %s: %w", path, err)
+	}
+	if n != slo.MetricsTrafficBytes {
+		return fmt.Errorf("%s holds %d bytes after writing %d", path, n, slo.MetricsTrafficBytes)
+	}
+	if _, err := f.Sha256(ctx, pod, path); err != nil {
+		return fmt.Errorf("reading %s back: %w", path, err)
+	}
+	return nil
+}
+
+// exerciseReplacement drives OBS-07's traffic through the replacement server
+// and scrapes it after every round, until every metric name published before
+// the restart is back or a round brings back no name the round before it had
+// not. It returns the last scrape with series taken after a completed round,
+// nil if there was none, how many rounds preceded that scrape, and how many
+// rounds completed in all. The two counts differ when a later round's scrape
+// failed or came back empty, and the bundle has to name the round the judged
+// scrape actually followed.
+//
+// Every scrape that returns a body, series or not, is written into
+// report.Exercised with its round as it is taken, since report is what the
+// cleanup writes: when no scrape had series, the body that came back is the
+// evidence, and a bundle saying no scrape was taken would be wrong. The same
+// rule scrapeBeforeFault follows, from the review of PR #116.
+//
+// Why rounds rather than one: Ganesha records a sample as it serves the
+// request, so one round should be enough, but the scrape can race the counter
+// update, and a second round costs nothing on the pass path. Why stop on no
+// growth rather than at the bound: once a round brings back nothing new, more
+// of the same traffic has nothing further to recreate, and running it until
+// the bound would only delay a failure that is already decided. Neither choice
+// can turn a lost name into a pass: a name comes back only if the server
+// publishes it.
+//
+// Bounded by within, the same restart budget plus margin the replacement and
+// its first answer were given. The first round meets grace, since the server
+// refuses new opens until grace ends, so a budget below grace would fail a
+// server that is behaving lawfully.
+func exerciseReplacement(ctx context.Context, t *testing.T, f *framework.Framework, e framework.MetricsEndpoint,
+	pod string, report *framework.MetricsComparison, within time.Duration) (*framework.MetricSet, int, int, error) {
+	t.Helper()
+	// The rounds run on a mount that is hard, so a server that never comes back
+	// would hold an exec forever. The context is what stops it at the bound.
+	ctx, cancel := context.WithTimeout(ctx, within)
+	defer cancel()
+
+	var exercised *framework.MetricSet
+	var refused, last error
+	rounds, judgedAfter := 0, 0
+	err := framework.Poll(ctx, framework.PollInterval, within, func(ctx context.Context) (bool, error) {
+		if err := driveExportTraffic(ctx, f, pod, rounds+1); err != nil {
+			last = fmt.Errorf("round %d did not complete: %w", rounds+1, err)
+			return false, last
+		}
+		rounds++
+		m, err := framework.ScrapeMetrics(ctx, f.C, e)
+		if framework.IsBlocked(err) {
+			refused = err
+			return true, nil
+		}
+		if err != nil {
+			last = fmt.Errorf("scraping after round %d: %w", rounds, err)
+			return false, last
+		}
+		report.Exercised, report.Rounds = m, rounds
+		if m.Len() == 0 {
+			last = fmt.Errorf("after round %d: %s", rounds, m.Describe())
+			return false, last
+		}
+		grew := exercised == nil || publishesNewName(m, *exercised)
+		exercised, judgedAfter = &m, rounds
+		lost := framework.ClassifyMetrics(framework.MetricScrapes{
+			Before: &report.Before, After: &report.After, Exercised: &m,
+		}).LostMetricNames
+		if len(lost) == 0 || !grew {
+			return true, nil
+		}
+		last = fmt.Errorf("%d metric names from before the restart were still missing after round %d",
+			len(lost), rounds)
+		return false, last
+	})
+	if refused != nil {
+		blocked(t, "%v", refused)
+	}
+	if err != nil && last != nil {
+		// Poll reports the context rather than the round when the bound falls
+		// mid-exec, and the round is what a reader needs.
+		err = fmt.Errorf("%w; the last round said: %v", err, last)
+	}
+	return exercised, judgedAfter, rounds, err
+}
+
+// publishesNewName reports whether m carries a metric name prev did not.
+func publishesNewName(m, prev framework.MetricSet) bool {
+	had := map[string]bool{}
+	for _, name := range prev.MetricNames() {
+		had[name] = true
+	}
+	for _, name := range m.MetricNames() {
+		if !had[name] {
+			return true
+		}
+	}
+	return false
 }
 
 // serverPodUIDs is the set of server pods that exist right now, taken before a
@@ -740,11 +964,13 @@ func serverPodUIDs(ctx context.Context, f *framework.Framework) (map[types.UID]b
 //
 // The pod it settled on is returned as "name/uid", because the name alone is
 // the same on both sides of a StatefulSet restart and so cannot evidence the
-// replacement it just went to the trouble of identifying.
+// replacement it just went to the trouble of identifying. Its endpoint is
+// returned too, so that every later scrape reads the same replacement.
 func waitMetricsBack(ctx context.Context, t *testing.T, f *framework.Framework, preFault map[types.UID]bool,
-	within time.Duration) (framework.MetricSet, string, bool) {
+	within time.Duration) (framework.MetricSet, framework.MetricsEndpoint, string, bool) {
 	t.Helper()
 	var set framework.MetricSet
+	var endpoint framework.MetricsEndpoint
 	var pod string
 	var refused error
 	err := framework.Poll(ctx, framework.PollInterval, within, func(ctx context.Context) (bool, error) {
@@ -781,7 +1007,7 @@ func waitMetricsBack(ctx context.Context, t *testing.T, f *framework.Framework, 
 				why = append(why, fmt.Sprintf("%s: %s", p.Name, m.Describe()))
 				continue
 			}
-			set, pod = m, fmt.Sprintf("%s/%s", p.Name, p.UID)
+			set, endpoint, pod = m, e, fmt.Sprintf("%s/%s", p.Name, p.UID)
 			return true, nil
 		}
 		if len(why) == 0 {
@@ -794,7 +1020,7 @@ func waitMetricsBack(ctx context.Context, t *testing.T, f *framework.Framework, 
 	}
 	if err != nil {
 		t.Logf("the metrics endpoint did not answer within %s of the restart: %v", within, err)
-		return framework.MetricSet{}, "", false
+		return framework.MetricSet{}, framework.MetricsEndpoint{}, "", false
 	}
-	return set, pod, true
+	return set, endpoint, pod, true
 }

@@ -239,6 +239,18 @@ const (
 // sustained soak (SCALE-07).
 const SoakDegradationBound = 0.10
 
+// MetricsTrafficBytes is what OBS-07 writes through the export in each round of
+// traffic it drives either side of the restart.
+//
+// The rounds exist to make the server record a sample in the families ordinary
+// I/O feeds: the byte counters, the request and response size histograms and
+// the metadata cache counters that a fresh Ganesha process does not publish
+// until it has served something (F-025). A mebibyte is a real payload for the
+// size histograms and nothing next to any export's capacity. The case asks
+// whether names exist, not how the server performs, so the amount itself is not
+// under test.
+const MetricsTrafficBytes int64 = 1 << 20
+
 // The bounds a chown storm on a populated share is measured against.
 //
 // Neither is a protocol value. `fsGroup` is a Kubernetes promise, and what it
