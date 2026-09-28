@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-21
-Updated: 2026-09-21
+Updated: 2026-09-27
 
 
 **Found:** 2026-09-20, GKE cluster `gke-w2`, Kubernetes v1.37.0-gke.3165000,
@@ -113,3 +113,19 @@ For the deployment: nothing. Both servers are entitled to whatever they do with
 their own credentials, and the upstream v4.0.8 build does it while holding the
 full capability set, so it is not even a property of the local build. The
 lesson is about where the harness looks, not about what the server does.
+
+### Updated 2026-09-27
+
+**The node-side read works in the condition that broke the in-pod one.** When the
+2026-09-25 whole-suite runs started, both server pods had been up for about four
+days: `gke-w1` for 4d1h and `gke-w2` for 4d8h. That is exactly the long-lived
+server this entry found unreadable from inside the pod. Preflight discovery
+through the node agent named `ganesha.nfsd` and its node pid on both, and again
+after every one of the suite's restarts. In six runs, CHAOS-01's before-and-after
+check confirmed a replaced process six times. No discovery reported blocked.
+
+The capability difference in the table above shows up in the server's own log
+on `gke-w2`, at every start: `lower_my_caps … CAP_SYS_RESOURCE was successfully
+removed for proper quota management in FSAL`. It remains beside the point for
+discovery, as this entry says. It matters for SEC-09, which reads PID 1's set
+(#98).
