@@ -2,9 +2,7 @@ package framework
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -194,10 +192,6 @@ func (f *Framework) collectEvidence(ctx context.Context) error {
 func (f *Framework) captureEvidence(ctx context.Context, dir string, it evidenceItem) evidenceRow {
 	row := evidenceRow{Name: it.name, Pod: it.pod, Path: it.path}
 	dest := filepath.Join(dir, it.name)
-	if err := clearStaleEvidence(dest); err != nil {
-		row.Problem = err.Error()
-		return row
-	}
 	// One byte past the cap, so that a file exactly at the cap is reported
 	// complete and one byte over it is reported truncated.
 	script, err := RunScript("read-evidence.sh", it.name, it.path, strconv.Itoa(EvidenceMaxBytes+1))
@@ -226,23 +220,6 @@ func (f *Framework) captureEvidence(ctx context.Context, dir string, it evidence
 		row.Bytes = 0
 	}
 	return row
-}
-
-// clearStaleEvidence removes whatever is already at a capture's destination.
-//
-// A run that reuses a run id is an ordinary thing to do: -run-id exists for it,
-// and triage step 1 is to run one case again. Without this, the previous run's
-// file stays in the case directory next to a manifest saying this run captured
-// nothing, which is the worst of the failure modes available here. It does not
-// look like a gap; it looks like evidence, and it is evidence of a different
-// run. A destination that cannot be cleared fails the capture rather than
-// letting the file be passed off as this run's.
-func clearStaleEvidence(dest string) error {
-	if err := os.Remove(dest); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("an earlier file at %s could not be removed, so nothing was captured rather "+
-			"than risk reporting it as this run's: %v", dest, err)
-	}
-	return nil
 }
 
 // classifyCapture decides what one read produced: the bytes worth keeping,

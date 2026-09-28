@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-10
-Updated: 2026-09-21
+Updated: 2026-09-28
 
 End-to-end verification of NFS RWX persistent volumes on Kubernetes.
 
@@ -106,7 +106,13 @@ make clean                                                # remove artifacts/ an
 Everything goes through `make`. The targets carry the flags, the timeouts and
 the run ID, so a result reported from a target is one anyone else can reproduce.
 `FLAGS` passes cluster-specific values through to the binary; `RUN_ID` overrides
-the generated run ID. `make unit` needs no cluster, no network and no
+the generated run ID. A run ID runs each case once: a case whose
+`artifacts/<run-id>/<CASE-ID>/` already exists stops before it starts, because
+a second execution would mix its bundle with the first's (#71). Splitting one
+run across several targets under one `RUN_ID` works, since each case gets its
+own directory; a re-run of a case needs a new ID, and so does each cluster,
+because `environment.json` at the top of the run describes one cluster.
+`make unit` needs no cluster, no network and no
 kubeconfig, and unit tests must stay that way: a test under `pkg/` that needs a
 cluster belongs in `test/e2e` behind a capability check.
 
@@ -329,7 +335,7 @@ prints all of them with their defaults:
 | Flag | Default | What it does |
 |---|---|---|
 | `-kubeconfig`, `-context` | `$KUBECONFIG` then `~/.kube/config`, current context | which cluster, resolved once by client-go |
-| `-artifacts-dir`, `-run-id` | `artifacts`, a UTC timestamp | where the bundle lands and what names the objects; a relative directory is anchored to the repository root |
+| `-artifacts-dir`, `-run-id` | `artifacts`, a UTC timestamp | where the bundle lands and what names the objects; a relative directory is anchored to the repository root, and a run ID that has already run a case refuses to run it again |
 | `-profile` | either accepted | require a lease/grace profile, `tuned` or `default` |
 | `-preflight-max-age`, `-env-file` | 8h, none | how long a cached preflight result stays usable, and a specific record to reuse instead |
 | `-delegations` | `auto` | whether delegations are enabled; gates CHAOS-18, which is not written yet |
