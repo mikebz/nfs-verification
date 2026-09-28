@@ -2,13 +2,13 @@
 
 Author: mikebz@
 Created: 2026-09-14
-Updated: 2026-09-17
+Updated: 2026-09-27
 
 
 **Found:** 2026-09-13, GKE cluster `gke-w1`, Kubernetes v1.37.0-gke.2941000,
 three workers on Container-Optimized OS, kernel 6.12.94+, StorageClass `nfs`
-backed by `nfs-server-provisioner`, profile `default`. DATA-02 has now run six
-times on that cluster and once on `gke-w2`:
+backed by `nfs-server-provisioner`, profile `default`. DATA-02 has now run nine
+times on that cluster and six times on `gke-w2`:
 
 | Run | Cluster | Target | Result |
 |---|---|---|---|
@@ -19,6 +19,14 @@ times on that cluster and once on `gke-w2`:
 | `pr47-e2e-20260913` | `gke-w1` | `make test-e2e` | 150 of 200, 0 torn, `appender0` lost records 1-50 |
 | `w1-e2e-20260916-2015` | `gke-w1` | `make test-e2e` | 150 of 200, 0 torn, `appender3` lost records 1-50 |
 | `w2-e2e-20260916-2015` | `gke-w2` | `make test-e2e` | 150 of 200, 0 torn, `appender2` lost records 1-50 |
+| `w2-e2e-run1-20260918-211600` | `gke-w2` | `make test-e2e` | 200 of 200 |
+| `w2-e2e-run2-20260918-211600` | `gke-w2` | `make test-e2e` | 150 of 200, 0 torn, `appender2` lost records 1-50 |
+| `w1-e2e-run1-20260925-222953` | `gke-w1` | `make test-e2e` | 150 of 200, 0 torn, `appender3` lost records 1-50 |
+| `w1-e2e-run2-20260925-222953` | `gke-w1` | `make test-e2e` | 200 of 200 |
+| `w1-e2e-run3-20260925-222953` | `gke-w1` | `make test-e2e` | 150 of 200, 0 torn, `appender3` lost records 1-50 |
+| `w2-e2e-run1-20260925-222955` | `gke-w2` | `make test-e2e` | 200 of 200 |
+| `w2-e2e-run2-20260925-222955` | `gke-w2` | `make test-e2e` | 150 of 200, 0 torn, `appender3` lost records 1-50 |
+| `w2-e2e-run3-20260925-222955` | `gke-w2` | `make test-e2e` | 200 of 200 |
 
 **Updated 2026-09-17**: the last two rows are the first whole-suite runs against
 a **second** cluster, `gke-w2`, on a different server image (locally built
@@ -30,6 +38,29 @@ particular to `appender0`. Whole-suite runs are now **5 for 5** and data-only
 runs remain 0 for 2. Reproducing on a second deployment makes a defect peculiar
 to one server build the least likely explanation, and the client-side mechanism
 described below the most likely.
+
+**Updated 2026-09-27**: eight more whole-suite runs. There were two on `gke-w2` on
+2026-09-18 (#86), and six on 2026-09-25, three per cluster, with both clusters
+running at the same time. Four of the eight lost fifty records, again whole and
+from one appender, and four lost nothing. Two things the entry said above no
+longer hold:
+
+- **Whole-suite runs do not reliably reproduce it.** They are now 9 red out of
+  13. The 2026-09-18 pair was the same binary against the same cluster an hour
+  apart, and it disagreed. On 2026-09-25, three runs that were identical in shape
+  passed. "The chaos cases leave the caches stale" is not what separates a red
+  run from a green one. The data-only runs are still 0 of 2, too few to mean
+  anything.
+- **It is not a different appender each time.** Of seven reds that named the
+  loser, `appender3` lost four times, `appender2` twice and `appender0` once.
+  The case places pods with `nodes[i%len(nodes)]` over a name-sorted list, so on
+  these three-node clusters, `appender0` and `appender3` share a node, and
+  `appender2` shares one with the reader. `appender1`, the only pod alone on
+  its node, has never lost. That is 7 of 7 losses on a shared client. With three
+  of four appenders on shared nodes, chance alone gives that about one time in
+  eight. It fits the client being the node rather than the pod (F-019), but it
+  is not established. The failure message does not name each appender's node,
+  so the next red run cannot confirm it from the message alone.
 
 **Severity:** a property of this deployment, for the boundary discussion. It is
 not a protocol violation and must not be filed against the server as one.
@@ -44,8 +75,8 @@ the file back from a pod that never wrote to it:
 the file holds 150 lines, want 200 from 4 appenders writing 50 records each; 150 whole, 0 torn
 ```
 
-Fifty records lost. **Zero torn.** Three times now, with the same count every
-time, and on the third the message named what went:
+Fifty records lost. **Zero torn.** By 2026-09-13 that had happened three times,
+with the same count every time, and on the third the message named what went:
 
 ```
 the file holds 150 lines, want 200 from 4 appenders writing 50 records each; 150 whole, 0 torn. Missing: appender0 lost 50 of 50 (records 1-50)
@@ -54,18 +85,21 @@ the file holds 150 lines, want 200 from 4 appenders writing 50 records each; 150
 **One appender's entire contribution, contiguously, and none of the other
 three's.** Not fifty singles scattered across four writers, which would have
 been a different mechanism and a worse one. Three of the four appenders landed
-every record they wrote; the fourth landed none.
+every record they wrote; the fourth landed none. Every red since has had the
+same shape (see the table).
 
 In between, it passed twice on the same cluster and the same day with every
 record present. **The loss is intermittent, and a green DATA-02 does not clear
 this deployment** — it means the race did not fire that time.
 
-All three reds were whole-suite runs and both greens were data-only runs, which
-is 3-2 and still a hypothesis rather than a cause, though a harder one to
-dismiss than it was at 2-2. It is testable: in `make test-e2e` the chaos cases
-run before the data cases and delete the server pod repeatedly, so DATA-02 there
-starts against a server that has recently failed over, and the appenders' cached
-sizes are that much staler. Nothing yet rules out plain timing.
+At that point all three reds were whole-suite runs and both greens were
+data-only runs. The entry proposed that 3-2 split as a hypothesis: in
+`make test-e2e` the chaos cases run before the data cases and delete the server
+pod repeatedly, so DATA-02 there starts against a server that has recently
+failed over, and the appenders' cached sizes are that much staler. **That
+hypothesis has since failed.** Whole-suite runs are now 9 red of 13, identical
+runs disagree, and run shape does not separate red from green (see the
+2026-09-27 update above).
 
 Those two numbers point in opposite directions and both matter:
 
@@ -151,10 +185,11 @@ added. The diagnostic did its job, which is the only reason this entry can say
 
 Still open: what makes the difference between a run that loses fifty records and
 a run that loses none, and why the client that falls out of step is the one it
-is. The whole-suite runs are 5 for 5 and the data-only runs are 0 for 2, so the
-next thing to try is a data-only run immediately after a chaos run, which
-separates "the server recently failed over" from "the suite has been running a
-while".
+is. The run-shape hypothesis this paragraph proposed testing has since failed
+(see the 2026-09-27 update above). The one pattern left is placement: every
+named loser shared its node with another pod on the share. The next thing to
+try is the same case with one pod per node, which needs five nodes, or with
+`appender3` moved to a node of its own.
 
 **A count that the protocol does not promise is still worth asserting, as long
 as the failure says who it belongs to.**
