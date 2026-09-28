@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-14
-Updated: 2026-09-14
+Updated: 2026-09-27
 
 
 **Found:** 2026-09-11, GKE cluster with e2-medium worker nodes, running PROV and DATA test suites.
@@ -74,3 +74,37 @@ fi
 
 - Like F-003, this is an infrastructure defect in GKE's host mount wrapper, not an NFS protocol bug or harness failure. Any dynamic RWX workload on GKE that provisions and mounts volumes repeatedly will eventually wedge its worker nodes.
 - With the fix applied across worker nodes, mount table size remained stable at baseline (~80-84 lines) across hundreds of mounts throughout the full PROV, DATA, SEC, OBS, and CHAOS test suites.
+
+### Updated 2026-09-27
+
+**The fix stopped the growth. It did not undo what had already stacked up, so
+"stable at baseline" above is true of some nodes and not others.** The
+`/proc/mounts` the bundles collected during six whole-suite runs on 2026-09-25
+show the wrapper's leftovers still in the host namespace:
+
+| Node | `/proc/mounts` lines | `/etc` mounts | `/run/systemd/resolve` mounts |
+|---|---|---|---|
+| `gke-w2-default-pool-6b4278f5-9e9c` | 4,235 | 2,048 | 2,047 |
+| `gke-w1-default-pool-97537137-x2ev` | 633 | 256 | 255 |
+| `gke-w1-default-pool-a4f3b998-7wf7` | 131 | 8 | 7 |
+| `gke-w2-default-pool-a5180872-4dtw` | 131 | 2 | 1 |
+| the other two nodes | 133 to 147 | 1 | 0 |
+
+On every node, the `/etc` count is a power of two and the
+`/run/systemd/resolve` count is one below it, the doubling this entry describes,
+frozen wherever the node stood when the wrapper was patched. The `/proc/mounts`
+totals are those two plus everything else the node mounts, and follow no such
+pattern. No node's `/etc` or `/run/systemd/resolve` count moved between the
+first run and the last, so the fix holds. The
+nodes were never cleaned up, and doing that is a reboot or an unmount loop on
+each node. That is a change for the cluster owner, and it has not been made.
+
+It matters for two reasons.
+
+- Every operation that walks the mount table on
+  `6b4278f5-9e9c` walks 4,235 entries rather than about 130. This entry's
+  mechanism is exactly that cost. The node was healthy throughout the runs, but
+  it is 2,048 mounts along a curve that ended in D-state at 8,192.
+- CHAOS-06's lock loss on `gke-w2` (#100) happened to the client on that node,
+  in one run of three. That is one sample, recorded rather than argued. The
+  node is worth cleaning before anyone reads a pattern into the next one.
