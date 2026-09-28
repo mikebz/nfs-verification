@@ -382,37 +382,7 @@ func TestChaosServerProcessKill(t *testing.T) {
 	defer cancel()
 
 	s := startChaosCase(ctx, t, f, "chaos01")
-	// Required, not best effort. This is the only check that the name about to
-	// be signalled node-wide is the name of the process actually holding the
-	// listening socket right now. Without it the kill can land on a same-named
-	// bystander while the server carries on serving, and step 4 then measures a
-	// recovery from an outage that never happened and passes.
-	before, err := observeServerProcess(ctx, f, s.target)
-	if err != nil {
-		t.Skipf("blocked: the process serving NFS in %s could not be observed before the fault, so a kill "+
-			"could not be confirmed to have landed on it: %v", s.target.Pod, err)
-	}
-	// Observing it is not enough on its own: the kill is aimed by the name
-	// preflight recorded, so the observation only protects anything if the two
-	// are the same name. They can differ, on a server replaced since preflight
-	// ran by one that serves under another name, and the consequence is the
-	// bystander kill above. Compared here rather than inside KillServerProcess
-	// because the name is the one thing preflight is the single source of; this
-	// checks that source against the running system without becoming a second
-	// one. DATA-12 and DATA-13 make no equivalent check yet (#99). The kill is
-	// still aimed by a substring of the whole command line node-wide, which no
-	// check here can fix; #90 records why that is accepted: a second NFS server
-	// on the same node is not reachable against this provisioner.
-	aimedAt, err := chaos.ResolveProcess(f, s.target)
-	if err != nil {
-		t.Skipf("blocked: %v", err)
-	}
-	if before.Name != aimedAt.Pattern {
-		t.Skipf("blocked: preflight recorded %q as serving NFS in %s and %q holds the listening socket now, "+
-			"so signalling the recorded name would kill something that is not this server; re-run preflight "+
-			"with -refresh-preflight", aimedAt.Pattern, s.target.Pod, before.Name)
-	}
-	t.Logf("before the fault, %s", before)
+	before := confirmKillAimedAtServer(ctx, t, f, s.target)
 
 	// The fault reference comes from the writer's own clock, because the write
 	// that ends the outage is timestamped by that same clock. Reading it just
@@ -437,9 +407,10 @@ func TestChaosServerProcessKill(t *testing.T) {
 }
 
 // listenerReturnTimeout bounds the wait for a process to be serving NFS again
-// after the kill. Recovery has already been asserted by the time this runs, so
-// the listener is back; this covers the gap between a client's write being
-// served and the socket being attributable to a process again.
+// after the kill. The case has already waited for the client to resume by the
+// time this runs, so the listener is normally back; this covers the gap between
+// a client's write being served and the socket being attributable to a process
+// again.
 //
 // Not in pkg/slo, deliberately. That package holds what the cases assert the
 // deployment against, and nothing here is measured against this: the recovery
@@ -453,7 +424,8 @@ const listenerReturnTimeout = 60 * time.Second
 // observeServerProcess names the process serving NFS in the target pod, live.
 //
 // This is the one thing the preflight record cannot supply: the pid, which
-// changes on every restart and is the whole of what step 5 compares.
+// changes on every restart and is the whole of what
+// confirmServerProcessReplaced compares.
 func observeServerProcess(ctx context.Context, f *framework.Framework, t chaos.Target) (framework.ServerProcess, error) {
 	agent, err := framework.NodeAgent(ctx, f.C)
 	if err != nil {
@@ -466,9 +438,60 @@ func observeServerProcess(ctx context.Context, f *framework.Framework, t chaos.T
 	return framework.DiscoverServerProcess(ctx, f.C, agent, t.Namespace, t.Pod, t.Node, names, framework.NFSPort)
 }
 
-// confirmServerProcessReplaced is CHAOS-01's step 5: evidence that the SIGKILL
-// landed on the process that was serving NFS, rather than on something else
-// while the server carried on.
+// confirmKillAimedAtServer is the check made before every in-place kill of the
+// server process: the process holding the listening socket in the target pod
+// right now answers to the name the kill is aimed by. It reports blocked when
+// that cannot be shown, and otherwise returns the process, for
+// confirmServerProcessReplaced to compare against after the fault.
+//
+// Required, not best effort. This is the only check that the name about to be
+// signalled node-wide is the name of the process actually holding the
+// listening socket. Without it the kill can land on a same-named bystander
+// while the server carries on serving, and the case then measures a recovery,
+// or a durability verdict, across an outage that never happened and passes.
+// That is the test plan's rule that a fault that was not injected is never
+// measured (Section 4.1).
+//
+// Observing the process is not enough on its own: the kill is aimed by the
+// name preflight recorded, so the observation only protects anything if the
+// two are the same name. They can differ, on a server replaced since preflight
+// ran by one that serves under another name, and the consequence is the
+// bystander kill above. Compared here rather than inside KillServerProcess
+// because the name is the one thing preflight is the single source of; this
+// checks that source against the running system without becoming a second
+// one. The kill is still aimed by a substring of the whole command line
+// node-wide, which no check here can fix; the test plan's one-server-per-node
+// convention (Section 4.1) and #90 record why that is accepted.
+//
+// Every case that calls chaos.KillServerProcess calls this and
+// confirmServerProcessReplaced around it. DATA-12 and DATA-13 once injected
+// the same kill as CHAOS-01 with neither check, which is why they are helpers
+// rather than lines in CHAOS-01 (#99).
+func confirmKillAimedAtServer(ctx context.Context, t *testing.T, f *framework.Framework,
+	target chaos.Target) framework.ServerProcess {
+	t.Helper()
+	before, err := observeServerProcess(ctx, f, target)
+	if err != nil {
+		t.Skipf("blocked: the process serving NFS in %s on %s could not be observed before the fault, so a "+
+			"kill could not be confirmed to have landed on it: %v", target.Pod, target.Node, err)
+	}
+	aimedAt, err := chaos.ResolveProcess(f, target)
+	if err != nil {
+		t.Skipf("blocked: %v", err)
+	}
+	if before.Name != aimedAt.Pattern {
+		t.Skipf("blocked: preflight recorded %q as serving NFS in %s and %q holds the listening socket now, "+
+			"so signalling the recorded name would kill something that is not this server; re-run preflight "+
+			"with -refresh-preflight", aimedAt.Pattern, target.Pod, before.Name)
+	}
+	t.Logf("before the fault, %s", before)
+	return before
+}
+
+// confirmServerProcessReplaced is the check made after every in-place kill of
+// the server process: evidence that the SIGKILL landed on the process that was
+// serving NFS, rather than on something else while the server carried on. The
+// process it compares against comes from confirmKillAimedAtServer.
 //
 // It compares the process serving before the fault with the one serving after,
 // because that is the question, and it is the one that survives contact with
@@ -495,13 +518,13 @@ func confirmServerProcessReplaced(ctx context.Context, t *testing.T, f *framewor
 		return err == nil, err
 	})
 	if err != nil {
-		t.Errorf("nothing is serving NFS in %s/%s after the SIGKILL, though the client recovered: %v",
-			target.Namespace, target.Pod, err)
+		t.Errorf("nothing is serving NFS in %s/%s on %s within %s of the case seeing the client resume after "+
+			"the SIGKILL: %v", target.Namespace, target.Pod, target.Node, listenerReturnTimeout, err)
 		return
 	}
 	if after.PID == before.PID {
-		t.Errorf("the process serving NFS in %s is still %s, so the SIGKILL did not land on it and the "+
-			"recovery measured above is not a recovery from this fault", target.Pod, after)
+		t.Errorf("the process serving NFS in %s on %s is still %s, so the SIGKILL did not land on it and "+
+			"nothing this case measured across the fault is about this fault", target.Pod, target.Node, after)
 		return
 	}
 	t.Logf("after the fault, %s, replacing pid %d", after, before.PID)
