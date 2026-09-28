@@ -309,7 +309,7 @@ func TestClassifyMetricsVerdicts(t *testing.T) {
 		{"counters identical", &before, &identical, MetricsResumedIndeterminate},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := ClassifyMetrics(tc.before, tc.after)
+			got := classifyPair(tc.before, tc.after)
 			if got.Verdict != tc.want {
 				t.Errorf("verdict %s, want %s: %s", got.Verdict, tc.want, got)
 			}
@@ -338,7 +338,7 @@ func TestClassifyMetricsEqualityIsNotContinuity(t *testing.T) {
 	before := ParseExposition([]byte(body))
 
 	advanced := ParseExposition([]byte("# TYPE a counter\na 6\n# TYPE b counter\nb 7\n"))
-	got := ClassifyMetrics(&before, &advanced)
+	got := classifyPair(&before, &advanced)
 	if len(got.Advanced) != 1 || len(got.Unchanged) != 1 {
 		t.Errorf("a counter that moved and one that did not were not separated: %s", got)
 	}
@@ -348,7 +348,7 @@ func TestClassifyMetricsEqualityIsNotContinuity(t *testing.T) {
 	}
 
 	same := ParseExposition([]byte(body))
-	got = ClassifyMetrics(&before, &same)
+	got = classifyPair(&before, &same)
 	if len(got.Advanced) != 0 {
 		t.Errorf("identical counters were recorded as having advanced, which is the F-024 "+
 			"false pass: %s", got)
@@ -385,7 +385,7 @@ func TestClassifyMetricsSeparatesNamesFromLabels(t *testing.T) {
 	before := ParseExposition([]byte("# TYPE nfsd_ops counter\nnfsd_ops{client=\"10.0.0.1\"} 5\n"))
 	after := ParseExposition([]byte("# TYPE nfsd_ops counter\nnfsd_ops{client=\"10.0.0.2\"} 1\n"))
 
-	got := ClassifyMetrics(&before, &after)
+	got := classifyPair(&before, &after)
 	if got.Verdict == MetricsNeverResumed || got.Verdict == MetricsAbsent {
 		t.Errorf("verdict %s: a client label that changed across the restart is not a "+
 			"metric name the server stopped publishing", got.Verdict)
@@ -423,7 +423,7 @@ func TestClassifyMetricsTypesHistogramComponents(t *testing.T) {
 
 	was := ParseExposition([]byte(before))
 	now := ParseExposition([]byte(restarted))
-	got := ClassifyMetrics(&was, &now)
+	got := classifyPair(&was, &now)
 	if got.Verdict != MetricsResumedReset {
 		t.Errorf("verdict %s: a histogram whose counts went back to zero across a restart is a "+
 			"reset, and a verdict that does not say so passes a server that lost its counts (%s)",
@@ -442,8 +442,165 @@ func TestClassifyMetricsTypesHistogramComponents(t *testing.T) {
 	// exposition format does not promise, so it stays out of the check.
 	sumFell := ParseExposition([]byte("# TYPE nfsd_op_seconds histogram\n" +
 		"nfsd_op_seconds_bucket{le=\"0.1\"} 7\nnfsd_op_seconds_sum 0.1\nnfsd_op_seconds_count 9\n"))
-	if got := ClassifyMetrics(&was, &sumFell); got.Verdict == MetricsResumedReset {
+	if got := classifyPair(&was, &sumFell); got.Verdict == MetricsResumedReset {
 		t.Errorf("a _sum that fell on its own was read as a counter reset: %s", got)
+	}
+}
+
+// classifyPair is the comparison with only the two scrapes the verdict tests
+// above are about: one before the restart and the replacement's first answer.
+// No idle scrape and no exercised one, so names are judged against the first
+// answer alone, which is what those tests pin.
+func classifyPair(before, after *MetricSet) MetricsComparison {
+	return ClassifyMetrics(MetricScrapes{Before: before, After: after})
+}
+
+// f025Before is a busy server before the restart, in the shape F-025 recorded:
+// an operation counter every process publishes from startup, and a byte counter
+// Ganesha creates only on its first sample.
+const f025Before = "# TYPE nfs_requests_total counter\nnfs_requests_total 900\n" +
+	"# TYPE nfs_bytes_sent_total counter\nnfs_bytes_sent_total 4096\n"
+
+// f025Cold is the replacement's first answer: the operation counter back from
+// zero-ish, and the byte counter not yet created because nothing has been
+// served.
+const f025Cold = "# TYPE nfs_requests_total counter\nnfs_requests_total 12\n"
+
+// TestClassifyMetricsJudgesNamesAfterTraffic is the regression test for F-025.
+//
+// OBS-07 scraped seconds after the restart, before any client had done anything
+// through the new process, and reported 21 metric names lost. All 21 were byte,
+// size or cache families that Ganesha creates on their first sample, and all 21
+// were back on the same process once traffic resumed. Getting this wrong files
+// never-resumed, a failure naming the deployment, against a server whose
+// telemetry came back intact.
+//
+// Steps:
+//  1. Classify a busy scrape against a cold first answer and an exercised
+//     scrape that carries the lazily created name again.
+//  2. Assert nothing is reported lost and the name is not reported new.
+//  3. Assert the verdict is the reset the first answer shows, which is the
+//     honest reading of a restarted process.
+func TestClassifyMetricsJudgesNamesAfterTraffic(t *testing.T) {
+	before := ParseExposition([]byte(f025Before))
+	cold := ParseExposition([]byte(f025Cold))
+	exercised := ParseExposition([]byte(f025Cold + "# TYPE nfs_bytes_sent_total counter\nnfs_bytes_sent_total 512\n"))
+
+	got := ClassifyMetrics(MetricScrapes{Before: &before, After: &cold, Exercised: &exercised})
+	if len(got.LostMetricNames) != 0 {
+		t.Errorf("a name the replacement published once it had served traffic was reported lost, which is "+
+			"the F-025 false failure: %v", got.LostMetricNames)
+	}
+	if len(got.NewMetricNames) != 0 {
+		t.Errorf("a name published before the restart was reported new after it: %v", got.NewMetricNames)
+	}
+	if got.Verdict != MetricsResumedReset {
+		t.Errorf("verdict %s, want %s: the first answer's operation counter fell from 900 to 12 (%s)",
+			got.Verdict, MetricsResumedReset, got)
+	}
+}
+
+// TestClassifyMetricsLostNameSurvivesTraffic is the other half of F-025's fix:
+// driving traffic must not become a way to excuse a name the server really
+// stopped publishing. The assertion is not being relaxed, only taken at the
+// right moment.
+//
+// Steps:
+//  1. Classify a busy scrape against a cold first answer and an exercised
+//     scrape that still lacks the byte counter.
+//  2. Assert the name is reported lost and the verdict is never-resumed.
+func TestClassifyMetricsLostNameSurvivesTraffic(t *testing.T) {
+	before := ParseExposition([]byte(f025Before))
+	cold := ParseExposition([]byte(f025Cold))
+	exercised := ParseExposition([]byte("# TYPE nfs_requests_total counter\nnfs_requests_total 40\n"))
+
+	got := ClassifyMetrics(MetricScrapes{Before: &before, After: &cold, Exercised: &exercised})
+	if got.Verdict != MetricsNeverResumed {
+		t.Errorf("verdict %s, want %s: a name missing even after traffic is a name the server lost (%s)",
+			got.Verdict, MetricsNeverResumed, got)
+	}
+	if strings.Join(got.LostMetricNames, " ") != "nfs_bytes_sent_total" {
+		t.Errorf("names reported lost are %v, want only nfs_bytes_sent_total", got.LostMetricNames)
+	}
+}
+
+// TestClassifyMetricsDirectionIgnoresOwnTraffic guards the hazard the fix for
+// F-025 introduces if done naively. The case's own traffic after the restart
+// moves counters upward, and on a quiet server it can take them past what the
+// process had served before the fault. Read off the exercised scrape, that is a
+// restarted process reported as resumed-continuous, which is the F-024 false
+// claim reached from the other side.
+//
+// Steps:
+//  1. Classify with a first answer whose counter matches before and an
+//     exercised scrape where it is higher: assert nothing advanced and the
+//     verdict makes no continuity claim.
+//  2. Classify with a first answer whose counter fell and an exercised scrape
+//     where it is higher again: assert the reset is what is reported.
+func TestClassifyMetricsDirectionIgnoresOwnTraffic(t *testing.T) {
+	before := ParseExposition([]byte("# TYPE ops counter\nops 30\n"))
+	same := ParseExposition([]byte("# TYPE ops counter\nops 30\n"))
+	driven := ParseExposition([]byte("# TYPE ops counter\nops 75\n"))
+
+	got := ClassifyMetrics(MetricScrapes{Before: &before, After: &same, Exercised: &driven})
+	if len(got.Advanced) != 0 || got.Verdict == MetricsResumedContinuous {
+		t.Errorf("the case's own traffic was read as the server keeping its counts: %s", got)
+	}
+	if got.Verdict != MetricsResumedIndeterminate {
+		t.Errorf("verdict %s, want %s", got.Verdict, MetricsResumedIndeterminate)
+	}
+
+	fell := ParseExposition([]byte("# TYPE ops counter\nops 3\n"))
+	got = ClassifyMetrics(MetricScrapes{Before: &before, After: &fell, Exercised: &driven})
+	if got.Verdict != MetricsResumedReset || len(got.Reset) != 1 || got.Reset[0].After != 3 {
+		t.Errorf("verdict %s, want %s read off the first answer's 3, not the exercised 75: %s",
+			got.Verdict, MetricsResumedReset, got)
+	}
+}
+
+// TestClassifyMetricsSaysWhichLabelsItExpects covers the label sets the case
+// expects back, which the F-025 update asked for. Ordinary traffic brings back
+// the lazily created names, but not labels only a failover or an earlier client
+// produced: status="NFS4ERR_GRACE", a departed client's address. A report that
+// lumps those in with the case's own series swaps a false alarm over names for
+// one over labels.
+//
+// Steps:
+//  1. Build an idle scrape, and a before scrape in which the case's traffic
+//     advanced one series and created another, next to a failover status that
+//     did not move.
+//  2. Classify against an exercised scrape that has neither the failover
+//     status nor one of the case's own series.
+//  3. Assert Touched is exactly the case's two series, LostSeries holds both
+//     missing ones, and LostTouchedSeries only the case's own.
+func TestClassifyMetricsSaysWhichLabelsItExpects(t *testing.T) {
+	const typ = "# TYPE ops counter\n"
+	idle := ParseExposition([]byte(typ + `ops{status="NFS4_OK"} 10` + "\n" + `ops{status="NFS4ERR_GRACE"} 4` + "\n"))
+	before := ParseExposition([]byte(typ + `ops{status="NFS4_OK"} 25` + "\n" + `ops{status="NFS4ERR_GRACE"} 4` +
+		"\n" + `ops{op="WRITE",status="NFS4_OK"} 3` + "\n"))
+	cold := ParseExposition([]byte(typ + `ops{status="NFS4_OK"} 2` + "\n"))
+	exercised := ParseExposition([]byte(typ + `ops{status="NFS4_OK"} 9` + "\n"))
+
+	got := ClassifyMetrics(MetricScrapes{Idle: &idle, Before: &before, After: &cold, Exercised: &exercised})
+	if want := `ops{op="WRITE",status="NFS4_OK"} ops{status="NFS4_OK"}`; strings.Join(got.Touched, " ") != want {
+		t.Errorf("touched series are %v, want the two the case's traffic moved or created", got.Touched)
+	}
+	if len(got.LostSeries) != 2 {
+		t.Errorf("lost series are %v, want the failover status and the case's WRITE series", got.LostSeries)
+	}
+	if want := `ops{op="WRITE",status="NFS4_OK"}`; strings.Join(got.LostTouchedSeries, " ") != want {
+		t.Errorf("lost series touched by the case are %v, want only %s: the NFS4ERR_GRACE series is "+
+			"failover history the case's traffic never touched", got.LostTouchedSeries, want)
+	}
+	if got.Verdict != MetricsResumedReset {
+		t.Errorf("verdict %s, want %s: labels are a diagnostic and never decide it", got.Verdict,
+			MetricsResumedReset)
+	}
+
+	// Without an idle scrape the case has no grounds for an expectation, and
+	// must not claim every series as its own.
+	if got := ClassifyMetrics(MetricScrapes{Before: &before, After: &cold, Exercised: &exercised}); len(got.Touched) != 0 {
+		t.Errorf("with no idle scrape, %d series were claimed as touched by the case", len(got.Touched))
 	}
 }
 
@@ -452,13 +609,14 @@ func TestClassifyMetricsTypesHistogramComponents(t *testing.T) {
 //
 // Steps:
 //  1. Classify a pair with a reset counter.
-//  2. Assert the table names the verdict, both scrapes and the counter's move.
+//  2. Assert the table names the verdict, every scrape and the counter's move.
 func TestMetricsComparisonTableHoldsBothScrapes(t *testing.T) {
 	before := ParseExposition([]byte(serverExposition))
 	after := ParseExposition([]byte(strings.ReplaceAll(serverExposition, "1024", "7")))
-	table := ClassifyMetrics(&before, &after).Table()
+	table := classifyPair(&before, &after).Table()
 
-	for _, want := range []string{string(MetricsResumedReset), "counters reset", "1024 -> 7", "before:", "after:"} {
+	for _, want := range []string{string(MetricsResumedReset), "counters reset", "1024 -> 7", "idle:", "before:",
+		"after:", "exercised:", "label sets it expects back"} {
 		if !strings.Contains(table, want) {
 			t.Errorf("the table omits %q, so the run keeps no record of what the endpoint said:\n%s",
 				want, table)
