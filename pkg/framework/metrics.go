@@ -585,10 +585,10 @@ func isLabelNameChar(c byte) bool {
 	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_'
 }
 
-// MetricsVerdict is what a pair of scrapes taken either side of a restart says
-// about the endpoint. The five are mutually exclusive and ordered: absent wins
-// over never-resumed, which wins over reset, which wins over continuous, which
-// wins over indeterminate.
+// MetricsVerdict is what the scrapes taken either side of a restart say about
+// the endpoint. The five are mutually exclusive and ordered: absent wins over
+// never-resumed, which wins over reset, which wins over continuous, which wins
+// over indeterminate.
 type MetricsVerdict string
 
 const (
@@ -598,8 +598,9 @@ const (
 	MetricsAbsent MetricsVerdict = "absent"
 	// MetricsNeverResumed is an endpoint that answered before the restart and
 	// not after it, or one that came back having lost metric names it used to
-	// publish. Also a failure: every dashboard and every alert built on the
-	// missing series goes blind at the moment it is needed most.
+	// publish, judged once the case has driven traffic through the replacement
+	// (see MetricScrapes). Also a failure: every dashboard and every alert
+	// built on the missing series goes blind at the moment it is needed most.
 	MetricsNeverResumed MetricsVerdict = "never-resumed"
 	// MetricsResumedReset is the endpoint back with its counters restarted from
 	// a lower value. A pass: a counter reset is what a restarted process is
@@ -628,7 +629,44 @@ type CounterChange struct {
 	After  float64
 }
 
-// MetricsComparison is what the two scrapes say together.
+// MetricScrapes are the scrapes OBS-07 compares, in the order it takes them.
+//
+// There are four because the case asks two questions of a restart, and each
+// needs a reading the other would spoil. Whether a metric name survived can be
+// asked only of a server that has had the chance to record it: Ganesha creates
+// a family on its first sample, so a process that has served nothing publishes
+// its cold-start set and every traffic-driven name reads as lost. That is
+// F-025. Which way the counters went can be asked only of a server nothing has
+// been driven through since it came back: the case's own I/O moves counters
+// upward, and on a quiet server a restarted process would read as one that
+// carried its counts across, which is F-024 reached from the other side.
+//
+// A nil scrape is one that did not happen, and is passed as nil rather than as
+// an empty set so that "the server published nothing" and "the suite got
+// nothing" cannot be confused, since only the first is a statement about the
+// deployment.
+type MetricScrapes struct {
+	// Idle is taken before the case drives any traffic of its own, and Before
+	// straight after it. A series that appeared, or whose counter advanced,
+	// between the two is one the case's own traffic touches. Those are the
+	// label sets the case has grounds to expect back once it drives the same
+	// traffic again; everything else in Before is history this process was
+	// asked for by somebody else. Nil Idle leaves that set unknown.
+	Idle   *MetricSet
+	Before *MetricSet
+	// After is the replacement's first answer, taken before the case has
+	// driven anything through it. Counter direction is read from here and
+	// nowhere else.
+	After *MetricSet
+	// Exercised is the replacement after the case has driven its traffic
+	// through it again. A metric name is lost only when neither After nor
+	// Exercised publishes it. Nil judges names against After alone, which is
+	// the comparison F-025 showed cannot tell a lost name from an unrecorded
+	// one; OBS-07 never passes it.
+	Exercised *MetricSet
+}
+
+// MetricsComparison is what the scrapes say together.
 type MetricsComparison struct {
 	Verdict MetricsVerdict
 	// Source is what was read, or what was found when there was nothing to
@@ -637,90 +675,135 @@ type MetricsComparison struct {
 	// carry the endpoint: an absent verdict has no MetricSet at all, and the
 	// pod is gone by the time anybody reads the bundle.
 	Source string
-	Before MetricSet
-	After  MetricSet
+	// Idle, Before, After and Exercised are the scrapes of the same names in
+	// MetricScrapes, kept for the bundle.
+	Idle      MetricSet
+	Before    MetricSet
+	After     MetricSet
+	Exercised MetricSet
+	// Rounds is how many rounds of traffic the case drove through the
+	// replacement before Exercised was taken. Set by the caller, like Source,
+	// because it is the case that drives them.
+	Rounds int
 
-	// LostMetricNames are metric names published before the restart and not
-	// after. This is the assertion: a name is what a dashboard query selects.
+	// LostMetricNames are metric names published before the restart and in
+	// neither scrape after it. This is the assertion: a name is what a
+	// dashboard query selects.
 	LostMetricNames []string
 	// NewMetricNames are names that only appeared afterwards, reported as a
 	// diagnostic. A server that publishes more after a restart than before is
 	// not a defect.
 	NewMetricNames []string
+	// Touched are the series the case's own traffic touched before the fault,
+	// read off Idle and Before. It is the answer to which label sets the case
+	// expects to come back, stated rather than implied.
+	Touched []string
 	// LostSeries are series whose name survived but whose exact label set did
 	// not. Also a diagnostic, deliberately: per-client and per-export labels
-	// come and go with the clients and exports themselves, so asserting on them
-	// would fail a healthy server for having no clients reconnected yet.
+	// come and go with the clients and exports themselves, and some statuses,
+	// NFS4ERR_GRACE among them, are produced only by a failover, so asserting
+	// on them would fail a healthy server for its history.
 	LostSeries []string
-	// Reset, Advanced and Unchanged are the counter series present on both
-	// sides, split by which way they moved. The split is three-way rather than
-	// two because equality is not continuity: a restarted process on an idle
-	// server re-derives the same values, so Unchanged is a diagnostic and never
-	// grounds for claiming the counts survived. See F-024.
+	// LostTouchedSeries is the part of LostSeries that is in Touched: label
+	// sets the case's own traffic produced before the fault and did not bring
+	// back after it. Still a diagnostic, and the one worth reading first; see
+	// the OBS-07 case comment for why it is not asserted.
+	LostTouchedSeries []string
+	// Reset, Advanced and Unchanged are the counter series present both before
+	// the restart and in the replacement's first answer, split by which way
+	// they moved. The split is three-way rather than two because equality is
+	// not continuity: a restarted process on an idle server re-derives the same
+	// values, so Unchanged is a diagnostic and never grounds for claiming the
+	// counts survived. See F-024.
 	Reset     []CounterChange
 	Advanced  []CounterChange
 	Unchanged []CounterChange
 }
 
-// ClassifyMetrics turns a pair of scrapes into the verdict OBS-07 reports.
+// ClassifyMetrics turns OBS-07's scrapes into the verdict it reports.
 //
-// A nil scrape is one that did not happen: nil before is an endpoint that never
-// answered, nil after is one that did not come back. Both are passed as nil
-// rather than as an empty set so that "the server published nothing" and "the
-// suite got nothing" cannot be confused, since only the first is a statement
-// about the deployment.
-func ClassifyMetrics(before, after *MetricSet) MetricsComparison {
+// Nil Before is an endpoint that never answered and nil After one that did not
+// come back. See MetricScrapes for which question is read off which scrape.
+func ClassifyMetrics(s MetricScrapes) MetricsComparison {
 	var c MetricsComparison
-	if before == nil || before.Len() == 0 {
-		if before != nil {
-			c.Before = *before
+	for _, pair := range []struct {
+		from *MetricSet
+		to   *MetricSet
+	}{{s.Idle, &c.Idle}, {s.Before, &c.Before}, {s.After, &c.After}, {s.Exercised, &c.Exercised}} {
+		if pair.from != nil {
+			*pair.to = *pair.from
 		}
-		if after != nil {
-			c.After = *after
-		}
+	}
+	if s.Before == nil || s.Before.Len() == 0 {
 		c.Verdict = MetricsAbsent
 		return c
 	}
-	c.Before = *before
-	if after == nil || after.Len() == 0 {
-		if after != nil {
-			c.After = *after
-		}
+	if s.After == nil || s.After.Len() == 0 {
 		c.Verdict = MetricsNeverResumed
 		return c
 	}
-	c.After = *after
+	before, after := s.Before, s.After
 
-	beforeNames := setOf(before.MetricNames())
+	// A name or a series is still published if either scrape of the
+	// replacement carries it. The first answer alone is the cold-start set,
+	// which is what F-025 read as 21 lost names.
 	afterNames := setOf(after.MetricNames())
+	published := func(key string) bool {
+		_, ok := after.Samples[key]
+		return ok
+	}
+	if s.Exercised != nil {
+		for _, name := range s.Exercised.MetricNames() {
+			afterNames[name] = true
+		}
+		published = func(key string) bool {
+			_, first := after.Samples[key]
+			_, exercised := s.Exercised.Samples[key]
+			return first || exercised
+		}
+	}
+	beforeNames := setOf(before.MetricNames())
 	for _, name := range before.MetricNames() {
 		if !afterNames[name] {
 			c.LostMetricNames = append(c.LostMetricNames, name)
 		}
 	}
-	for _, name := range after.MetricNames() {
+	for name := range afterNames {
 		if !beforeNames[name] {
 			c.NewMetricNames = append(c.NewMetricNames, name)
 		}
 	}
+	sort.Strings(c.NewMetricNames)
 
+	touched := touchedSeries(s.Idle, before)
 	keys := make([]string, 0, len(before.Samples))
 	for key := range before.Samples {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
 	for _, key := range keys {
-		was := before.Samples[key]
-		now, ok := after.Samples[key]
-		if !ok {
+		if touched[key] {
+			c.Touched = append(c.Touched, key)
+		}
+		if !published(key) {
 			if afterNames[nameOf(key)] {
 				c.LostSeries = append(c.LostSeries, key)
+				if touched[key] {
+					c.LostTouchedSeries = append(c.LostTouchedSeries, key)
+				}
 			}
 			continue
 		}
-		if !before.isCounter(key) {
+		// Direction comes from the first answer only. A series that exists
+		// only in Exercised carries the case's own traffic in its value, and
+		// comparing it with Before would report a restarted process as one
+		// that kept its counts whenever the case drove more than the server
+		// had served before the fault.
+		now, ok := after.Samples[key]
+		if !ok || !before.isCounter(key) {
 			continue
 		}
+		was := before.Samples[key]
 		change := CounterChange{Series: key, Before: was, After: now}
 		switch {
 		case now < was:
@@ -750,6 +833,24 @@ func ClassifyMetrics(before, after *MetricSet) MetricsComparison {
 	return c
 }
 
+// touchedSeries is the set of series in before that the case's own traffic
+// touched: absent from idle, or a counter that advanced since it. Nil when
+// there is no idle scrape to compare with, because without one every series
+// would read as touched and the set would claim an expectation nobody has.
+func touchedSeries(idle, before *MetricSet) map[string]bool {
+	if idle == nil || idle.Len() == 0 {
+		return nil
+	}
+	out := map[string]bool{}
+	for key, now := range before.Samples {
+		was, ok := idle.Samples[key]
+		if !ok || (before.isCounter(key) && now > was) {
+			out[key] = true
+		}
+	}
+	return out
+}
+
 func setOf(names []string) map[string]bool {
 	out := make(map[string]bool, len(names))
 	for _, name := range names {
@@ -760,34 +861,44 @@ func setOf(names []string) map[string]bool {
 
 // String renders the comparison for a log line or a failure message.
 func (c MetricsComparison) String() string {
-	return fmt.Sprintf("%s: %d series under %d names before, %d under %d after; %d names lost, "+
-		"%d new; %d counters reset, %d advanced, %d unchanged, %d series lost under a surviving name",
+	return fmt.Sprintf("%s: %d series under %d names before, %d under %d after, %d under %d once exercised "+
+		"by %d rounds of traffic; %d names lost, %d new; %d counters reset, %d advanced, %d unchanged; "+
+		"%d series lost under a surviving name, %d of them touched by the case's own traffic",
 		c.Verdict, c.Before.Len(), len(c.Before.MetricNames()), c.After.Len(), len(c.After.MetricNames()),
+		c.Exercised.Len(), len(c.Exercised.MetricNames()), c.Rounds,
 		len(c.LostMetricNames), len(c.NewMetricNames), len(c.Reset), len(c.Advanced), len(c.Unchanged),
-		len(c.LostSeries))
+		len(c.LostSeries), len(c.LostTouchedSeries))
 }
 
-// Table renders both scrapes into the bundle. Written whether the case passed
-// or not: neither endpoint can be asked again once the run is over, and a pass
-// where every counter reset is a different run from one where they all carried
+// Table renders every scrape into the bundle. Written whether the case passed
+// or not: no endpoint can be asked again once the run is over, and a pass where
+// every counter reset is a different run from one where they all carried
 // across.
 func (c MetricsComparison) Table() string {
 	var b strings.Builder
 	verdict := string(c.Verdict)
 	if verdict == "" {
-		// The case exited before it had both scrapes. Saying so beats an empty
-		// field, which reads as a verdict somebody forgot to fill in.
-		verdict = "not reached: the case ended before it had both scrapes"
+		// The case exited before it had the scrapes it compares. Saying so
+		// beats an empty field, which reads as a verdict somebody forgot to
+		// fill in.
+		verdict = "not reached: the case ended before it had the scrapes it compares"
 	}
-	fmt.Fprintf(&b, "verdict: %s\n", verdict)
+	fmt.Fprintf(&b, "verdict:   %s\n", verdict)
 	if c.Source != "" {
-		fmt.Fprintf(&b, "source:  %s\n", c.Source)
+		fmt.Fprintf(&b, "source:    %s\n", c.Source)
 	}
-	fmt.Fprintf(&b, "before:  %s at %s\n", c.Before.Describe(), stampOf(c.Before))
-	fmt.Fprintf(&b, "after:   %s at %s\n", c.After.Describe(), stampOf(c.After))
+	fmt.Fprintf(&b, "idle:      %s at %s, before this case drove any traffic\n", c.Idle.Describe(), stampOf(c.Idle))
+	fmt.Fprintf(&b, "before:    %s at %s, after this case's traffic\n", c.Before.Describe(), stampOf(c.Before))
+	fmt.Fprintf(&b, "after:     %s at %s, the replacement's first answer, which counters are read from\n",
+		c.After.Describe(), stampOf(c.After))
+	fmt.Fprintf(&b, "exercised: %s at %s, after %d rounds of this case's traffic through the replacement\n",
+		c.Exercised.Describe(), stampOf(c.Exercised), c.Rounds)
 	writeList(&b, "metric names lost", c.LostMetricNames)
 	writeList(&b, "metric names new", c.NewMetricNames)
+	writeList(&b, "series this case's own traffic touched before the fault, which are the label sets it "+
+		"expects back", c.Touched)
 	writeList(&b, "series lost under a surviving metric name", c.LostSeries)
+	writeList(&b, "of those, touched by this case's own traffic and not brought back by it", c.LostTouchedSeries)
 	fmt.Fprintf(&b, "\ncounters reset (%d)\n", len(c.Reset))
 	for _, ch := range c.Reset {
 		fmt.Fprintf(&b, "  %s: %g -> %g\n", ch.Series, ch.Before, ch.After)
