@@ -301,7 +301,9 @@ specific to the Observability test group:
     before the fault as well puts both ends under the case's control, which F-025 found neither was.
     - **How long**: rounds repeat until every name from before is back, or until a round brings back
       no name the round before it had not, inside the restart budget plus
-      `slo.ObservationMargin`. One round should do, since Ganesha records a sample as it serves the
+      `slo.ObservationMargin` counted from the replacement's first answer: a bound of its own, the
+      same length the replacement and its first answer were each given, not what is left of
+      theirs. One round should do, since Ganesha records a sample as it serves the
       request, and the second covers a scrape that races the update. Stopping on no growth rather
       than at the bound is safe in the direction that matters: no extra round can make a name the
       server does not publish appear. The first round meets grace, so the bound cannot be shorter
@@ -414,11 +416,12 @@ specific to the Observability test group:
   also what F-024's idle server published on both sides, which is why it saw no loss. The fix for
   [issue #81](https://github.com/mikebz/nfs-verification/issues/81) drives the case's own I/O through
   the export on both sides of the restart, judges names only after it, and still reads counters off
-  the replacement's first answer (section 6, OBS-07). Two runs on `gke-w2` since then returned
+  the replacement's first answer (section 6, OBS-07). Three runs on `gke-w2` since then returned
   `resumed-reset`: 0 names lost after one round of traffic, 62 counters reset, none advanced. The
-  series the case's own traffic touched and did not bring back were `CREATE` in one run, from a
-  directory only the pre-fault round made (fixed in the harness), and `LOOKUP` in the other, which is
-  the client's cache deciding. That is why label sets are reported and not asserted.
+  series the case's own traffic touched and did not bring back were `CREATE` in the first run, from
+  a directory only the pre-fault round made (fixed in the harness), `LOOKUP` in the second, which is
+  the client's cache deciding, and none in the third. That is why label sets are reported and not
+  asserted.
 
 ## 10. Sources
 
