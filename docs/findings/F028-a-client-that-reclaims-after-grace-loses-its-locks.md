@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-27
-Updated: 2026-09-27
+Updated: 2026-09-28
 
 
 **Found:** 2026-09-26, reading the bundle and the server's own log for a
@@ -88,10 +88,27 @@ Section 8.4.2 say locks held before a restart survive it when the client
 reclaims in time, and a deployment where a client does not is one where locks do
 not survive. CHAOS-06 stays red when it happens.
 
-What should change is what the failure says. Its message offers "either the
+What should change is what the failure says. Its message offered "either the
 lock was not reclaimed or a conflicting one was granted", and the bundle already
-holds what tells those apart: a `lost N locks` line on the holder's node means
-the first. #100 tracks naming it.
+held a line that narrows it: a `lost N locks` on the holder's node means that
+node's client had reclaims refused. #100 tracked naming it, and the message now
+does: CHAOS-06 reads both holders' ring buffers just before the fault, and where
+a lock is found free and its holder's node has logged a `lost N locks` line
+since, the failure names that node, quotes the line, and cites this finding.
+With no such line it keeps the old wording. The read is a window rather than the
+whole buffer, because in this very run the writer's node still carried a
+`lost 1 locks` from 2026-09-19.
+
+The line narrows the cause and does not decide it, which this entry first
+claimed it did. It is one count per node and server, shared by every pod on the
+node, and names no lock. And the kernel counts a lock as lost when its reclaim
+is refused for any reason, including `NFS4ERR_RECLAIM_CONFLICT` and
+`NFS4ERR_DENIED`, the errors a server returns to a reclaim of a lock it has
+already granted to someone else (`nfs4_reclaim_locks` in `fs/nfs/nfs4state.c`).
+So the line proves refused reclaims on that node, not a late one for this lock.
+Here it was the count matching the verifier's two locks, and the server's log,
+that showed which locks and why. The message says only what the line says, and
+quoting that log waits until the harness can read it (F-022, #21).
 
 ### What it implies for the system under test
 

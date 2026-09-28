@@ -3,6 +3,7 @@ package e2e
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -737,8 +738,109 @@ func TestChaosRepeatedFailover(t *testing.T) {
 type lockUnderTest struct {
 	holder *framework.LockHolder
 	held   string
+	heldOn string
 	probe  string
 	path   string
+}
+
+// kernelLogReadTimeout bounds one node's ring buffer read. dmesg touches no
+// mount, but anything that reads a node is bounded per node, so that one sick
+// node cannot stall a failure message about another.
+const kernelLogReadTimeout = 10 * time.Second
+
+// kernelBaseline is each node's ring buffer as it stood just before a fault, so
+// that what a kernel logs afterwards can be told apart from what it logged for
+// an earlier case. The buffer outlives every case; see framework.NewLostLocks.
+type kernelBaseline map[string]string
+
+// readKernelBaseline reads the ring buffer on each node before a fault. A node
+// that cannot be read is left out and said so, and a later explanation for that
+// node falls back to the less specific message rather than guessing.
+func readKernelBaseline(ctx context.Context, t *testing.T, f *framework.Framework, nodes ...string) kernelBaseline {
+	t.Helper()
+	b := kernelBaseline{}
+	agent, err := framework.NodeAgent(ctx, f.C)
+	if err != nil {
+		t.Logf("the node agent is unavailable, so no ring buffer was read before the fault and a lost lock "+
+			"cannot be attributed to a refused reclaim: %v", err)
+		return b
+	}
+	for _, node := range nodes {
+		nodeCtx, cancel := context.WithTimeout(ctx, kernelLogReadTimeout)
+		out, err := agent.Dmesg(nodeCtx, node)
+		cancel()
+		if err != nil {
+			t.Logf("reading the ring buffer on %s before the fault: %v. A lock lost on that node will be "+
+				"reported without saying whether its reclaim was refused", node, err)
+			continue
+		}
+		// Agent.Dmesg ends in "|| true", so a failed read can come back empty
+		// with no error. Left out rather than stored, though NewLostLocks also
+		// refuses an empty baseline, so the log says the check was not made.
+		if strings.TrimSpace(out) == "" {
+			t.Logf("the ring buffer on %s read back empty before the fault, which a booted kernel's never "+
+				"is, so the read failed. A lock lost on that node will be reported without saying whether "+
+				"its reclaim was refused", node)
+			continue
+		}
+		b[node] = out
+	}
+	return b
+}
+
+// lockLossCause says why a lock held on node was found free after a failover,
+// for a failure message. Where node's kernel has logged a lost-locks report
+// since the baseline, the message says that node's client had a reclaim
+// refused in this failover; otherwise it returns fallback unchanged, because a
+// lock found free with no such report is the worse case and must keep reading
+// as one.
+//
+// What the report does not settle, the message does not claim. The report is
+// per node and per server, shared by every pod on the node, and counts locks
+// without naming them, so it does not prove this lock was among them. And the
+// Linux client prints the same line for a reclaim refused because grace had
+// ended, which RFC 8881 Section 8.4.2.1 allows and F-028 found, and for one
+// refused because a conflicting lock had already been granted, which it does
+// not. The server's record of when grace ended is what tells those apart, and
+// the harness cannot yet read it (F-022, #21).
+func (b kernelBaseline) lockLossCause(ctx context.Context, t *testing.T, f *framework.Framework,
+	node, fallback string) string {
+	t.Helper()
+	before, ok := b[node]
+	if !ok {
+		return fallback
+	}
+	agent, err := framework.NodeAgent(ctx, f.C)
+	if err != nil {
+		t.Logf("the node agent is unavailable, so %s's ring buffer was not read after the fault: %v", node, err)
+		return fallback
+	}
+	nodeCtx, cancel := context.WithTimeout(ctx, kernelLogReadTimeout)
+	after, err := agent.Dmesg(nodeCtx, node)
+	cancel()
+	if err != nil {
+		t.Logf("reading the ring buffer on %s after the fault: %v", node, err)
+		return fallback
+	}
+	lost := framework.NewLostLocks(before, after)
+	if len(lost) == 0 {
+		return fallback
+	}
+	quoted := make([]string, len(lost))
+	for i, l := range lost {
+		quoted[i] = fmt.Sprintf("%q", l.Line)
+	}
+	p := profile(t)
+	return fmt.Sprintf("The kernel on %s logged %s after the fault: the NFS client on that node, which every "+
+		"pod there shares, reports that the server refused its reclaim of that many locks, and nothing told "+
+		"the application. The line does not name the locks, so it does not prove this one was among them; "+
+		"it does say the holder's node lost locks at reclaim in this failover. A reclaim that reaches the "+
+		"server after grace has ended is refused lawfully (RFC 8881 Section 8.4.2.1), which is F-028 in "+
+		"docs/findings.md; grace on the %s profile is %s. The kernel prints the same line for a reclaim "+
+		"refused because a conflicting lock was granted during grace, which is not lawful, and the server's "+
+		"log of when grace ended is what tells the two apart. Either way this lock did not survive the "+
+		"failover on this deployment",
+		node, strings.Join(quoted, " and "), p.Name, p.Grace)
 }
 
 // CHAOS-06: a failover while clients hold locks. Every lock must be reclaimed,
@@ -767,13 +869,20 @@ type lockUnderTest struct {
 //     by the writer, one by the client on the other node.
 //  2. Take disjoint byte ranges of one further file, one from each client.
 //  3. Confirm every lock excludes the other client before anything is injured,
-//     so a case that was broken from the start cannot pass.
+//     so a case that was broken from the start cannot pass. Read both nodes'
+//     kernel ring buffers, so a failure can tell a holder node whose reclaims
+//     were refused from one that reported no refusal (F-028).
 //  4. Delete the server pod and assert the ordinary recovery.
 //  5. Assert every whole-file holder still holds its lock, and every probe from
 //     the other node is still refused. Report the reclaimed fraction.
 //  6. Assert each byte range is still held by its own client, read from the
 //     other side with F_GETLK rather than by acquiring, that a third client is
 //     refused on both, and that each holder's node agrees.
+//
+// Where a lock is found free, the failure names the holder's node and quotes
+// any "lost N locks" line its kernel logged after the fault. That line says
+// the node's client had reclaims refused, not which locks and not why, so the
+// message claims neither; the assertion is the same either way.
 func TestChaosLockReclaimAcrossFailover(t *testing.T) {
 	f := framework.New(t, "CHAOS-06")
 	ctx, cancel := caseCtx(t, 45*time.Minute)
@@ -804,11 +913,11 @@ func TestChaosLockReclaimAcrossFailover(t *testing.T) {
 
 	// Three locks from the writer and one from the client on the other node, so
 	// the reclaim path is exercised from both clients rather than from one.
-	want := []struct{ held, probe, id string }{
-		{s.writer, s.verifier, "chaos06a"},
-		{s.writer, s.verifier, "chaos06b"},
-		{s.writer, s.verifier, "chaos06c"},
-		{s.verifier, s.writer, "chaos06d"},
+	want := []struct{ held, heldOn, probe, id string }{
+		{s.writer, nodeA, s.verifier, "chaos06a"},
+		{s.writer, nodeA, s.verifier, "chaos06b"},
+		{s.writer, nodeA, s.verifier, "chaos06c"},
+		{s.verifier, nodeB, s.writer, "chaos06d"},
 	}
 	var locks []lockUnderTest
 	for _, w := range want {
@@ -828,7 +937,7 @@ func TestChaosLockReclaimAcrossFailover(t *testing.T) {
 			t.Fatalf("lock %s was granted to %s while %s held it, before any fault was injected (%s)",
 				w.id, w.probe, w.held, out)
 		}
-		locks = append(locks, lockUnderTest{holder: holder, held: w.held, probe: w.probe, path: path})
+		locks = append(locks, lockUnderTest{holder: holder, held: w.held, heldOn: w.heldOn, probe: w.probe, path: path})
 	}
 	t.Logf("%d locks held across two clients, each excluding the other client", len(locks))
 
@@ -851,6 +960,11 @@ func TestChaosLockReclaimAcrossFailover(t *testing.T) {
 	if err := f.RecordNodeLocks(ctx, "before-failover", nodeA, nodeB); err != nil {
 		t.Logf("recording the client lock tables before the failover: %v", err)
 	}
+	// Last thing before the fault, so that a lost-locks report a holder's
+	// kernel logs afterwards belongs to this failover and not to an earlier
+	// case's. It is what lets a failure below say the holder's reclaim was
+	// refused instead of offering two causes (F-028, #100).
+	kernel := readKernelBaseline(ctx, t, f, nodeA, nodeB)
 
 	faultAt, err := f.PodNow(ctx, s.writer)
 	if err != nil {
@@ -887,10 +1001,11 @@ func TestChaosLockReclaimAcrossFailover(t *testing.T) {
 			t.Fatalf("probing %s from %s after the failover: %v", l.path, l.probe, err)
 		}
 		if granted {
-			t.Errorf("after the failover %s was granted %s, which %s never released (%s). Either the lock "+
-				"was not reclaimed or a conflicting one was granted; the recovery state backend recorded at "+
-				"preflight is %q, which is where triage starts",
-				l.probe, l.path, l.held, out, f.Env.RecoveryStateBackend)
+			cause := kernel.lockLossCause(ctx, t, f, l.heldOn, fmt.Sprintf("Either the lock was not "+
+				"reclaimed or a conflicting one was granted; the recovery state backend recorded at "+
+				"preflight is %q, which is where triage starts", f.Env.RecoveryStateBackend))
+			t.Errorf("after the failover %s was granted %s, which %s on %s never released (%s). %s",
+				l.probe, l.path, l.held, l.heldOn, out, cause)
 			continue
 		}
 		reclaimed++
@@ -910,7 +1025,7 @@ func TestChaosLockReclaimAcrossFailover(t *testing.T) {
 		return
 	}
 	t.Run("byte-ranges-after-failover", func(t *testing.T) {
-		assertRangesSurvivedFailover(ctx, t, f.SubTest(t), ranges)
+		assertRangesSurvivedFailover(ctx, t, f.SubTest(t), ranges, kernel)
 	})
 }
 
@@ -922,8 +1037,12 @@ func TestChaosLockReclaimAcrossFailover(t *testing.T) {
 // *still held by its original holder*. A probe that answered by acquiring would
 // change the state every later question observes, and could not distinguish a
 // range that came back to the right client from one that came back to nobody.
+//
+// kernel is the ring buffers read just before the fault. A range found free is
+// explained from its holder's node, which is how a refused reclaim gets named
+// rather than left as one of two possibilities (F-028).
 func assertRangesSurvivedFailover(ctx context.Context, t *testing.T, f *framework.Framework,
-	d disjointRanges) {
+	d disjointRanges, kernel kernelBaseline) {
 	t.Helper()
 	rangeA := framework.WriteRange(rangeALow, rangeWidth)
 	rangeB := framework.WriteRange(rangeBLow, rangeWidth)
@@ -943,11 +1062,12 @@ func assertRangesSurvivedFailover(ctx context.Context, t *testing.T, f *framewor
 			t.Fatalf("asking %s on %s who holds %s: %v", q.askedBy, q.askedOn, q.r, err)
 		}
 		if ans.Free {
+			cause := kernel.lockLossCause(ctx, t, f, q.heldOn, fmt.Sprintf("The recovery state backend "+
+				"recorded at preflight is %q", f.Env.RecoveryStateBackend))
 			t.Errorf("after the failover the server reports %s as free, and %s on %s never released it. "+
 				"A range whose owner still believes it holds it, while the server believes nobody does, "+
-				"is one acquire away from two clients writing the same bytes. The recovery state backend "+
-				"recorded at preflight is %q",
-				q.r, q.heldBy, q.heldOn, f.Env.RecoveryStateBackend)
+				"is one acquire away from two clients writing the same bytes. %s",
+				q.r, q.heldBy, q.heldOn, cause)
 			continue
 		}
 		if c := ans.Conflict; c.Known && (c.Start != q.r.Start || c.Len != q.r.Len || c.Mode != q.r.Mode) {
@@ -1019,8 +1139,14 @@ func assertRangesSurvivedFailover(ctx context.Context, t *testing.T, f *framewor
 	}
 	const third = "thirdclient"
 	f.MustPod(ctx, toolsPod(third, d.claim, thirdNode))
-	for _, r := range []framework.LockRange{rangeA, rangeB} {
-		ans, err := f.TryLock(ctx, third, d.path, r)
+	for _, q := range []struct {
+		r              framework.LockRange
+		heldBy, heldOn string
+	}{
+		{rangeA, d.holderPod, d.holderNode},
+		{rangeB, d.otherPod, d.otherNode},
+	} {
+		ans, err := f.TryLock(ctx, third, d.path, q.r)
 		if err != nil {
 			// Blocked rather than fatal: a spare node on another architecture
 			// has no locktool, and that is a fact about this checkout. The
@@ -1030,12 +1156,13 @@ func assertRangesSurvivedFailover(ctx context.Context, t *testing.T, f *framewor
 					"still checked from both ends above", thirdNode, err)
 				return
 			}
-			t.Fatalf("probing %s from the third client on %s: %v", r, thirdNode, err)
+			t.Fatalf("probing %s from the third client on %s: %v", q.r, thirdNode, err)
 		}
 		if ans.Free {
-			t.Errorf("after the failover a third client on %s was granted %s, which neither holder "+
-				"released. Either the range was not reclaimed or a conflicting lock was granted, and "+
-				"neither is acceptable", thirdNode, r)
+			cause := kernel.lockLossCause(ctx, t, f, q.heldOn, "Either the range was not reclaimed or a "+
+				"conflicting lock was granted, and neither is acceptable")
+			t.Errorf("after the failover a third client on %s was granted %s, which %s on %s never released. %s",
+				thirdNode, q.r, q.heldBy, q.heldOn, cause)
 		}
 	}
 }
