@@ -21,13 +21,15 @@ the code cites: a comment reading "see F-009 in docs/findings.md" should land a
 reader somewhere that still exists. A new finding takes the next number, gets a
 file of its own, and a row at the top of the table below.
 
-The entry files were split out of a single log on 2026-09-14, so every one of
-them carries that date as `Created:` while describing something found earlier.
-The date the finding was made is the `**Found:**` line inside the entry, and
-that is the one that means anything.
+F-001 to F-022 were split out of a single log on 2026-09-14, so each of them
+carries that date as `Created:` while describing something found earlier. Every
+later entry carries the date its own file landed. Either way, the date the
+finding was made is the `**Found:**` line inside the entry, and that is the one
+that means anything.
 
 | # | Found | What it says | Cited by |
 |---|---|---|---|
+| [F-028](findings/F028-a-client-that-reclaims-after-grace-loses-its-locks.md) | 2026-09-26 | CHAOS-06 lost both of one client's locks across a failover on `gke-w2`, 1 of 6 runs: the kernel logged `lost 2 locks`, and the server's log shows grace ending on its 90s timer with one client's reclaim complete. The server was lawful (RFC 8881 Section 8.4.2.1); the client reclaimed late. The last reclaim across 94 grace windows landed 10 to 71s in, so the margin is 20 to 30s. Why this client was late is unestablished. The case stays red | CHAOS-06's failure message (#100) |
 | [F-027](findings/F027-a-container-cannot-read-the-file-descriptors-of-its.md) | 2026-09-20 | Inside a server pod, root without `CAP_SYS_PTRACE` cannot read the NFS server's file descriptors, so the socket-to-process join F-026 introduced fails, on both deployments, on every server that had been up more than a few minutes and on none that had just started. Capabilities do not explain it and traffic does not trigger it; what does is unestablished. Discovery now reads the socket in the pod and the holder on the node, through the node agent | CHAOS-01, DATA-12, DATA-13, `DiscoverServerProcess`, `Agent.RunScript`, F-026 |
 | [F-026](findings/F026-the-process-serving-nfs-is-not-the-containers-command.md) | 2026-09-18 | The process serving NFS is `ganesha.nfsd`, a child of the `nfs-provisioner` supervisor at PID 1, so the container's declared command names the wrong process and the container's restart count cannot see the right one die. CHAOS-01, DATA-12 and DATA-13 were blocked for the life of the project over a name the pod could have been asked for: the harness now joins the listening socket on 2049 to the process holding it, and has no fallback because every candidate fallback names a process nobody checked | CHAOS-01, DATA-12, DATA-13, `DiscoverServerProcess`, `ResolveProcess`, F-027 |
 | [F-025](findings/F025-a-metric-name-with-no-sample-yet-is-not-a-lost-one.md) | 2026-09-17 | OBS-07 scrapes seconds after the restart, before any traffic, and Ganesha creates a metric family only on its first sample: 21 byte, size and cache metric names were reported lost and all 21 were back on the same process once traffic resumed. 367 series under 66 names is this server's cold-start set, which is also what F-024's idle server published on both sides | OBS-07, `ClassifyMetrics`, F-024, doc 06 |
