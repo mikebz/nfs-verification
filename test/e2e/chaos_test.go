@@ -507,6 +507,18 @@ func confirmKillAimedAtServer(ctx context.Context, t *testing.T, f *framework.Fr
 // branched on the container's pid, which is not a thing this discovery can see:
 // naming the process at all needs the node agent, since the server's file
 // descriptors are unreadable from inside its own pod (F-027).
+//
+// Either failure stops the case, rather than being recorded and carried past.
+// DATA-12 and DATA-13 call this before their sweep and their I/O error count,
+// and either would otherwise be reported across a fault nothing confirmed
+// happened, reading as a result next to the failure that says so. That is the
+// test plan's rule that a fault that was not injected is never measured
+// (Section 4.1). CHAOS-01 calls it last, because its recovery wait is what
+// brings the server back to be observed, so its recovery line is already in
+// the log when this fails; the failure is what says that line is void. It
+// fails rather than reporting blocked because by now the signal has been
+// sent: something on the node was killed, and a server that kept its pid
+// through that, or stopped serving, is not a precondition this cluster lacked.
 func confirmServerProcessReplaced(ctx context.Context, t *testing.T, f *framework.Framework,
 	target chaos.Target, before framework.ServerProcess) {
 	t.Helper()
@@ -518,14 +530,13 @@ func confirmServerProcessReplaced(ctx context.Context, t *testing.T, f *framewor
 		return err == nil, err
 	})
 	if err != nil {
-		t.Errorf("nothing is serving NFS in %s/%s on %s within %s of the case seeing the client resume after "+
-			"the SIGKILL: %v", target.Namespace, target.Pod, target.Node, listenerReturnTimeout, err)
-		return
+		t.Fatalf("nothing is serving NFS in %s/%s on %s within %s of the case seeing the client resume after "+
+			"the SIGKILL, so the kill cannot be confirmed to have replaced the server and nothing this case "+
+			"measured across it stands: %v", target.Namespace, target.Pod, target.Node, listenerReturnTimeout, err)
 	}
 	if after.PID == before.PID {
-		t.Errorf("the process serving NFS in %s on %s is still %s, so the SIGKILL did not land on it and "+
+		t.Fatalf("the process serving NFS in %s on %s is still %s, so the SIGKILL did not land on it and "+
 			"nothing this case measured across the fault is about this fault", target.Pod, target.Node, after)
-		return
 	}
 	t.Logf("after the fault, %s, replacing pid %d", after, before.PID)
 }

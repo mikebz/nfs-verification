@@ -184,6 +184,7 @@ in anything about this server: DATA-12 and DATA-13 signalled without confirming
 what they signalled. They now make CHAOS-01's before and after checks, through
 helpers the three cases share, so every case that kills the server process in
 place confirms the kill landed, whatever process serves NFS (#99). The rule is
-in the test plan's harness design section. Run once each on `gke-w1` on
-2026-09-28 (`w1-pr99-{data12,data13,chaos01}-20260928`): all three passed, each
-observing the serving process before the kill and a new pid serving after it.
+in the test plan's harness design section. Run twice each on `gke-w1` on
+2026-09-28 (`w1-pr99-*` and, after review made the after check stop the case,
+`w1-pr99r2-*`): all six passed, each observing the serving process before the
+kill and a new pid serving after it.

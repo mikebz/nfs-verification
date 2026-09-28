@@ -263,7 +263,7 @@ profile-driven timing) live in [`01-test-plan.md`](01-test-plan.md) Section 4.1.
   3. Observe the process holding the listening socket in the server pod; report `blocked` if it cannot be named or is not the process preflight recorded, which is the name the kill is aimed by.
   4. Locate server process PID on host node via `ServerTarget` and send `SIGKILL`.
   5. Wait for client I/O to recover (outage measured as silence gap; recovery timing owned by `CHAOS-01`).
-  6. Confirm a different pid now holds the listening socket; fail if the same one does, since the kill missed the server.
+  6. Confirm a different pid now holds the listening socket. If the same one does, or none does, fail and stop there: the sweep is not run across a kill that was not confirmed to replace the server.
   7. Run content-verifying sweep from an independent worker node across all records committed before fault.
   8. Assert 100% of committed records return verdict `correct`. Fail on `absent`, `short`, or `wrong`.
 

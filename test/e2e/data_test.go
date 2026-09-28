@@ -1540,10 +1540,10 @@ func requireDurabilitySet(t *testing.T, n int, what string) {
 // the server under the load, and assert every record the server acknowledged
 // before the fault is still there and still says what it said.
 //
-// It asserts durability, and that the fault it asserts it across happened, and
-// nothing else. CHAOS-01 owns the recovery number for this same fault, and two
-// cases reporting it is two numbers to reconcile when they disagree. This waits
-// for recovery because it has to read the share afterwards, and does not
+// It asserts durability, and that the fault it is asserted across happened,
+// and nothing else. CHAOS-01 owns the recovery number for this same fault, and
+// two cases reporting it is two numbers to reconcile when they disagree. This
+// waits for recovery because it has to read the share afterwards, and does not
 // assert the SLO.
 //
 // It is a TestData case, not a TestChaos one, even though it kills the server.
@@ -1559,8 +1559,9 @@ func requireDurabilitySet(t *testing.T, n int, what string) {
 //     durability across a kill that may land on something else.
 //  3. SIGKILL the server process on its node.
 //  4. Wait for I/O to resume, without asserting the recovery SLO.
-//  5. Confirm a different process is serving now, since a durability verdict
-//     across a kill that missed the server is a verdict about nothing.
+//  5. Confirm a different process is serving now, and stop, failed, if not:
+//     a durability verdict across a kill that missed the server is a verdict
+//     about nothing, and is not reported.
 //  6. Sweep every record committed before the fault, from a pod on the other
 //     node, by content.
 //  7. Fail on any verdict but correct: absent is data loss, short is a record
@@ -1640,9 +1641,9 @@ func TestDataFsyncDurabilityAcrossServerKill(t *testing.T) {
 //     named, or is not the one the kill is aimed by.
 //  3. SIGKILL the server process on its node.
 //  4. Wait for I/O to resume.
-//  5. Confirm a different process is serving now. What this case documents
-//     is what a server crash does to un-fsynced data, and a kill that missed
-//     the server documents nothing.
+//  5. Confirm a different process is serving now, and stop, failed, if not.
+//     What this case documents is what a server crash does to un-fsynced
+//     data, and a kill that missed the server documents nothing.
 //  6. Sweep every record the workload attempted, from a pod on the other node.
 //  7. Record how many were absent or short, and fail only on wrong.
 func TestDataDurabilityWithoutFsync(t *testing.T) {
