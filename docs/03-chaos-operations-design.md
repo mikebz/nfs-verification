@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-10
-Updated: 2026-09-17
+Updated: 2026-09-28
 Status: **in progress.** Serves the complete Resiliency and Chaos test group:
 CHAOS-01, CHAOS-02, CHAOS-05, CHAOS-06, and CHAOS-07 shipped (Steps 3, 4, 6);
 CHAOS-03, CHAOS-04, and CHAOS-08 through CHAOS-18 planned for delivery step 10.
@@ -212,7 +212,7 @@ the core assertions across the Resiliency & Chaos test group:
 - **Steps**:
   1. Start active workload and take four whole-file locks (`flock`) across two clients on separate nodes (three held by writer, one by verifier).
   2. Subtest takes disjoint byte ranges on a separate file using `locktool`: `[0, 4096)` held by writer, `[8192, 12288)` held by verifier.
-  3. Verify cross-node exclusion for all whole-file locks and byte ranges before any fault is injected.
+  3. Verify cross-node exclusion for all whole-file locks and byte ranges before any fault is injected, then read both holder nodes' kernel ring buffers, so that a lock found free afterwards can be traced to a `lost N locks` line logged since (F-028). That line says the holder's reclaim was refused, not why, and the failure message says no more than that.
   4. Delete server pod gracefully and assert recovery duration within restart SLO.
   5. Assert each whole-file lock holder still reports held, and cross-node probes are refused. Assert 100% reclaim fraction.
   6. Query the server with `F_GETLK` from the opposite client to assert each byte range is still held by its original owner with unmodified boundaries.
