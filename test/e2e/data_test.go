@@ -426,11 +426,11 @@ const appendCaveat = "\n\nNote before filing: NFSv4.1 has no append operation. A
 // assertion the plan flags as stronger than the protocol, so it fails with the
 // caveat above rather than as a bare mismatch.
 //
-// This case is intermittent on the deployment it was written against: three
-// whole-suite runs lost fifty of two hundred records with none torn, and two
-// data-only runs in between lost nothing (F-016). A green run here does not
-// clear a storage system, it means the race did not fire, so do not read one
-// pass as an answer either way.
+// This case is intermittent on both deployments it has run against: when it
+// fails, one appender loses its whole contribution and nothing is torn. The run
+// counts live in F-016 rather than here, where they go stale. A green run here
+// does not clear a storage system, it means the race did not fire, so do not
+// read one pass as an answer either way.
 //
 // Steps:
 //  1. Put four pods on the available schedulable nodes, round robin, on one claim,
@@ -1382,8 +1382,9 @@ func TestDataSparseFileAndHolePunch(t *testing.T) {
 		punch := f.Sh(ctx, pod, fmt.Sprintf("fallocate -p -o %d -l %d %s 2>&1",
 			holeBlock*block, block, framework.Quote(path)))
 		if punch.Err != nil {
-			// Rule 9: an operation the protocol does not define is recorded,
-			// not failed. On a 4.1 mount this is the expected branch, and it is
+			// An operation the protocol does not define is recorded, not
+			// failed: DEALLOCATE is NFSv4.2 (RFC 7862) and preflight pins
+			// vers=4.1. On a 4.1 mount this is the expected branch, and it is
 			// the refusal of the operation rather than of the flag, because the
 			// probe above established that -p parses.
 			t.Logf("the hole punch was refused on this %s mount, which is the documented answer: "+

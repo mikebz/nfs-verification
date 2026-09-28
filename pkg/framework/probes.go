@@ -117,9 +117,10 @@ func (f *Framework) probeToolPresent(ctx context.Context, pod, tool string) *Too
 // The two refusals are not the same answer and must not be reported as one. The
 // busybox fallocate applet parses -l and -o only: -p appears in its own usage
 // comment and not in its option string, so on a stock image the flag is
-// rejected by the tool whatever the mount underneath it is. That is rule 8, a
-// missing tool, and reports blocked. Only a -p that parses and is then refused
-// by the filesystem is rule 9, an operation the protocol does not define.
+// rejected by the tool whatever the mount underneath it is. That is a missing
+// tool, and reports blocked. Only a -p that parses and is then refused by the
+// filesystem is an operation the protocol does not define, which DATA-11
+// records rather than fails.
 //
 // The probe runs on the pod's own filesystem, never on the share, so that the
 // answer is about the applet alone. A local filesystem that refuses the punch
