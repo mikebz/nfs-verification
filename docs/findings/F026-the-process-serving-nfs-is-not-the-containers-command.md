@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-19
-Updated: 2026-09-19
+Updated: 2026-09-27
 
 
 **Found:** 2026-09-18, GKE cluster `gke-w2`, Kubernetes v1.37.0-gke.2941000,
@@ -154,3 +154,25 @@ package one, and the restart-in-place it provides is the reason CHAOS-01's
 recovery here is 1m33s rather than a pod restart. The cases that were blocked
 were blocked by the harness, not by the server, and the test plan's record of
 them as a deployment property was wrong.
+
+### Updated 2026-09-27
+
+**The fix held on both deployments.** In six whole-suite runs on 2026-09-25,
+three on `gke-w1` and three on `gke-w2` (`w{1,2}-e2e-run{1,2,3}-20260925-*`),
+preflight named `ganesha.nfsd` as the process holding 2049 every time. CHAOS-01,
+DATA-12 and DATA-13 passed 18 of 18. CHAOS-01 recovered in 92s in four runs
+and 107s in two, and the DATA pair in 92 to 93s. That is grace plus a respawn
+(see #104), not a pod restart.
+
+**The lesson reached CHAOS-01 and not the rest of the harness.** The two things
+this entry says are wrong about a supervised server are still assumed in three
+places:
+
+| Where | Assumes | Consequence | Tracked |
+|---|---|---|---|
+| `watchServerRestarts` / `assertNoRestart` in `test/e2e/helpers_test.go` | the container restart count sees the server die | the `server-did-not-restart` subtests of PROV-02, PROV-09, PROV-10, PROV-11 and DATA-10 cannot fail on a respawned `ganesha.nfsd` | #97 |
+| `framework.ContainerCaps`, read by SEC-09 | PID 1 is the server | SEC-09 asserts on the supervisor's capabilities. `ganesha.nfsd` drops `CAP_SYS_RESOURCE` at start on `gke-w2`, so the two differ | #98 |
+| DATA-12, DATA-13 | the kill hit the serving process | neither makes CHAOS-01's before and after pid check. The comment that points at #90 for this is stale, because #90 was about something else and is closed | #99 |
+
+None of these changes a verdict today. They are greens that could not have been
+reds, which is the kind of result this suite is built not to report.
