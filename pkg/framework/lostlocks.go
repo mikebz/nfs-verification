@@ -48,7 +48,16 @@ var lostLocksPattern = regexp.MustCompile(`NFS: (\S+): lost (\d+) locks$`)
 // report that arrived while an old identical one rotated out of the buffer; it
 // then returns nothing, which leaves a caller with the less specific message
 // rather than a wrong one.
+//
+// An empty before returns nothing. A booted kernel's buffer is never empty, so
+// an empty read is a read that failed, and Agent.Dmesg ends in "|| true", so it
+// can fail without an error. Treating it as a baseline would make every stale
+// report in after look new, which is the misattribution the window exists to
+// prevent.
 func NewLostLocks(before, after string) []LostLocks {
+	if strings.TrimSpace(before) == "" {
+		return nil
+	}
 	seen := map[string]int{}
 	for _, line := range strings.Split(before, "\n") {
 		if _, ok := parseLostLocks(line); ok {

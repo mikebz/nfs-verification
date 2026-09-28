@@ -774,6 +774,15 @@ func readKernelBaseline(ctx context.Context, t *testing.T, f *framework.Framewor
 				"reported without saying whether its reclaim was refused", node, err)
 			continue
 		}
+		// Agent.Dmesg ends in "|| true", so a failed read can come back empty
+		// with no error. Left out rather than stored, though NewLostLocks also
+		// refuses an empty baseline, so the log says the check was not made.
+		if strings.TrimSpace(out) == "" {
+			t.Logf("the ring buffer on %s read back empty before the fault, which a booted kernel's never "+
+				"is, so the read failed. A lock lost on that node will be reported without saying whether "+
+				"its reclaim was refused", node)
+			continue
+		}
 		b[node] = out
 	}
 	return b
@@ -781,16 +790,19 @@ func readKernelBaseline(ctx context.Context, t *testing.T, f *framework.Framewor
 
 // lockLossCause says why a lock held on node was found free after a failover,
 // for a failure message. Where node's kernel has logged a lost-locks report
-// since the baseline, the holder's reclaim was refused and the message says so;
-// otherwise it returns fallback unchanged, because a lock found free with no
-// such report is the worse case and must keep reading as one.
+// since the baseline, the message says that node's client had a reclaim
+// refused in this failover; otherwise it returns fallback unchanged, because a
+// lock found free with no such report is the worse case and must keep reading
+// as one.
 //
-// What the report does not settle, the message does not claim. The Linux client
-// prints the same line for a reclaim refused because grace had ended, which RFC
-// 8881 Section 8.4.2.1 allows and F-028 found, and for one refused because a
-// conflicting lock had already been granted, which it does not. The server's
-// record of when grace ended is what tells those apart, and the harness cannot
-// yet read it (F-022, #21).
+// What the report does not settle, the message does not claim. The report is
+// per node and per server, shared by every pod on the node, and counts locks
+// without naming them, so it does not prove this lock was among them. And the
+// Linux client prints the same line for a reclaim refused because grace had
+// ended, which RFC 8881 Section 8.4.2.1 allows and F-028 found, and for one
+// refused because a conflicting lock had already been granted, which it does
+// not. The server's record of when grace ended is what tells those apart, and
+// the harness cannot yet read it (F-022, #21).
 func (b kernelBaseline) lockLossCause(ctx context.Context, t *testing.T, f *framework.Framework,
 	node, fallback string) string {
 	t.Helper()
@@ -819,13 +831,15 @@ func (b kernelBaseline) lockLossCause(ctx context.Context, t *testing.T, f *fram
 		quoted[i] = fmt.Sprintf("%q", l.Line)
 	}
 	p := profile(t)
-	return fmt.Sprintf("The kernel on %s logged %s after the fault, which is its NFS client reporting that "+
-		"the server refused its reclaim: the holder did not keep this lock, and nothing told the application. "+
-		"A reclaim that reaches the server after grace has ended is refused lawfully (RFC 8881 Section "+
-		"8.4.2.1), which is F-028 in docs/findings.md; grace on the %s profile is %s. "+
-		"The kernel prints the same line for a reclaim refused because a conflicting lock was granted "+
-		"during grace, which is not lawful, and the server's log of when grace ended is what tells the two "+
-		"apart. Either way the lock did not survive the failover on this deployment",
+	return fmt.Sprintf("The kernel on %s logged %s after the fault: the NFS client on that node, which every "+
+		"pod there shares, reports that the server refused its reclaim of that many locks, and nothing told "+
+		"the application. The line does not name the locks, so it does not prove this one was among them; "+
+		"it does say the holder's node lost locks at reclaim in this failover. A reclaim that reaches the "+
+		"server after grace has ended is refused lawfully (RFC 8881 Section 8.4.2.1), which is F-028 in "+
+		"docs/findings.md; grace on the %s profile is %s. The kernel prints the same line for a reclaim "+
+		"refused because a conflicting lock was granted during grace, which is not lawful, and the server's "+
+		"log of when grace ended is what tells the two apart. Either way this lock did not survive the "+
+		"failover on this deployment",
 		node, strings.Join(quoted, " and "), p.Name, p.Grace)
 }
 
@@ -856,8 +870,8 @@ func (b kernelBaseline) lockLossCause(ctx context.Context, t *testing.T, f *fram
 //  2. Take disjoint byte ranges of one further file, one from each client.
 //  3. Confirm every lock excludes the other client before anything is injured,
 //     so a case that was broken from the start cannot pass. Read both nodes'
-//     kernel ring buffers, so a failure can tell a holder's refused reclaim
-//     from a lock taken with no refusal reported (F-028).
+//     kernel ring buffers, so a failure can tell a holder node whose reclaims
+//     were refused from one that reported no refusal (F-028).
 //  4. Delete the server pod and assert the ordinary recovery.
 //  5. Assert every whole-file holder still holds its lock, and every probe from
 //     the other node is still refused. Report the reclaimed fraction.
@@ -866,9 +880,9 @@ func (b kernelBaseline) lockLossCause(ctx context.Context, t *testing.T, f *fram
 //     refused on both, and that each holder's node agrees.
 //
 // Where a lock is found free, the failure names the holder's node and quotes
-// any "lost N locks" line its kernel logged after the fault. That line says the
-// reclaim was refused, not why, so the message does not decide between a late
-// reclaim and a conflicting grant for it; the assertion is the same either way.
+// any "lost N locks" line its kernel logged after the fault. That line says
+// the node's client had reclaims refused, not which locks and not why, so the
+// message claims neither; the assertion is the same either way.
 func TestChaosLockReclaimAcrossFailover(t *testing.T) {
 	f := framework.New(t, "CHAOS-06")
 	ctx, cancel := caseCtx(t, 45*time.Minute)

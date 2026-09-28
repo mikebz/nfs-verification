@@ -34,6 +34,7 @@ const (
 //     stale.
 //  3. A second report with the same wording as an old one is still new.
 //  4. The unstamped format parses, and the neighbouring NFS lines do not.
+//  5. An empty baseline attributes nothing.
 func TestNewLostLocksWindow(t *testing.T) {
 	// 1. What each node's buffer looked like around the fault in F-028.
 	writerBefore := idResolver + "\n" + lostOneLock + "\n"
@@ -65,10 +66,19 @@ func TestNewLostLocksWindow(t *testing.T) {
 
 	// 4. dmesg without -T, and lines that must not count.
 	raw := "[1234567.891011] NFS: nfs.example.internal: lost 3 locks"
-	if got := NewLostLocks("", raw); len(got) != 1 || got[0].Count != 3 || got[0].Server != "nfs.example.internal" {
+	if got := NewLostLocks(idResolver, raw); len(got) != 1 || got[0].Count != 3 || got[0].Server != "nfs.example.internal" {
 		t.Errorf("the unstamped-by-date format did not parse: %+v", got)
 	}
-	if got := NewLostLocks("", idResolver+"\n"+unhandledErr+"\n"); len(got) != 0 {
+	if got := NewLostLocks(idResolver, idResolver+"\n"+unhandledErr+"\n"); len(got) != 0 {
 		t.Errorf("an NFS line that is not a lost-locks report was taken for one: %+v", got)
+	}
+
+	// 5. An empty baseline is a failed read, since Agent.Dmesg can return
+	// nothing without an error. Against it, the writer node's stale report
+	// would read as new.
+	for _, empty := range []string{"", "\n", "  \n"} {
+		if got := NewLostLocks(empty, writerAfter); len(got) != 0 {
+			t.Errorf("an empty baseline %q made a stale report read as new: %+v", empty, got)
+		}
 	}
 }
