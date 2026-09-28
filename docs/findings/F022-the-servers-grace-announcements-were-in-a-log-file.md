@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-14
-Updated: 2026-09-14
+Updated: 2026-09-27
 
 
 **Found:** 2026-09-13, hand probes against GKE cluster `gke-w1` while designing
@@ -10,7 +10,8 @@ the security cases, `nfs-server-provisioner` v4.0.8 in namespace
 `nfs-provisioner`.
 
 **Severity:** F-008 concluded from an absence, and the absence was in the wrong
-place. Two cases are blocked on a signal that exists.
+place. Two cases cannot reach a signal that exists: OBS-03 fails for want of it
+and CHAOS-07 reports blocked.
 
 ### What happened
 
@@ -49,6 +50,35 @@ config format. The target is a Kubernetes-native NFS server, whichever one it is
 
 ### What it means for the system under test
 
-OBS-03 and CHAOS-07 are blocked by a logging configuration, not by a server that
-keeps its grace period secret. An operator who wants grace visible can point the
+OBS-03 fails and CHAOS-07 reports blocked because of a logging configuration,
+not because the server keeps its grace period secret. An operator who wants grace visible can point the
 daemon's log at stdout; nothing about the server itself has to change.
+
+### Updated 2026-09-27
+
+**Confirmed on both deployments.** Six whole-suite runs on 2026-09-25, three on
+`gke-w1` (upstream v4.0.8) and three on `gke-w2` (Ganesha V15.3-mb), each found
+a grace entry in `/export/ganesha.log` for every server restart, 94 in all, and
+an exit for every one except the single window a second restart cut short. The
+lines were `nfs_start_grace … NFS Server Now IN GRACE, duration 90` and
+`nfs_lift_grace_locked … NFS Server Now NOT IN GRACE`, with a
+`check grace:reclaim complete(n) clid count(m)` line every ten seconds between
+them. OBS-03 failed and CHAOS-07 was blocked in all six runs, as above.
+
+The same file also completed the account of a CHAOS-06 failure (#100). The
+bundle had the client's side: the holder node's kernel logged `lost 2 locks`,
+so its reclaim was refused. It did not have the server's side. The server log
+supplied that: when grace began and ended, and how many clients had reclaimed
+by then. Neither source alone says the reclaim was late. Together they do.
+
+**A second channel exists on `gke-w2`.** With its metrics exposer switched on
+(F-023), the server publishes `compound__latency_*` series labelled by result.
+`status="NFS4ERR_GRACE"` is among the labels present in OBS-07's scrape before
+its restart, left there by the chaos cases' earlier failovers, and absent from
+the scrape right after it (F-025). That counts operations refused because of
+grace. It does not mark when grace began or ended, and no convention names it,
+so it does not change the case for reading the log. It is worth knowing it is
+there.
+
+Still nothing reads either. How a case may read a file inside the export is
+the decision to settle before implementing, and #21 depends on it.
