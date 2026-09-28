@@ -77,8 +77,8 @@ the server restarted only when its next lease renewal or RPC fails, and with a
 this one being later than the rest. One more fact, from a single sample: the
 verifier's node carries 2,047 stacked `/run/systemd/resolve` mounts left over
 from F-005, which the other two nodes do not. That is recorded, not argued. The
-server held four client records for three nodes. That is why grace ran to its
-timer rather than ending early, but it has nothing to do with the verifier's
+server held four client records for three nodes (F-029). That is why grace ran
+to its timer rather than ending early, but it has nothing to do with the verifier's
 reclaim being refused.
 
 ### What changed
