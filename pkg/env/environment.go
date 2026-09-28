@@ -5,6 +5,7 @@ package env
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -75,7 +76,11 @@ type NodeLossConfig struct {
 
 // Environment is the full record written to artifacts/<run-id>/environment.json.
 type Environment struct {
-	RunID     string    `json:"runId"`
+	// RunID is the run the record belongs to. In a run's directory that is
+	// the run itself; in the preflight cache it is the run that discovered it.
+	RunID string `json:"runId"`
+	// Timestamp is when discovery ran, which on a reused result predates the
+	// run whose directory holds the record.
 	Timestamp time.Time `json:"timestamp"`
 
 	Context           string     `json:"context"`
@@ -132,11 +137,56 @@ func (e *Environment) WriteTo(path string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	b, err := json.MarshalIndent(e, "", "  ")
+	b, err := e.encode()
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, append(b, '\n'), 0o644)
+	return os.WriteFile(path, b, 0o644)
+}
+
+// Create serializes the environment to path only if nothing is there yet, and
+// never exposes a partial record. The bytes go to a temporary file in the same
+// directory first, and a hard link publishes it under path: the link fails if
+// path exists, so of two writers racing for it exactly one wins, and a reader
+// sees either no record or the whole of one. The loser gets an error wrapping
+// fs.ErrExist and the winner's file is untouched. A write that fails before the
+// link leaves nothing at path. The one error that can follow publication is
+// failing to remove the temporary file: the whole record is then at path and
+// the error is still returned, naming the stray file, rather than discarded.
+//
+// O_EXCL alone reserves the name before the bytes are in it, and a split run
+// started in parallel on one cluster would read the half-written record and
+// stop for no reason.
+func (e *Environment) Create(path string) error {
+	b, err := e.encode()
+	if err != nil {
+		return err
+	}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, ".environment-*.json")
+	if err != nil {
+		return err
+	}
+	_, writeErr := tmp.Write(b)
+	if err := errors.Join(writeErr, tmp.Close()); err != nil {
+		return errors.Join(err, os.Remove(tmp.Name()))
+	}
+	if err := os.Chmod(tmp.Name(), 0o644); err != nil {
+		return errors.Join(err, os.Remove(tmp.Name()))
+	}
+	return errors.Join(os.Link(tmp.Name(), path), os.Remove(tmp.Name()))
+}
+
+// encode is the one serialization both writers use.
+func (e *Environment) encode() ([]byte, error) {
+	b, err := json.MarshalIndent(e, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return append(b, '\n'), nil
 }
 
 // Load reads an environment record back, for reruns that skip discovery.
