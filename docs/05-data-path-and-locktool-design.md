@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-11
-Updated: 2026-09-17
+Updated: 2026-09-28
 Status: shipped, delivery steps 1 ([PR #1](https://github.com/mikebz/nfs-verification/pull/1)),
 2 ([PR #3](https://github.com/mikebz/nfs-verification/pull/3)),
 2b ([PR #4](https://github.com/mikebz/nfs-verification/pull/4)),
@@ -260,20 +260,24 @@ profile-driven timing) live in [`01-test-plan.md`](01-test-plan.md) Section 4.1.
 - **Steps**:
   1. Start write workload generating 1 record/s with `conv=fsync`.
   2. Workload attempts at least 30 records, requiring at least 10 committed records (`minDurabilitySet: 10`) before fault injection.
-  3. Locate server process PID on host node via `ServerTarget` and send `SIGKILL`.
-  4. Wait for client I/O to recover (outage measured as silence gap; recovery timing owned by `CHAOS-01`).
-  5. Run content-verifying sweep from an independent worker node across all records committed before fault.
-  6. Assert 100% of committed records return verdict `correct`. Fail on `absent`, `short`, or `wrong`.
+  3. Observe the process holding the listening socket in the server pod; report `blocked` if it cannot be named or is not the process preflight recorded, which is the name the kill is aimed by.
+  4. Locate server process PID on host node via `ServerTarget` and send `SIGKILL`.
+  5. Wait for client I/O to recover (outage measured as silence gap; recovery timing owned by `CHAOS-01`).
+  6. Confirm a different pid now holds the listening socket. If the same one does, or none does, fail and stop there: the sweep is not run across a kill that was not confirmed to replace the server.
+  7. Run content-verifying sweep from an independent worker node across all records committed before fault.
+  8. Assert 100% of committed records return verdict `correct`. Fail on `absent`, `short`, or `wrong`.
 
 ### DATA-13: Uncommitted durability across server SIGKILL
 - **Steps**:
   1. Start write workload generating 1 record/s without `fsync` (`NoFsync: true`).
   2. Workload attempts at least 30 records before fault.
-  3. Send `SIGKILL` to server process on host node.
-  4. Wait for client I/O to recover.
-  5. Run content-verifying sweep across all attempted records from independent worker node.
-  6. Record number of `absent` and `short` records as lawful uncommitted write loss.
-  7. Fail only if any record returns verdict `wrong` (corrupted bytes).
+  3. Observe the serving process, as in `DATA-12` step 3.
+  4. Send `SIGKILL` to server process on host node.
+  5. Wait for client I/O to recover.
+  6. Confirm a different pid is serving, as in `DATA-12` step 6.
+  7. Run content-verifying sweep across all attempted records from independent worker node.
+  8. Record number of `absent` and `short` records as lawful uncommitted write loss.
+  9. Fail only if any record returns verdict `wrong` (corrupted bytes).
 
 ## 6. DATA-14 deferral rationale
 
@@ -357,6 +361,14 @@ The design for `DATA-14` is preserved for `SCALE-07`: one job per pod over an is
   triage that starts from the second and checks it against the first is the point.
   The size cap and the one-file rule are in the test plan's harness design
   section, since they hold for any case.
+- **DATA-12 and DATA-13 now confirm their kill landed.** They inject the same
+  SIGKILL as CHAOS-01 but made neither of its checks: that the process about to
+  be signalled is the one holding the listening socket, and that a different pid
+  holds it afterwards. Their verdicts rested on a fault nothing confirmed had
+  happened, on any server. Both checks are now helpers the three cases share
+  ([#99](https://github.com/mikebz/nfs-verification/issues/99)), and the rule is
+  in the test plan's harness design section, since it holds for any case that
+  kills the server in place.
 
 Still open: whether `locktool` should grow a `dio` subcommand if real images turn
 out not to carry `oflag=direct`, and whether any server reclaims a sub-file range
