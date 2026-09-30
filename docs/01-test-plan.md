@@ -548,7 +548,7 @@ Each maps to a real reported defect class, not speculation.
 | Failover measured in hundreds of seconds | SLO table, CHAOS-01 through CHAOS-03 |
 | Unbounded memory growth to OOM under small-file writes | SCALE-04, OBS-05 |
 | Use-after-free in directory-chunk reuse during READDIR under cache pressure | DATA-10 |
-| Crash on the delegation return path | CHAOS-08, core-dump blanket rule |
+| Crash on the delegation return path | CHAOS-18, core-dump blanket rule |
 | Lock acquisition failure tied to open-owner state | SEC-07, DATA-06 |
 | v4 clients mapping local IDs to `nobody` | SEC-01 |
 | Per-client export rules degrading to global access behind a proxy | SEC-05 for the access-control consequence, SEC-04 for the state-isolation one |

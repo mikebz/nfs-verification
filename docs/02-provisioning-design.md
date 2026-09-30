@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-14
-Updated: 2026-09-17
+Updated: 2026-09-30
 Status: shipped, delivery steps 1 ([PR #1](https://github.com/mikebz/nfs-verification/pull/1)),
 2 ([PR #3](https://github.com/mikebz/nfs-verification/pull/3)),
 and 5 ([PR #10](https://github.com/mikebz/nfs-verification/pull/10)).
@@ -60,7 +60,7 @@ fixtures:
 - **Volume binding mode handling (`pkg/framework/pvc.go`)**:
   StorageClasses configure either `VolumeBindingImmediate` or `VolumeBindingWaitForFirstConsumer`.
   Under `WaitForFirstConsumer`, an unbound claim never reaches `Bound` phase until a pod requesting it is
-  scheduled onto a node ([F-002](findings.md)). The harness inspects the StorageClass binding mode and
+  scheduled onto a node ([storage classes](https://kubernetes.io/docs/concepts/storage/storage-classes/)). The harness inspects the StorageClass binding mode and
   automatically schedules consumer pods prior to awaiting the `Bound` condition.
 - **Teardown ordering and claim retention (`pkg/framework/framework.go`)**:
   To protect worker nodes from catastrophic NFS wedging, harness teardown (`DeleteCaseObjects`) enforces a strict invariant:
@@ -270,7 +270,7 @@ malformed enough to matter cannot be mounted, which the case already requires.
      object the apiserver stored, which is the stronger check. A name built short would otherwise pass
      every later step while testing nothing.
   3. Start a writer and a reader on two nodes **without waiting for either**. The claim needs a
-     consumer before a `WaitForFirstConsumer` class will bind it ([F-002](findings.md)), but waiting
+     consumer before a `WaitForFirstConsumer` class will bind it ([storage classes](https://kubernetes.io/docs/concepts/storage/storage-classes/)), but waiting
      for the pods here would spend the pod-ready timeout on a claim that never bound and report a pod
      failure instead of the provisioning verdict in step 4.
   4. Wait for the claim to bind. A claim that never binds is the failure the case exists to report:
@@ -304,7 +304,7 @@ malformed enough to matter cannot be mounted, which the case already requires.
 - **Pod-first scheduling for WaitForFirstConsumer**: Under `volumeBindingMode: WaitForFirstConsumer`,
   the Kubernetes PV controller does not bind claims until pod scheduling constraints are evaluated.
   In cases mounting storage (`PROV-01`, `PROV-02`, `PROV-03`, etc.), the harness pairs claim creation
-  with consumer pod creation before checking bind status ([F-002](findings.md)). Churn testing (`PROV-09`)
+  with consumer pod creation before checking bind status ([storage classes](https://kubernetes.io/docs/concepts/storage/storage-classes/)). Churn testing (`PROV-09`)
   exercises raw control-plane PVC creation/deletion cycles directly without consumer pods.
 - **Unmount confirmation precedes deletion**: Storage Object in Use Protection prevents premature API
   deletion, but client kernel threads hang if the export disappears while mounted. Teardown waits for
@@ -321,10 +321,9 @@ malformed enough to matter cannot be mounted, which the case already requires.
 
 - **[F-001](findings.md) (Unmount before PVC deletion)**: Two ordinary API calls in the wrong order
   (deleting a claim while a pod still mounts it) cause uninterruptible sleep on client nodes under `hard` NFSv4.1 mounts.
-- **[F-002](findings.md) (WaitForFirstConsumer claims stay Pending)**: A claim using `WaitForFirstConsumer`
-  remains `Pending` indefinitely unless a consuming pod is created to drive node placement.
-- **[F-003](findings.md) (Retain unproven claims in teardown)**: When unmount cannot be confirmed,
-  teardown retains the PVC and PV rather than forcing deletion and wedging client nodes.
+- **[F-003](findings.md) (A broken `umount.nfs` wrapper on GKE)**: Every pod holding the share stays
+  `Terminating`, which teardown treats as a node that stopped answering, so it keeps the claim rather than
+  deleting it. The retention rule itself is F-001's follow-up.
 - **[F-004](findings.md) (StorageClass advertises expansion that driver cannot perform)**: In-cluster
   `nfs-server-provisioner` advertises `allowVolumeExpansion: true`, but attempts to expand claims fail or wedge.
   `PROV-04` and `PROV-11` report failures against this deployment as documented findings.

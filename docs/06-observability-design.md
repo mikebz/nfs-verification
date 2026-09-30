@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-11
-Updated: 2026-09-28
+Updated: 2026-09-30
 Status: **in progress.** Delivery step 7 (OBS-06 shipped in [PR #29](https://github.com/mikebz/nfs-verification/pull/29);
 OBS-07 shipped in step 7 and run against `gke-w1` and `gke-w2`, red on both as shipped ([F-023](findings.md)),
 briefly green with Ganesha's exposer enabled by hand and falsely so ([F-024](findings.md)), and red again
@@ -26,7 +26,7 @@ documenting OBS-04.
 
 **The suite verifies what the deployment publishes, never the alert rules.**
 
-Test plan Section 3.5 words several of its cases as "an alert fires". An alert is a
+Test plan Section 3.5 once worded several of its cases as "an alert fires". An alert is a
 rule somebody wrote: a threshold, a duration, a severity, and a routing policy,
 all organization-specific. A suite asserting on them would fail a healthy storage
 system for a threshold set differently, and would have to find or install a
@@ -211,7 +211,7 @@ specific to the Observability test group:
   - Reads `container.memory.workingSetBytes` from the Kubelet Stats Summary via `nodes/proxy` (`pkg/framework/kubeletstats.go`).
   - Applies a bounded metadata workload (creating 1,000 files) and asserts that the working set gauge moves.
   - **Never manufactures an OOMKill**: deliberately exhausting memory would crash cluster storage and
-    take down unrelated workloads (Rule 7).
+    take down unrelated workloads.
 
 ### OBS-06: Volume near capacity (Control plane agreement and quota check)
 - **Problem**: Storage alerts rely on the CSI driver publishing accurate volume usage to the kubelet.
