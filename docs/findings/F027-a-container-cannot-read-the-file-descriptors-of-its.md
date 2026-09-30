@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-21
-Updated: 2026-09-27
+Updated: 2026-09-30
 
 
 **Found:** 2026-09-20, GKE cluster `gke-w2`, Kubernetes v1.37.0-gke.3165000,
@@ -127,5 +127,5 @@ check confirmed a replaced process six times. No discovery reported blocked.
 The capability difference in the table above shows up in the server's own log
 on `gke-w2`, at every start: `lower_my_caps … CAP_SYS_RESOURCE was successfully
 removed for proper quota management in FSAL`. It remains beside the point for
-discovery, as this entry says. It matters for SEC-09, which reads PID 1's set
-(#98).
+discovery, as this entry says. It mattered for SEC-09, which read PID 1's set
+until #98 and now reads the server's (F-026, updated 2026-09-30).

@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-19
-Updated: 2026-09-28
+Updated: 2026-09-30
 
 
 **Found:** 2026-09-18, GKE cluster `gke-w2`, Kubernetes v1.37.0-gke.2941000,
@@ -188,3 +188,32 @@ in the test plan's harness design section. Run twice each on `gke-w1` on
 2026-09-28 (`w1-pr99-*` and, after review made the after check stop the case,
 `w1-pr99r2-*`): all six passed, each observing the serving process before the
 kill and a new pid serving after it.
+
+### Updated 2026-09-30
+
+**The second row is closed.** SEC-09 now reads two processes, one per question
+(#98). The server is whatever holds 2049, named the way CHAOS-01 names it, and
+its set is read from its node through the node agent, after checking that the
+pid still has the name discovery saw and sits in the server pod's cgroup. The
+container's PID 1 is still read, but as the witness for what the runtime
+delivered, which is the one thing PID 1 is good for.
+
+The difference was not cosmetic. Read through the node agent on 2026-09-30:
+
+| | PID 1 `nfs-provisioner` | `ganesha.nfsd` permitted | `ganesha.nfsd` bounding |
+|---|---|---|---|
+| `gke-w1`, Ganesha 4.0.8 | `a90425ff` | `a90425ff` | `a90425ff` |
+| `gke-w2`, Ganesha 15.3-mb | `a90425ff` | `a80425ff` | `a90425ff` |
+
+Both server pods declare `DAC_READ_SEARCH` and `SYS_RESOURCE`. On `gke-w2` the server
+holds one of them and the old case could not have seen it. What it means for the
+verdict is the decision the fix had to make, and it is in
+[doc 07](../07-security-design.md), SEC-09: a declared capability PID 1 does not
+hold was taken by the platform and fails; one the server gave up after the
+platform delivered it is recorded. Asserting the server's own set against the
+declaration would have turned `gke-w2` red for `ganesha.nfsd` lowering its own
+privileges, which is the plan's "no more", not a breach of it.
+
+Run with `make test-case CASE=TestSecServerCapabilities` on `gke-w1` and `gke-w2`
+(`w{1,2}-issue98-sec09-*`): both pass. `gke-w2`'s run records `SYS_RESOURCE` as
+dropped by the server; `gke-w1`'s records nothing dropped.

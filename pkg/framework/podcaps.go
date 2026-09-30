@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 )
@@ -17,8 +18,11 @@ import (
 // server that runs and then fails the operations needing that capability, with
 // EPERM, at the point a client asks for them.
 //
-// So the declared set is read from the API and the effective set from the
-// process, and the case compares them.
+// So the declared set is read from the API and the runtime sets from two
+// processes, because they answer two questions. The container's PID 1 is what
+// the runtime started, so its set is what the platform delivered. The process
+// holding the NFS socket is the server, and its set is what the server actually
+// holds, which on a supervised server is not PID 1's (F-026, #98).
 
 // capNames maps a capability bit to its name, from capabilities(7). The list
 // stops where the kernel's does; a bit beyond it is rendered numerically rather
@@ -75,6 +79,36 @@ func HasCap(mask uint64, name string) bool {
 	return false
 }
 
+// CapGaps sorts the declared capabilities the server does not hold by where
+// each one went missing, because the two places belong to different people.
+//
+// Stripped is what the container's first process was never given, so the
+// platform took it between the spec and the runtime: an admission policy, a
+// restricted bounding set, or a runtime default such as a non-root user with no
+// ambient set. That is SEC-09's failure. The one thing the witness cannot rule
+// out is a first process that dropped the capability itself before the case
+// read it, and the case's failure message says so. Dropped is what the
+// platform delivered and the server process no longer holds, so something
+// inside the container gave it up, the server or its supervisor. That is the
+// server's own choice, and on gke-w2 it is ganesha.nfsd lowering
+// CAP_SYS_RESOURCE at start (#98).
+//
+// Both are judged on the permitted set rather than the effective one. A process
+// may lower a capability from its effective set and raise it again around the
+// call that needs it; only one gone from the permitted set is gone for good
+// (capabilities(7)).
+func CapGaps(declared []string, delivered, held CapSet) (stripped, dropped []string) {
+	for _, want := range declared {
+		switch {
+		case !HasCap(delivered.Permitted, want):
+			stripped = append(stripped, want)
+		case !HasCap(held.Permitted, want):
+			dropped = append(dropped, want)
+		}
+	}
+	return stripped, dropped
+}
+
 // ParseProcStatus reads the capability masks out of /proc/<pid>/status.
 //
 // A status file with no Cap lines at all is an error rather than an empty set:
@@ -120,27 +154,202 @@ func ParseProcStatus(contents string) (CapSet, error) {
 	return caps, nil
 }
 
-// ContainerCaps reads the capability set of a container's PID 1.
+// ContainerCaps reads the capability set of a container's PID 1, which is the
+// process the runtime started and so the witness for what the platform
+// delivered to the container.
 //
-// PID 1 rather than the exec'd shell: the shell inherits the container's set,
-// which is usually the same, but the process under test is the server and a
-// difference between the two is worth seeing rather than assuming away.
-func ContainerCaps(ctx context.Context, c *Client, pod *corev1.Pod) (CapSet, error) {
-	container := ""
-	if len(pod.Spec.Containers) > 0 {
-		container = pod.Spec.Containers[0].Name
+// It is not the server. On a supervised server PID 1 is the supervisor and the
+// process serving NFS is its child, with a set of its own: on gke-w2,
+// ganesha.nfsd drops CAP_SYS_RESOURCE at start and nfs-provisioner, PID 1,
+// keeps it (F-026, #98). ServerProcessCaps reads the server.
+//
+// A pod sharing one process namespace between its containers has the pause
+// process as PID 1 in all of them, which would report the sandbox's set as the
+// container's. That is refused as blocked rather than read.
+func ContainerCaps(ctx context.Context, c *Client, pod *corev1.Pod, container string) (CapSet, error) {
+	if pod.Spec.ShareProcessNamespace != nil && *pod.Spec.ShareProcessNamespace {
+		return CapSet{}, Blockedf("%s/%s shares one process namespace between its containers, so PID 1 "+
+			"in container %s is the pod's sandbox rather than the process the runtime started for it, "+
+			"and what the platform delivered to that container cannot be read there", pod.Namespace, pod.Name, container)
 	}
 	r := c.Sh(ctx, pod.Namespace, pod.Name, container, "cat /proc/1/status")
 	if r.Err != nil {
-		return CapSet{}, Blockedf("reading the capability set of %s/%s: %v: %s. "+
-			"This needs exec into the server's namespace and a container with cat",
-			pod.Namespace, pod.Name, r.Err, truncate(r.Combined(), 200))
+		return CapSet{}, Blockedf("reading the capability set of PID 1 in %s/%s container %s: %v: %s. "+
+			"This needs exec into the server's container and a cat in its image",
+			pod.Namespace, pod.Name, container, r.Err, truncate(r.Combined(), 200))
 	}
 	caps, err := ParseProcStatus(r.Stdout)
 	if err != nil {
-		return CapSet{}, fmt.Errorf("reading the capability set of %s/%s: %w", pod.Namespace, pod.Name, err)
+		return CapSet{}, fmt.Errorf("reading the capability set of PID 1 in %s/%s container %s: %w",
+			pod.Namespace, pod.Name, container, err)
 	}
 	return caps, nil
+}
+
+// procStatusTimeout bounds the node read of one process. One small file pair
+// on one node; a node that cannot answer that in this long is not answering.
+const procStatusTimeout = 20 * time.Second
+
+// ProcessCaps is the capability set of one process on a node, with what
+// identifies it: the name the kernel reports and the container it runs in.
+type ProcessCaps struct {
+	// PID is the process id on the node.
+	PID int
+	// Node is where that pid lives.
+	Node string
+	// Name is the Name line of its status file, which is its comm.
+	Name string
+	// Container is the pod container whose cgroup the process is in.
+	Container string
+	Caps      CapSet
+}
+
+// ServerProcessCaps reads the capability set of the process serving NFS, from
+// the node, and names the container it runs in.
+//
+// From the node because the pid DiscoverServerProcess returns is the node's,
+// and naming the server already needed the node agent (F-027). The read is
+// checked against the process it was meant to be: the name has to be the one
+// discovery saw and the cgroup has to be one of this pod's containers, so a
+// server that restarted between the two reads, leaving its old pid to
+// something else, is an error rather than somebody else's capabilities.
+func ServerProcessCaps(ctx context.Context, agent *Agent, pod *corev1.Pod, sp ServerProcess) (ProcessCaps, error) {
+	if agent == nil {
+		return ProcessCaps{}, Blockedf("no node agent, so the capability set of %s in %s/%s cannot be read",
+			sp.Name, pod.Namespace, pod.Name)
+	}
+	if sp.PID <= 0 || sp.Node == "" {
+		return ProcessCaps{}, fmt.Errorf("the server process in %s/%s has no node pid to read (%s)",
+			pod.Namespace, pod.Name, sp)
+	}
+	readCtx, cancel := context.WithTimeout(ctx, procStatusTimeout)
+	defer cancel()
+	out, err := agent.RunScript(readCtx, sp.Node, "proc-status.sh",
+		"caps-"+strings.ToLower(Cfg().RunID), "/proc", strconv.Itoa(sp.PID))
+	if err != nil {
+		return ProcessCaps{}, fmt.Errorf("reading pid %d on %s: %w", sp.PID, sp.Node, err)
+	}
+	read, err := parseProcRead(out)
+	if err != nil {
+		return ProcessCaps{}, fmt.Errorf("reading pid %d on %s: %w", sp.PID, sp.Node, err)
+	}
+	if err := sameProcessName(read.name, sp.Name); err != nil {
+		return ProcessCaps{}, fmt.Errorf("pid %d on %s: %w", sp.PID, sp.Node, err)
+	}
+	container, err := containerOf(read.cgroup, pod.Status.ContainerStatuses)
+	if err != nil {
+		return ProcessCaps{}, fmt.Errorf("pid %d on %s is %s but not in %s/%s: %w",
+			sp.PID, sp.Node, read.name, pod.Namespace, pod.Name, err)
+	}
+	return ProcessCaps{PID: sp.PID, Node: sp.Node, Name: read.name, Container: container, Caps: read.caps}, nil
+}
+
+// procRead is what scripts/proc-status.sh printed, parsed.
+type procRead struct {
+	name   string
+	cgroup string
+	caps   CapSet
+}
+
+// parseProcRead reads the script's output. Anything short of both files and
+// the end marker is an error: a truncated exec that reads as a process holding
+// nothing is F-011's shape, and here it would report a capability as stripped.
+func parseProcRead(out string) (procRead, error) {
+	var status, cgroup []string
+	var section string
+	var sawStatus, sawCgroup, complete bool
+	var errs []string
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimRight(line, "\r")
+		switch {
+		case section == "status" && line == "==ENDSTATUS":
+			section, sawStatus = "", true
+		case section == "cgroup" && line == "==ENDCGROUP":
+			section, sawCgroup = "", true
+		case section == "status":
+			status = append(status, line)
+		case section == "cgroup":
+			cgroup = append(cgroup, line)
+		case line == "==STATUS":
+			section = "status"
+		case line == "==CGROUP":
+			section = "cgroup"
+		case strings.HasPrefix(line, "==ERROR "):
+			errs = append(errs, strings.TrimSpace(strings.TrimPrefix(line, "==ERROR ")))
+		case line == "==END":
+			complete = true
+		}
+	}
+	if len(errs) > 0 {
+		return procRead{}, fmt.Errorf("could not be read: %s", strings.Join(errs, "; "))
+	}
+	if !complete || !sawStatus || !sawCgroup {
+		return procRead{}, fmt.Errorf("the reader did not run to completion (status %v, cgroup %v, end %v), "+
+			"so an unread file would read as a process holding nothing", sawStatus, sawCgroup, complete)
+	}
+	caps, err := ParseProcStatus(strings.Join(status, "\n"))
+	if err != nil {
+		return procRead{}, err
+	}
+	var name string
+	for _, line := range status {
+		if v, ok := strings.CutPrefix(line, "Name:"); ok {
+			name = strings.TrimSpace(v)
+			break
+		}
+	}
+	if name == "" {
+		return procRead{}, fmt.Errorf("the status file carries no Name line, so which process it describes cannot be checked")
+	}
+	return procRead{name: name, cgroup: strings.Join(cgroup, "\n"), caps: caps}, nil
+}
+
+// commLen is the longest name /proc/<pid>/status reports: the kernel's comm
+// buffer is 16 bytes including its terminator (proc(5)).
+const commLen = 15
+
+// sameProcessName checks that the status file describes the process discovery
+// named. Discovery prefers argv[0]'s base name where comm was truncated, so a
+// comm of the full 15 characters matches any name it begins; anything shorter
+// has to match exactly.
+func sameProcessName(status, want string) error {
+	if status == want || (len(status) == commLen && strings.HasPrefix(want, status)) {
+		return nil
+	}
+	return fmt.Errorf("is now %q, not the %q discovery named, so the server restarted between the two reads "+
+		"and its pid belongs to something else", status, want)
+}
+
+// containerOf names the pod container whose cgroup a process is in, by finding
+// the container's runtime id in the process's cgroup path. Every runtime this
+// suite has met puts the full id in the path, whether the kubelet uses the
+// systemd or the cgroupfs driver, and matching the id rather than parsing the
+// path is what keeps this independent of which.
+//
+// A container with no id yet is skipped rather than matched: an empty id is a
+// substring of every path.
+func containerOf(cgroup string, statuses []corev1.ContainerStatus) (string, error) {
+	var matched, seen []string
+	for _, s := range statuses {
+		_, id, ok := strings.Cut(s.ContainerID, "://")
+		if !ok || id == "" {
+			continue
+		}
+		seen = append(seen, s.Name+"="+id)
+		if strings.Contains(cgroup, id) {
+			matched = append(matched, s.Name)
+		}
+	}
+	switch len(matched) {
+	case 1:
+		return matched[0], nil
+	case 0:
+		return "", fmt.Errorf("its cgroup %q names none of the pod's containers (%s)",
+			strings.TrimSpace(cgroup), strings.Join(seen, ", "))
+	default:
+		return "", fmt.Errorf("its cgroup %q names more than one of the pod's containers (%s)",
+			strings.TrimSpace(cgroup), strings.Join(matched, ", "))
+	}
 }
 
 // DeclaredCaps is what a container's spec asks for: the capabilities it adds,
@@ -153,23 +362,33 @@ type DeclaredCaps struct {
 	Privileged bool
 }
 
-// DeclaredCapsOf reads the declaration from a pod's first container, which is
-// the one every other server reader in this suite uses.
-func DeclaredCapsOf(pod *corev1.Pod) DeclaredCaps {
-	if len(pod.Spec.Containers) == 0 {
-		return DeclaredCaps{}
+// DeclaredCapsOf reads the declaration of the named container, which for
+// SEC-09 is the one the server process was found running in.
+//
+// A container the spec does not have is an error rather than an empty
+// declaration: SEC-09 checks each declared capability, so a declaration read as
+// empty is a case that passes having checked nothing.
+func DeclaredCapsOf(pod *corev1.Pod, container string) (DeclaredCaps, error) {
+	d := DeclaredCaps{Container: container}
+	var ct *corev1.Container
+	for i := range pod.Spec.Containers {
+		if pod.Spec.Containers[i].Name == container {
+			ct = &pod.Spec.Containers[i]
+			break
+		}
 	}
-	ct := pod.Spec.Containers[0]
-	d := DeclaredCaps{Container: ct.Name}
+	if ct == nil {
+		return d, fmt.Errorf("%s/%s has no container %q in its spec", pod.Namespace, pod.Name, container)
+	}
 	sc := ct.SecurityContext
 	if sc == nil {
-		return d
+		return d, nil
 	}
 	if sc.Privileged != nil {
 		d.Privileged = *sc.Privileged
 	}
 	if sc.Capabilities == nil {
-		return d
+		return d, nil
 	}
 	for _, a := range sc.Capabilities.Add {
 		d.Add = append(d.Add, string(a))
@@ -177,5 +396,5 @@ func DeclaredCapsOf(pod *corev1.Pod) DeclaredCaps {
 	for _, dr := range sc.Capabilities.Drop {
 		d.Drop = append(d.Drop, string(dr))
 	}
-	return d
+	return d, nil
 }

@@ -581,6 +581,17 @@ func podStartInterval(ctx context.Context, f *framework.Framework, pod string) (
 // spec says one thing and the process does another, and nothing reports the
 // gap; this case is where the gap gets reported.
 //
+// Two processes are read, because the question has two halves. The server is
+// whatever holds the listening socket on 2049, which on a supervised server is
+// not the container's PID 1 (F-026): the case read PID 1 until #98, and so
+// asserted on the supervisor. PID 1 is still read, for the other half: it is
+// what the runtime started, so its set is what the platform delivered. A
+// declared capability PID 1 does not hold was taken by the platform, and fails.
+// One PID 1 holds and the server does not was given up inside the container, by
+// the server or its supervisor, and is recorded: that is the server narrowing
+// itself, which is the plan's "no more" rather than a breach of it, and failing
+// it would file ganesha.nfsd's own hardening on gke-w2 as a platform defect.
+//
 // The other direction is the same question asked the other way: a privileged
 // container holds everything regardless of what the spec says, so its declared
 // set means nothing and no admission policy constrains it.
@@ -590,67 +601,112 @@ func podStartInterval(ctx context.Context, f *framework.Framework, pod string) (
 // case that failed on it would fail everywhere and say nothing.
 //
 // Steps:
-//  1. Find the server pods.
-//  2. Read the declared capabilities from the pod spec.
-//  3. Read the effective set of the container's PID 1.
-//  4. Fail on a declared capability that is not there at runtime.
+//  1. Find a ready server pod, and name the process holding its listening
+//     socket on 2049 through the node agent. Report blocked if it cannot be
+//     named: there is then no server to read.
+//  2. Read that process's capability set from its node, checking its name and
+//     that its cgroup is one of the pod's containers.
+//  3. Read that container's declared capabilities from the pod spec, and the
+//     set its PID 1 holds.
+//  4. Fail on a declared capability PID 1 does not hold. Record one the server
+//     process gave up after PID 1 was given it.
 //  5. Fail if the container is privileged.
-//  6. Record the effective set and how far it exceeds the declaration.
+//  6. Record both sets, and how far the server's exceeds the declaration.
 func TestSecServerCapabilities(t *testing.T) {
 	f := framework.New(t, "SEC-09")
+	requireCap(t, f.Caps.NodeAgent, "naming the process that serves NFS, and reading its capabilities, "+
+		"needs the privileged node agent (F-027)")
 	ctx, cancel := caseCtx(t, 10*time.Minute)
 	defer cancel()
 
 	pod := serverPodOrBlock(ctx, t, f)
-	declared := framework.DeclaredCapsOf(pod)
-	caps, err := framework.ContainerCaps(ctx, f.C, pod)
+	agent, err := framework.NodeAgent(ctx, f.C)
 	if err != nil {
-		failOrBlock(t, err, "reading the capability set of the server in %s/%s", pod.Namespace, pod.Name)
+		blocked(t, "the node agent is unavailable, so the process serving NFS in %s/%s cannot be named: %v",
+			pod.Namespace, pod.Name, err)
 	}
-	effective := framework.CapNames(caps.Effective)
-	t.Logf("%s/%s container %s declares add=%v drop=%v privileged=%v and holds %v",
-		pod.Namespace, pod.Name, declared.Container, declared.Add, declared.Drop, declared.Privileged, effective)
+	names := make([]string, 0, len(pod.Spec.Containers))
+	for _, c := range pod.Spec.Containers {
+		names = append(names, c.Name)
+	}
+	sp, err := framework.DiscoverServerProcess(ctx, f.C, agent, pod.Namespace, pod.Name, pod.Spec.NodeName,
+		names, framework.NFSPort)
+	if err != nil {
+		blocked(t, "cannot name the process serving NFS in %s/%s on %s, so there is no server whose "+
+			"capabilities to read: %v", pod.Namespace, pod.Name, pod.Spec.NodeName, err)
+	}
+	server, err := framework.ServerProcessCaps(ctx, agent, pod, sp)
+	if err != nil {
+		failOrBlock(t, err, "reading the capability set of %s", sp)
+	}
+	declared, err := framework.DeclaredCapsOf(pod, server.Container)
+	if err != nil {
+		t.Fatalf("reading what the server's container declares: %v", err)
+	}
+	delivered, err := framework.ContainerCaps(ctx, f.C, pod, server.Container)
+	if err != nil {
+		failOrBlock(t, err, "reading what the runtime delivered to %s/%s container %s",
+			pod.Namespace, pod.Name, server.Container)
+	}
+
+	held := framework.CapNames(server.Caps.Effective)
+	t.Logf("%s/%s container %s declares add=%v drop=%v privileged=%v; PID 1 holds %v; the server, %s pid %d "+
+		"on %s, holds %v", pod.Namespace, pod.Name, declared.Container, declared.Add, declared.Drop,
+		declared.Privileged, framework.CapNames(delivered.Effective), server.Name, server.PID, server.Node, held)
 	if err := f.WriteArtifact("server-capabilities.txt", []byte(fmt.Sprintf(
-		"pod: %s/%s\ncontainer: %s\ndeclared add: %v\ndeclared drop: %v\nprivileged: %v\n"+
-			"effective: %v\npermitted: %v\nbounding: %v\nambient: %v\n",
-		pod.Namespace, pod.Name, declared.Container, declared.Add, declared.Drop, declared.Privileged,
-		effective, framework.CapNames(caps.Permitted), framework.CapNames(caps.Bounding),
-		framework.CapNames(caps.Ambient)))); err != nil {
+		"pod: %s/%s\nnode: %s\ncontainer: %s\ndeclared add: %v\ndeclared drop: %v\nprivileged: %v\n\n"+
+			"server process: %s\n  effective: %v\n  permitted: %v\n  bounding: %v\n  ambient: %v\n\n"+
+			"container PID 1, what the runtime delivered:\n  effective: %v\n  permitted: %v\n  bounding: %v\n  ambient: %v\n",
+		pod.Namespace, pod.Name, server.Node, declared.Container, declared.Add, declared.Drop, declared.Privileged,
+		sp, held, framework.CapNames(server.Caps.Permitted), framework.CapNames(server.Caps.Bounding),
+		framework.CapNames(server.Caps.Ambient),
+		framework.CapNames(delivered.Effective), framework.CapNames(delivered.Permitted),
+		framework.CapNames(delivered.Bounding), framework.CapNames(delivered.Ambient)))); err != nil {
 		t.Logf("writing the capability record: %v", err)
 	}
 
-	for _, want := range declared.Add {
-		if !framework.HasCap(caps.Effective, want) {
-			t.Errorf("the server container declares %s and does not hold it at runtime (effective set "+
-				"%v). Something between the spec and the process removed it: an admission policy, a "+
-				"restricted bounding set, or a runtime default. The pod started anyway, so what an "+
-				"operator will see is the operations needing that capability failing with EPERM against "+
-				"a server that looks healthy", want, effective)
-		}
+	stripped, dropped := framework.CapGaps(declared.Add, delivered, server.Caps)
+	for _, want := range stripped {
+		t.Errorf("container %s of %s/%s on %s declares %s and its PID 1, the process the runtime started, "+
+			"does not hold it (permitted %v), so neither can the server, %s. Something between the spec and "+
+			"the process removed it: an admission policy, a restricted bounding set, or a runtime default "+
+			"such as a non-root user with no ambient set; the one alternative is that PID 1 dropped it "+
+			"itself. The pod started anyway, so what an operator will see is the operations needing that "+
+			"capability failing with EPERM against a server that looks healthy",
+			declared.Container, pod.Namespace, pod.Name, server.Node, want,
+			framework.CapNames(delivered.Permitted), server.Name)
+	}
+	for _, want := range dropped {
+		t.Logf("recorded: container %s declares %s and the runtime delivered it to PID 1, but the server, "+
+			"%s pid %d on %s, no longer holds it (permitted %v). Something inside the container gave it up, "+
+			"the server or its supervisor. That is the server narrowing its own set, not the platform "+
+			"taking it, so it is not this case's failure; it does mean the declaration asks for more than "+
+			"the server keeps", declared.Container, want, server.Name, server.PID, server.Node,
+			framework.CapNames(server.Caps.Permitted))
 	}
 	if declared.Privileged {
-		t.Errorf("the server container runs privileged, so it holds every capability the kernel has and " +
-			"nothing the platform's admission policy says constrains it. The plan's requirement for this " +
-			"case is the set it needs and no more, and privileged is the one configuration under which " +
-			"that cannot be true")
+		t.Errorf("container %s of %s/%s runs privileged, so it holds every capability the kernel has and "+
+			"nothing the platform's admission policy says constrains it. The plan's requirement for this "+
+			"case is the set it needs and no more, and privileged is the one configuration under which "+
+			"that cannot be true", declared.Container, pod.Namespace, pod.Name)
 	}
 
 	// Recorded rather than asserted: what the runtime grants by default is the
 	// platform's choice, not the server's.
-	extra := make([]string, 0, len(effective))
-	for _, have := range effective {
+	extra := make([]string, 0, len(held))
+	for _, have := range held {
 		if !containsCap(declared.Add, have) {
 			extra = append(extra, have)
 		}
 	}
 	sort.Strings(extra)
 	if len(declared.Add) > 0 && len(extra) > 0 {
-		t.Logf("recorded: the container asked for %v and holds %d more from the runtime's defaults (%v). "+
-			"Dropping ALL and adding back what it needs is what would narrow that",
+		t.Logf("recorded: the container asked for %v and the server holds %d more from the runtime's "+
+			"defaults (%v). Dropping ALL and adding back what it needs is what would narrow that",
 			declared.Add, len(extra), extra)
 	}
 	if len(declared.Add) == 0 && !declared.Privileged {
-		t.Logf("recorded: the server declares no capabilities and runs on the runtime's defaults (%v)", effective)
+		t.Logf("recorded: the server declares no capabilities and runs on the runtime's defaults (%v)", held)
 	}
 }
 

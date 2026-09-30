@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-13
-Updated: 2026-09-17
+Updated: 2026-09-30
 Status: **in review**, [PR #57](https://github.com/mikebz/nfs-verification/pull/57).
 SEC-03 to SEC-09 landed in delivery step 8; SEC-01 shipped in Step 2
 ([PR #3](https://github.com/mikebz/nfs-verification/pull/3)) and SEC-02 in Step 2b
@@ -90,8 +90,11 @@ Four readers and one probe, and nothing else:
   inside it and parsed in Go: local and peer address, port, state, with
   IPv4-mapped addresses normalised. Implementation-neutral: nothing reads an
   export config file, because that syntax is the server's, not the protocol's.
-- **The capability set.** The declared set from the server pod's spec, and the
-  effective set of its PID 1, decoded from the mask to names.
+- **The capability set.** The declared set from the server pod's spec, the set
+  of the process holding 2049, read on its node, and the set of its container's
+  PID 1, which is what the runtime delivered. Decoded from the mask to names.
+  Until #98 this read PID 1 alone, as though it were the server; SEC-09 below
+  says what changed.
 - **The volume ownership sweep.** How many files under a path have which owner
   and group, from one exec, so "nothing was chowned" is a count and not an
   impression.
@@ -309,17 +312,50 @@ instrument nobody verified is worth. The case says that it did not capture, and
 what it substituted, in the record it writes.
 
 **SEC-09: the capability set the server declared, and the one it has.** Read the
-server pod's declared capabilities and the effective set of its PID 1.
+server pod's declared capabilities, the set of the process serving NFS, and the
+set of that container's PID 1. Two processes, because the question has two
+halves and each process answers one. The server is whatever holds the listening
+socket on 2049, found and read through the node agent (F-026, F-027), and its set
+is what the server actually holds. PID 1 is what the runtime started, so its set
+is what the platform delivered.
 
 | What was found | Verdict |
 |---|---|
-| A declared capability is absent at runtime | **fail**, naming it: this is the EPERM trap the plan's row describes, and a file-handle backend without `CAP_DAC_READ_SEARCH` fails operations rather than failing to start |
+| A declared capability PID 1 does not hold | **fail**, naming it: the platform took it between the spec and the process, which is the EPERM trap the plan's row describes. A file-handle backend without `CAP_DAC_READ_SEARCH` fails operations rather than failing to start |
+| A declared capability PID 1 holds and the server process does not | **record**, naming it: something inside the container gave it up, the server or its supervisor |
 | The container is privileged | **fail**: nothing is constraining the server, so "the set it needs and no more" cannot be true |
-| Otherwise | **pass**, recording the effective set and how far it exceeds what was declared |
+| Otherwise | **pass**, recording both sets and how far the server's exceeds what was declared |
 
-The third row is a record and not an assertion on purpose. The runtime's default
-set is the platform's choice, not the server's, and a suite that failed on it
-would fail on every conformant cluster.
+Held means the permitted set, not the effective one: a process may lower a
+capability from its effective set and raise it again when it needs it, and only
+one gone from the permitted set is gone for good
+([`capabilities(7)`](https://man7.org/linux/man-pages/man7/capabilities.html)).
+
+The second row is a record and not a failure, and that is the decision in this
+case. The plan's failure is a policy stripping a capability, and a capability the
+platform delivered and the server then discarded is the opposite: the server
+narrowing its own set, which is what "no more" asks for. Failing it would report
+a server's hardening as a platform defect and point the operator at the wrong
+people. What it does say is that the declaration asks for more than the server
+keeps, so the record is where that goes. The one thing PID 1 cannot rule out as
+a witness is a first process that dropped a capability itself before the case
+read it, and the failure message says so rather than claiming the platform for
+certain.
+
+The last row's excess is a record on purpose. The runtime's default set is the
+platform's choice, not the server's, and a suite that failed on it would fail on
+every conformant cluster.
+
+**What changed after this was written.** The case shipped reading PID 1 alone and
+calling it the server, which on a supervised server it is not (F-026). It
+asserted on `nfs-provisioner` instead of `ganesha.nfsd`, and passed six runs on
+two deployments where the two differ: on `gke-w2`, Ganesha 15.3-mb lowers
+`CAP_SYS_RESOURCE` at every start, so the server holds one of its two declared
+capabilities and PID 1 holds both. #98 split the read. The verdict on each
+deployment did not change, and that is correct rather than a sign the change
+did nothing: the platform delivered both capabilities on both clusters, and
+`gke-w2`'s run now records the one its server gave up, which no earlier run
+could see.
 
 ## 6. The probe mount, and why it is safe
 
@@ -388,8 +424,10 @@ A green SEC section says: an identity written through one client is the identity
 another reads back, an owner cannot give a file away, the server distinguishes
 its clients, a stranger is refused, one client's state survives another's
 disappearance, `fsGroup` grants what it promises without rewriting the volume,
-and the server holds the capabilities it declared and no more than the platform
-gave it.
+and the platform delivered every capability the server declared.
+
+It does not say the server kept them all. A server may give up what it was
+delivered, and SEC-09 records that rather than failing on it.
 
 It does not say the export's rules are the right rules, that AUTH_SYS is
 sufficient, that traffic is confidential, or that a pod cannot impersonate
@@ -476,6 +514,11 @@ not.
 | SEC-07 | pass | the survivor kept its lock, the vanished pod's range came back in 2s, the replacement was granted it |
 | SEC-08 | pass | `sec=sys`, no `xprtsec`, no 20049, no NetworkPolicy, and 2049 reachable from a pod with no claim |
 | SEC-09 | pass | both declared capabilities held; 14 more from the runtime's defaults, recorded |
+
+SEC-09's row describes the case as it was then, reading PID 1 as though it were
+the server. Since #98 it reads the process holding 2049 as well; the verdict is
+unchanged on both reference deployments, and Section 5 has why and what the
+re-run on each recorded.
 
 SEC-05's red is the finding the phase was written to reach, and it stays red:
 the deployment cannot meet a correct assertion, which is a statement about the
