@@ -178,9 +178,18 @@ func (a *Agent) ReadFile(ctx context.Context, node, path string) (string, error)
 	return a.Run(ctx, node, "cat "+shellQuote(path))
 }
 
+// dmesgCommand reads the ring buffer with wall-clock stamps where the node's
+// dmesg can render them, and plain where it cannot: busybox dmesg has no -T.
+// Only the first attempt's stderr is discarded. When neither runs, the second
+// one's exit status and message come back as the error, because a read that
+// failed and returned nothing looks exactly like a quiet kernel otherwise. It
+// once ended in "|| true", and a node whose dmesg could not run went into the
+// failure bundle as a complete, empty kernel log (#118).
+const dmesgCommand = "dmesg -T 2>/dev/null || dmesg"
+
 // Dmesg reads the kernel ring buffer, where NFS client state actually shows up.
 func (a *Agent) Dmesg(ctx context.Context, node string) (string, error) {
-	return a.Run(ctx, node, "dmesg -T 2>/dev/null || dmesg 2>/dev/null || true")
+	return a.Run(ctx, node, dmesgCommand)
 }
 
 // Mounts parses /proc/mounts on a node.
