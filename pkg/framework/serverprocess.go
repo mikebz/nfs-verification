@@ -71,7 +71,8 @@ type ServerProcess struct {
 	PID int
 	// PIDs is every process of that name holding the socket, PID among them,
 	// sorted. A server that preforks answers from several; SEC-09 reads each,
-	// since the lowest may be a master that kept what its workers dropped.
+	// since the lowest may be a master that kept what its workers dropped, and
+	// reports blocked where they disagree.
 	PIDs []int
 	// Node is where that pid lives.
 	Node string

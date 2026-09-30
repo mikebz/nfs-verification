@@ -224,7 +224,8 @@ preflight made the reads, with `-refresh-preflight`
 (`w{1,2}-issue98-preflight-sec09-20260930-213321`, and after review
 `w{1,2}-issue98-review3-sec09-20260930-225727` and
 `w{1,2}-issue98-nodigest-sec09-20260930-232559` and
-`w{1,2}-issue98-review5-sec09-20260930-233138`). Runs on `gke-w1` fed older
+`w{1,2}-issue98-review5-sec09-20260930-233138` and
+`w{1,2}-issue98-review6-sec09-20260930-234209`). Runs on `gke-w1` fed older
 records through `-env-file` reported blocked, naming `-refresh-preflight`: one
 with no capabilities (`w1-issue98-oldrecord-sec09-20260930-213407`) and one
 with capabilities but no pod UID (`w1-issue98-nodigest-stale-sec09-20260930-232559`).

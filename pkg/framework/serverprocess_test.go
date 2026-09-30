@@ -205,10 +205,10 @@ func TestListeningInodesRefusesWhatItCannotRead(t *testing.T) {
 }
 
 // TestPickHolderKeepsEveryPreforkedHolder exists because SEC-09 reads every
-// process serving the socket and takes what all of them hold. If discovery
+// process serving the socket and refuses to judge when they disagree. If discovery
 // handed over only the lowest pid, which on a preforking server is the master,
 // the capability read would judge the master alone, and every test of the
-// intersection would still pass.
+// disagreement check would still pass.
 //
 // Steps:
 //  1. Pose the reference server with a second ganesha.nfsd holding the same

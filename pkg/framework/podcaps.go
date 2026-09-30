@@ -247,11 +247,12 @@ type ProcessCaps struct {
 // something else, is an error rather than somebody else's capabilities.
 //
 // A server that preforks holds its socket from several processes of one name,
-// and every one of them is read. What the server holds is what all of them
-// hold, so the sets are intersected: the lowest pid may be a master that kept
-// a capability the workers serving requests have dropped, and reading only it
-// would report the server holding what it does not. Processes in different
-// containers are an error, since they cannot be one server's.
+// and every one of them is read, since the lowest pid may be a master that
+// kept a capability the workers serving requests have dropped. Where they all
+// hold one set, that is the server's. Where they differ, the read reports
+// blocked rather than pick or combine: an intersection would lose the holder
+// that proves a capability reached the container, and file an in-container
+// drop as the platform's. Processes in different containers are an error.
 func ServerProcessCaps(ctx context.Context, agent *Agent, pod *corev1.Pod, sp ServerProcess) (ProcessCaps, error) {
 	if agent == nil {
 		return ProcessCaps{}, Blockedf("no node agent, so the capability set of %s in %s/%s cannot be read",
@@ -273,7 +274,7 @@ func ServerProcessCaps(ctx context.Context, agent *Agent, pod *corev1.Pod, sp Se
 		}
 		reads = append(reads, r)
 	}
-	return intersectServerReads(reads)
+	return oneServerSet(reads)
 }
 
 // readServerPID reads one of the server's processes, with the identity checks
@@ -301,10 +302,9 @@ func readServerPID(ctx context.Context, agent *Agent, pod *corev1.Pod, sp Server
 	return ProcessCaps{PID: pid, Node: sp.Node, Name: read.name, Container: container, Caps: read.caps}, nil
 }
 
-// intersectServerReads combines the reads of every process serving one socket
-// into the set the server holds: a capability counts only if every one of
-// them holds it. The result carries the lowest pid, as discovery does.
-func intersectServerReads(reads []ProcessCaps) (ProcessCaps, error) {
+// oneServerSet returns the set every process serving one socket holds, under
+// the lowest pid, or refuses when they do not hold one set.
+func oneServerSet(reads []ProcessCaps) (ProcessCaps, error) {
 	if len(reads) == 0 {
 		return ProcessCaps{}, fmt.Errorf("no server process was read")
 	}
@@ -314,11 +314,11 @@ func intersectServerReads(reads []ProcessCaps) (ProcessCaps, error) {
 			return ProcessCaps{}, fmt.Errorf("the processes holding the socket run in containers %s (pid %d) and "+
 				"%s (pid %d), so they are not one server", out.Container, out.PID, r.Container, r.PID)
 		}
-		out.Caps.Inheritable &= r.Caps.Inheritable
-		out.Caps.Permitted &= r.Caps.Permitted
-		out.Caps.Effective &= r.Caps.Effective
-		out.Caps.Bounding &= r.Caps.Bounding
-		out.Caps.Ambient &= r.Caps.Ambient
+		if r.Caps != out.Caps {
+			return ProcessCaps{}, Blockedf("the %s processes holding the socket hold different capability sets "+
+				"(pid %d permitted %v, pid %d permitted %v), so the server has no one set to judge",
+				out.Name, out.PID, CapNames(out.Caps.Permitted), r.PID, CapNames(r.Caps.Permitted))
+		}
 		if r.PID < out.PID {
 			out.PID = r.PID
 		}

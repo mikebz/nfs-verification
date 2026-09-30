@@ -382,9 +382,12 @@ field it did not list. Recording the resolved image digest as well, to catch an
 image edited in place, was tried and dropped at the owner's direction: this is a
 test suite, not a defence, and whoever edits the server mid-run can refresh
 preflight. A
-server that preforks is read in every process holding the socket, and what it
-holds is what all of them hold, so a master that kept a capability its workers
-dropped does not stand in for them. Preflight carries whether an unread set was a condition of the
+server that preforks is read in every process holding the socket, so a master
+that kept a capability its workers dropped does not stand in for them; where
+they hold different sets the case reports blocked. Intersecting them was tried
+first and dropped in review, because it loses the holder that proves a
+capability reached the container and files an in-container drop as the
+platform's. Preflight carries whether an unread set was a condition of the
 cluster or the harness failing, so the case still reports the first blocked and
 the second failed, as it did when it read the sets itself.
 

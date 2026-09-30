@@ -456,41 +456,38 @@ func TestStaleCapabilityRecordDetectsAChangedPod(t *testing.T) {
 	}
 }
 
-// TestIntersectServerReadsTakesWhatEveryProcessHolds exists because a server
-// that preforks answers from several processes, and reading only the lowest
-// pid, which is typically the master, would report the server holding a
-// capability its workers dropped.
+// TestOneServerSetRefusesHoldersThatDisagree exists because a server that
+// preforks answers from several processes. Reading only the lowest pid, the
+// master, would report what the workers dropped as held; combining them would
+// lose the holder that proves a capability reached the container, and blame
+// the platform for a drop inside it.
 //
 // Steps:
-//  1. A master holding the full gke-w1 set and a worker holding gke-w2's,
-//     without SYS_RESOURCE: the server holds the worker's set, reported under
-//     the master's pid.
-//  2. One process: its own set, unchanged.
-//  3. Two processes in different containers: an error, not one server.
-func TestIntersectServerReadsTakesWhatEveryProcessHolds(t *testing.T) {
+//  1. Two holders with gke-w2's set: that set, under the lower pid.
+//  2. A master with gke-w1's set and a worker with gke-w2's: blocked, not a
+//     set, and not a harness failure.
+//  3. Two holders in different containers: an error, not one server.
+func TestOneServerSetRefusesHoldersThatDisagree(t *testing.T) {
 	full := CapSet{Permitted: maskFull, Effective: maskFull, Bounding: maskFull}
 	lowered := CapSet{Permitted: maskNoSysResource, Effective: maskNoSysResource, Bounding: maskFull}
 	master := ProcessCaps{PID: 10, Name: "ganesha.nfsd", Container: "nfs", Caps: full}
 	worker := ProcessCaps{PID: 11, Name: "ganesha.nfsd", Container: "nfs", Caps: lowered}
 
-	got, err := intersectServerReads([]ProcessCaps{worker, master})
-	if err != nil {
-		t.Fatalf("intersecting a master and a worker: %v", err)
-	}
-	if got.Caps != lowered || got.PID != 10 {
-		t.Errorf("master and worker combined as pid %d %+v, want pid 10 %+v", got.PID, got.Caps, lowered)
-	}
-	if HasCap(got.Caps.Permitted, "SYS_RESOURCE") {
-		t.Errorf("the server reads as holding SYS_RESOURCE, which its worker dropped")
+	second := worker
+	second.PID = 12
+	got, err := oneServerSet([]ProcessCaps{second, worker})
+	if err != nil || got.Caps != lowered || got.PID != 11 {
+		t.Errorf("two agreeing holders gave pid %d %+v, %v; want pid 11 %+v", got.PID, got.Caps, err, lowered)
 	}
 
-	if one, err := intersectServerReads([]ProcessCaps{master}); err != nil || one.Caps != full {
-		t.Errorf("one process combined as %+v, %v", one, err)
+	if c, err := oneServerSet([]ProcessCaps{master, worker}); err == nil || !IsBlocked(err) {
+		t.Errorf("a master and a worker holding different sets gave %+v, %v; want blocked", c, err)
 	}
 
 	other := worker
 	other.Container = "sidecar"
-	if c, err := intersectServerReads([]ProcessCaps{master, other}); err == nil {
+	other.Caps = full
+	if c, err := oneServerSet([]ProcessCaps{master, other}); err == nil {
 		t.Errorf("processes in two containers combined as %+v rather than an error", c)
 	}
 }
