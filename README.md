@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-10
-Updated: 2026-09-28
+Updated: 2026-09-30
 
 End-to-end verification of NFS RWX persistent volumes on Kubernetes.
 
@@ -213,6 +213,9 @@ Nothing runs until preflight passes. The first invocation under a run ID
 writes `artifacts/<run-id>/environment.json`, from a fresh or a cached preflight; a failed case writes its own bundle under
 `artifacts/<run-id>/<CASE-ID>/` with pod logs, Kubernetes Events, `/proc/mounts`
 and dmesg from every involved node, and the injected-fault timeline.
+`artifacts.txt` lists every one of those the collector tried, including the ones
+it could not get and why, so a log that could not be fetched is not mistaken for
+a pod that logged nothing, nor a dmesg that timed out for a quiet kernel.
 
 Two things a case argues from do not survive to that point on their own: the
 workload's record stream, which lives on the writer pod's filesystem so the

@@ -120,10 +120,10 @@ func (f *Framework) KeepPodFile(pod, path, name string) error {
 }
 
 // checkEvidenceName rejects anything that is not a plain filename, and the
-// manifest's own name. The name becomes a path under the bundle directory and
-// the id of the script that fetches the file, so a separator or a leading dot
-// in it writes somewhere nobody asked for, and a capture landing on the
-// manifest would leave the bundle with no account of what is in it.
+// names of the two manifests. The name becomes a path under the bundle
+// directory and the id of the script that fetches the file, so a separator or a
+// leading dot in it writes somewhere nobody asked for, and a capture landing on
+// either manifest would leave the bundle with no account of what is in it.
 //
 // A helper that builds a name from a value a case chose validates it here
 // before it acts, not after: a registration refused halfway through a case
@@ -133,8 +133,8 @@ func checkEvidenceName(name string) error {
 		return fmt.Errorf("%q is not usable as an evidence name, since it becomes a filename in the "+
 			"bundle: %w", name, err)
 	}
-	if name == evidenceManifest {
-		return fmt.Errorf("%q is the name of the manifest that says what the bundle holds; choose another", name)
+	if name == evidenceManifest || name == artifactManifest {
+		return fmt.Errorf("%q is the name of a manifest that says what the bundle holds; choose another", name)
 	}
 	return nil
 }

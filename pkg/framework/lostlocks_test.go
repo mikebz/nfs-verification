@@ -73,9 +73,9 @@ func TestNewLostLocksWindow(t *testing.T) {
 		t.Errorf("an NFS line that is not a lost-locks report was taken for one: %+v", got)
 	}
 
-	// 5. An empty baseline is a failed read, since Agent.Dmesg can return
-	// nothing without an error. Against it, the writer node's stale report
-	// would read as new.
+	// 5. An empty baseline is a failed read: a booted kernel's ring buffer is
+	// never empty, whether or not Agent.Dmesg reported an error. Against it,
+	// the writer node's stale report would read as new.
 	for _, empty := range []string{"", "\n", "  \n"} {
 		if got := NewLostLocks(empty, writerAfter); len(got) != 0 {
 			t.Errorf("an empty baseline %q made a stale report read as new: %+v", empty, got)
