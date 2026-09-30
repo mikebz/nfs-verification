@@ -2,8 +2,8 @@
 
 Author: mikebz@
 Created: 2026-09-13
-Updated: 2026-09-17
-Status: **in review**, [PR #57](https://github.com/mikebz/nfs-verification/pull/57).
+Updated: 2026-09-30
+Status: shipped, [PR #57](https://github.com/mikebz/nfs-verification/pull/57).
 SEC-03 to SEC-09 landed in delivery step 8; SEC-01 shipped in Step 2
 ([PR #3](https://github.com/mikebz/nfs-verification/pull/3)) and SEC-02 in Step 2b
 ([PR #4](https://github.com/mikebz/nfs-verification/pull/4)), and both are
@@ -447,7 +447,7 @@ here.
 
 `make test-sec FLAGS="-storage-class=nfs -lease-seconds=60 -grace-seconds=90"`,
 run `20260914-011748`, GKE cluster `gke-w1`, Kubernetes v1.37.0-gke.2941000,
-three `e2-standard` workers on Container-Optimized OS with kernel 6.12.94+,
+three `e2-medium` workers on Container-Optimized OS with kernel 6.12.94+,
 StorageClass `nfs` backed by `nfs-server-provisioner` v4.0.8, profile `default`
 (lease 60s, grace 90s). The whole category took 2m45s against a 30 minute budget.
 

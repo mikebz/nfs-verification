@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-11
-Updated: 2026-09-28
+Updated: 2026-09-30
 Status: shipped, delivery steps 1 ([PR #1](https://github.com/mikebz/nfs-verification/pull/1)),
 2 ([PR #3](https://github.com/mikebz/nfs-verification/pull/3)),
 2b ([PR #4](https://github.com/mikebz/nfs-verification/pull/4)),
@@ -63,7 +63,7 @@ Testing data path semantics requires tools that can express subtle kernel and pr
 primitives inside minimal container environments:
 
 - **`locktool` (`cmd/locktool`, `pkg/framework/locktool.go`)**:
-  A static Go binary (~200 lines) built by `make locktool` for both `linux/amd64` and
+  A static Go binary built by `make locktool` for both `linux/amd64` and
   `linux/arm64`. It is streamed into client pods over `pods/exec` and verified via
   SHA-256 checksum. It requires no container image modification and no external registry.
   - `hold`: Acquires a byte range (`F_SETLK`) and keeps the file descriptor open without
@@ -289,7 +289,8 @@ CRC32C verification. It was designed, evaluated, and deferred from the data path
    throughput evaluation in test plan Section 3.4). Running two separate soak tests creates redundant,
    uncoordinated evaluations.
 2. **Tooling and image dependencies**: `fio` is not part of busybox and cannot be built as a small
-   hermetic binary. It requires an external container image (`-fio-image`) that operators must host.
+   hermetic binary. It requires an external container image that operators must host; the `-fio-image`
+   flag that named one was removed with the deferral (Section 9).
 3. **Storage capacity footprint**: 20 pods writing up to 1GiB across 4 files each requires up to 80GiB
    of backing volume capacity, exceeding the footprint of all other test cases combined.
 4. **Time budget constraints**: Section 4.2 of the test plan assigns strict budgets (under 45 minutes)
@@ -319,11 +320,12 @@ The design for `DATA-14` is preserved for `SCALE-07`: one job per pod over an is
   if its export is removed. Force deletion must wait for unmount confirmation before claims are deleted.
 - **[F-006](findings.md) (Busybox flock lacks `-w`)**: Shell scripts cannot use flags missing from
   busybox applets. `locktool` was built to replace brittle shell invocations with concrete Go syscalls.
-- **[F-007](findings.md) (Existence is not a check)**: Early durability checks tested whether files were
-  non-empty. Real runs revealed that truncated or zeroed records passed existence checks, necessitating
-  the 4-verdict content sweep.
+- **[F-007](findings.md) (Passing is not measuring)**: DATA-12 and DATA-13 passed over three and four
+  records, and DATA-11 reported a skip that hid a passing sparse half. The durability pair now waits for
+  thirty records and fails below ten, and DATA-11 is two subtests.
 - **[F-010](findings.md) (Anonymous st_dev mismatch)**: The Linux NFS client assigns an anonymous
-  `st_dev` per mount. Cross-node `/proc/locks` comparisons must match on inode and range rather than device ID.
+  `st_dev` per mount, so a file's identity differs per node. Each node's `/proc/locks` is matched against
+  the identity read from a pod on that node, device included.
 - **[F-016](findings.md) (O_APPEND race and attribution)**: Concurrent appends from multiple nodes
   intermittently lose records without tearing under heavy load. A failure message must cite the protocol
   limitation and report missing record IDs.
@@ -347,8 +349,7 @@ The design for `DATA-14` is preserved for `SCALE-07`: one job per pod over an is
   `pr46-data-20260913` and `pr47-data-20260913`, taking between four and five
   minutes each. The export holds 100k entries, and a listing racing 50k
   deletions returned 98–99k of them, which is lawful rather than a defect. This
-  supersedes the sentence that stood here saying it was unmeasured; the test
-  plan's Section 5.2 carries the runs it came from.
+  supersedes the sentence that stood here saying it was unmeasured.
 - **F-006 and F-007** came out of this phase: `scripts/lock-probe.sh` passed
   `flock -w` to an applet that has no `-w`, and two cases reported results they
   had not measured. Both are fixed and recorded in [`findings.md`](findings.md).

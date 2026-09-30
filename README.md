@@ -279,8 +279,11 @@ pod's own filesystem, never on the share. That log is copied into the case's
 bundle at teardown, pass or fail, since it is the input to all three assertions
 below and it dies with the pod. One log gives all three:
 
-- **Recovery**: time from the fault to the first write committed after it,
-  against `pkg/slo` for the profile preflight pinned. Never a literal.
+- **Recovery**: time from the fault to the committed write that ends the first
+  silence after it longer than `slo.LoadStallFloor`, against `pkg/slo` for the
+  profile preflight pinned. Never a literal. Not the first write stamped after
+  the fault: that one can have committed before service was lost
+  ([F-014](docs/findings.md)).
 - **Errors**: zero, because a hard NFSv4.1 mount is specified to block and retry
   rather than to return an error. An error is a protocol violation, not a slow
   recovery, so it is asserted separately from the timing.

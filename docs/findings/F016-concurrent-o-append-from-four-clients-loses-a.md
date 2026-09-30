@@ -111,7 +111,7 @@ Those two numbers point in opposite directions and both matter:
 ### Why
 
 NFSv4.1 has no append operation. There is no `WRITE` that means "at end of
-file": [RFC 8881](https://www.rfc-editor.org/rfc/rfc8881.html) Section 18.2
+file": [RFC 8881](https://www.rfc-editor.org/rfc/rfc8881.html) Section 18.32
 takes an explicit offset. A client implements `O_APPEND` by writing at the
 offset it believes to be the end of the file, and that belief is a cached
 attribute.
