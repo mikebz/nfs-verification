@@ -393,7 +393,7 @@ E2E tests are organized strictly by category. Each category has its own test fil
 
 ### 4.3 Triage runbook
 
-Every failure produces `artifacts/<run-id>/` containing `environment.json`, server logs, client pod logs, `/proc/mounts` from every involved node, dmesg, Kubernetes Events, any core dumps, and a timeline of injected faults. `artifacts.txt` in the case directory lists every one of those the harness tried to collect, marked complete, partial or not captured with the reason, or not attempted where the artifact is known not to exist. An absence is evidence only when that file says it was looked for: a dmesg that timed out and a quiet kernel leave the same directory behind otherwise.
+Every failure produces a bundle in `artifacts/<run-id>/<CASE-ID>/` containing `environment.json`, server logs, client pod logs, `/proc/mounts` from every involved node, dmesg, Kubernetes Events, any core dumps, and a timeline of injected faults. `artifacts.txt` in that directory lists every one of those the harness tried to collect, marked complete, partial or not captured with the reason, or not attempted where the artifact is known not to exist. An absence is evidence only when that file says it was looked for: a dmesg that timed out and a quiet kernel leave the same directory behind otherwise.
 
 Every run, failed or not, also leaves the files each case named as its evidence: the workload's record stream, which is the input to every recovery number, and the one file on the share a data case is making a claim about. They are listed in `evidence.txt` with what was captured and what was cut off at the size cap, because a truncated file and a whole one are indistinguishable from their bytes.
 

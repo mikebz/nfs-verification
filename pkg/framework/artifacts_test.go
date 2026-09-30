@@ -297,28 +297,51 @@ func TestLogFileNamesCannotCollide(t *testing.T) {
 	}
 }
 
-// TestInspectNodesRecordsNoRunningAgent covers the node agent that answers
-// with nothing. The capability was set at preflight; an agent disrupted since
-// lists no running pods, and a loop over no nodes would write no rows and
-// report no gap, so the bundle would look like node collection went fine.
+// TestInspectNodesRecordsNodesNoAgentReached covers the node agent that does
+// not answer for a node. Nodes lists only agent pods that are Running now, so
+// a node whose agent is gone, usually because a chaos case stopped the node,
+// would otherwise get no rows at all and the bundle would look complete. That
+// node is the one the failure is about.
 //
 // Steps:
-//  1. Build an agent over a fake cluster whose only agent pod is Pending.
-//  2. Inspect, and assert one NOT CAPTURED row that is counted as a gap.
-func TestInspectNodesRecordsNoRunningAgent(t *testing.T) {
+//  1. Build an agent over a fake cluster whose only agent pod, on node-a, is
+//     Pending, so no node can be read. Reading a node needs a real exec
+//     stream, so the running half is left to the live runs.
+//  2. With no environment record: assert one NOT CAPTURED row saying no node
+//     was inspected.
+//  3. With a record listing node-a and node-b: assert each gets a NOT
+//     CAPTURED row for /proc/mounts and for dmesg, and a placeholder file.
+func TestInspectNodesRecordsNodesNoAgentReached(t *testing.T) {
 	kube := fake.NewSimpleClientset(&corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: agentDaemonSet + "-x", Namespace: Namespace,
 			Labels: map[string]string{"app": agentDaemonSet}},
 		Spec:   corev1.PodSpec{NodeName: "node-a"},
 		Status: corev1.PodStatus{Phase: corev1.PodPending},
 	})
-	b := &bundle{dir: t.TempDir()}
-	inspectNodes(t.Context(), b, &Agent{c: &Client{Kube: kube}, pods: map[string]string{}}, "the node agent")
+	agent := &Agent{c: &Client{Kube: kube}, pods: map[string]string{}}
 
-	if len(b.rows) != 1 {
-		t.Fatalf("%d rows recorded for an agent with no running pod, want one saying so: %+v", len(b.rows), b.rows)
+	b := &bundle{dir: t.TempDir()}
+	inspectNodes(t.Context(), b, agent, "the node agent", nil)
+	if gaps := b.gaps(); len(b.rows) != 1 || len(gaps) != 1 || !strings.Contains(gaps[0], "no agent pod is running") {
+		t.Errorf("an agent with no running pod and no record of the nodes was recorded as %+v, "+
+			"want one gap saying no node was inspected", b.rows)
 	}
-	if gaps := b.gaps(); len(gaps) != 1 || !strings.Contains(gaps[0], "no agent pod is running") {
-		t.Errorf("an agent with no running pod was not reported as a gap: %v", gaps)
+
+	b = &bundle{dir: t.TempDir()}
+	inspectNodes(t.Context(), b, agent, "the node agent", []string{"node-a", "node-b"})
+	if got := len(b.gaps()); got != 4 {
+		t.Fatalf("%d gaps recorded for two unreachable nodes, want /proc/mounts and dmesg for each: %+v", got, b.rows)
+	}
+	got := renderArtifacts(b.rows)
+	for _, n := range []string{"node-a", "node-b"} {
+		for _, file := range []string{"proc-mounts-" + n + ".txt", "dmesg-" + n + ".txt"} {
+			want := file + "\t"
+			if !strings.Contains(got, want) || !strings.Contains(got, "NOT CAPTURED: node "+n+" was in the cluster at preflight") {
+				t.Errorf("the manifest does not say %s was not inspected:\n%s", file, got)
+			}
+			if _, err := os.Stat(filepath.Join(b.dir, file)); err != nil {
+				t.Errorf("no placeholder was left where %s would be: %v", file, err)
+			}
+		}
 	}
 }

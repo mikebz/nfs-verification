@@ -100,15 +100,27 @@ type artifactRow struct {
 	Skipped string
 }
 
-// write puts one collected artifact in the bundle and records it.
+// write puts one collected artifact in the bundle and records it. A write that
+// stops partway, as on a full disk, leaves a truncated file behind, and the
+// row says how much of it landed rather than claiming nothing did.
 func (b *bundle) write(file, source string, data []byte) {
 	row := artifactRow{File: file, Source: source}
-	if err := os.WriteFile(filepath.Join(b.dir, file), data, 0o644); err != nil {
-		row.Problem = fmt.Sprintf("collected but not written: %v", err)
-	} else {
-		row.Bytes = int64(len(data))
+	n, err := writeFile(filepath.Join(b.dir, file), data)
+	row.Bytes = int64(n)
+	if err != nil {
+		row.Problem = fmt.Sprintf("collected but not written in full: %v", err)
 	}
 	b.rows = append(b.rows, row)
+}
+
+// writeFile is os.WriteFile that also says how many bytes reached the file.
+func writeFile(path string, data []byte) (int, error) {
+	out, err := os.Create(path)
+	if err != nil {
+		return 0, err
+	}
+	n, err := out.Write(data)
+	return n, errors.Join(err, out.Close())
 }
 
 // fail records an artifact that was tried and not got.
@@ -131,7 +143,13 @@ func (b *bundle) nodeRead(file, source, out string, err error) {
 		b.write(file, source, []byte(out))
 		return
 	}
-	problem := fmt.Sprintf("unreadable within %s: %v", nodeInspectTimeout, err)
+	b.nodeGap(file, source, fmt.Sprintf("unreadable within %s: %v", nodeInspectTimeout, err))
+}
+
+// nodeGap records a node file that was not got, and leaves a placeholder
+// saying why where the file would have been, so a reader listing the
+// directory rather than the manifest still sees the gap.
+func (b *bundle) nodeGap(file, source, problem string) {
 	if werr := os.WriteFile(filepath.Join(b.dir, file), []byte(problem+"\n"), 0o644); werr != nil {
 		problem += fmt.Sprintf("; the placeholder saying so was not written either: %v", werr)
 	}
@@ -358,23 +376,47 @@ func (f *Framework) dumpNodeState(ctx context.Context, b *bundle) {
 		b.fail("", source, fmt.Sprintf("not reached, so no node was inspected: %v", err))
 		return
 	}
-	inspectNodes(ctx, b, agent, source)
+	var expected []string
+	if f.Env != nil {
+		for _, n := range f.Env.Nodes {
+			expected = append(expected, n.Name)
+		}
+	}
+	inspectNodes(ctx, b, agent, source, expected)
 }
 
 // inspectNodes reads /proc/mounts and dmesg from every node with a running
-// agent pod. Separate from dumpNodeState, which goes through the process-wide
-// agent, so that it can be tested against an agent over a fake cluster.
-func inspectNodes(ctx context.Context, b *bundle, agent *Agent, source string) {
+// agent pod, and records a gap for every node in expected that has none.
+// Separate from dumpNodeState, which goes through the process-wide agent, so
+// that it can be tested against an agent over a fake cluster.
+//
+// expected is the nodes the environment record listed at preflight. Nodes
+// lists only agent pods that are Running now, and the node whose agent is
+// gone is usually the one a chaos case stopped, which is the node the failure
+// is about. Without the comparison it would simply be absent from the bundle,
+// and absent reads as "not involved" rather than "not inspected".
+func inspectNodes(ctx context.Context, b *bundle, agent *Agent, source string, expected []string) {
 	nodes, err := agent.Nodes(ctx)
 	if err != nil {
 		b.fail("", source, fmt.Sprintf("nodes not listed, so no node was inspected: %v", err))
 		return
 	}
-	if len(nodes) == 0 {
-		// The capability was established at preflight, and Nodes lists only
-		// agent pods that are Running now, so an agent disrupted since then
-		// answers with nothing. Nothing is not a clean result: no node was
-		// read, and the manifest has to say so.
+	running := map[string]bool{}
+	for _, n := range nodes {
+		running[n] = true
+	}
+	for _, n := range expected {
+		if running[n] {
+			continue
+		}
+		problem := fmt.Sprintf("node %s was in the cluster at preflight but has no running agent pod now, "+
+			"so it was not inspected", n)
+		b.nodeGap("proc-mounts-"+n+".txt", "/proc/mounts on node "+n, problem)
+		b.nodeGap("dmesg-"+n+".txt", "dmesg on node "+n, problem)
+	}
+	if len(nodes) == 0 && len(expected) == 0 {
+		// No record of which nodes there were, and no agent answering: a loop
+		// over nothing would write nothing, and nothing is not a clean result.
 		b.fail("", source, "no agent pod is running on any node, so no node was inspected")
 		return
 	}
