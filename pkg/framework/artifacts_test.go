@@ -57,6 +57,33 @@ func TestArtifactManifestNamesWhatWasNotCaptured(t *testing.T) {
 	}
 }
 
+// TestArtifactManifestKeepsAMultiLineErrorOnOneRow exists because the text in a
+// row is not all the harness's own. A node-agent failure carries the command's
+// combined output, and one raw newline or tab in it would split the row, or
+// shift its columns, so that the tail of an error reads as an artifact.
+//
+// Steps:
+//  1. Render one failed row whose problem has a newline, a tab, a carriage
+//     return and a backslash in it, the way a failed nsenter reports.
+//  2. Assert the manifest is the preamble and one row of exactly four
+//     columns, and that each character arrived escaped.
+func TestArtifactManifestKeepsAMultiLineErrorOnOneRow(t *testing.T) {
+	got := renderArtifacts([]artifactRow{{
+		File: "dmesg-node-b.txt", Source: "dmesg on node node-b",
+		Problem: "node node-b: command terminated with exit code 1: nsenter: cannot open\r\n\tC:\\proc\nsecond line",
+	}})
+	lines := strings.Split(strings.TrimRight(got, "\n"), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("the manifest has %d lines, want two of preamble and one row:\n%s", len(lines), got)
+	}
+	if cols := strings.Split(lines[2], "\t"); len(cols) != 4 {
+		t.Errorf("the row has %d columns, want 4: %q", len(cols), lines[2])
+	}
+	if want := `cannot open\r\n\tC:\\proc\nsecond line`; !strings.HasSuffix(lines[2], want) {
+		t.Errorf("the row does not end with the escaped error %q: %q", want, lines[2])
+	}
+}
+
 // TestNodeReadMarksAFailedDmesgLikeAFailedMountsRead covers the asymmetry the
 // issue was filed about: a failed /proc/mounts read left a note, a failed dmesg
 // left nothing, and the node a chaos failure is about looked uninspected.
@@ -99,9 +126,9 @@ func TestNodeReadMarksAFailedDmesgLikeAFailedMountsRead(t *testing.T) {
 // error both account for them.
 //
 // Steps:
-//  1. Build a client pod with a container that never restarted and one that
-//     did, and make the first one's log impossible to write by putting a
-//     directory where it would land.
+//  1. Build a client pod with a container that never restarted, one that did,
+//     and one with no status yet, and make the first one's log impossible to
+//     write by putting a directory where it would land.
 //  2. Point server discovery at a namespace whose pod list fails, and leave
 //     the node agent capability off.
 //  3. Collect, and assert each artifact has the row it earned: complete,
@@ -119,7 +146,9 @@ func TestCollectArtifactsRecordsEveryGap(t *testing.T) {
 	f, _ := NewSystem(&Client{Kube: kube}, e, Capabilities{}, "DATA-02")
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "writer", Namespace: Namespace, Labels: f.Labels()},
-		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "main"}, {Name: "sidecar"}}},
+		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "main"}, {Name: "sidecar"}, {Name: "late"}}},
+		// "late" has no status yet, as on a pending pod: whether it restarted
+		// is unknown, not zero.
 		Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{
 			{Name: "main", RestartCount: 0}, {Name: "sidecar", RestartCount: 2},
 		}},
@@ -151,6 +180,9 @@ func TestCollectArtifactsRecordsEveryGap(t *testing.T) {
 		"client-pods/writer-main.log\tlog of container main in pod default/writer\t0 bytes\tNOT CAPTURED: streamed but not written",
 		"client-pods/writer-main.previous.log\tprevious log of container main in pod default/writer\t0 bytes\tnot attempted: the container has not restarted",
 		"client-pods/writer-sidecar.log\tlog of container sidecar in pod default/writer\t9 bytes\tcomplete",
+		// Attempted, because an unreported count is not a zero one. The fake
+		// answers every log request, so complete is what proves it was asked.
+		"client-pods/writer-late.previous.log\tprevious log of container late in pod default/writer\t9 bytes\tcomplete",
 		"client-pods/writer-sidecar.previous.log\tprevious log of container sidecar in pod default/writer\t9 bytes\tcomplete",
 		"server-pods/\tserver pods in namespace nfs-server matching \t0 bytes\tNOT CAPTURED: not listed: pods is forbidden",
 		"events-default.txt\tKubernetes Events in namespace default\t0 bytes\tcomplete",

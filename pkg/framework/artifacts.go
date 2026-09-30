@@ -182,9 +182,21 @@ func renderArtifacts(rows []artifactRow) string {
 		case r.Skipped != "":
 			status = "not attempted: " + r.Skipped
 		}
-		fmt.Fprintf(&sb, "%s\t%s\t%d bytes\t%s\n", manifestFile(r.File), r.Source, r.Bytes, status)
+		fmt.Fprintf(&sb, "%s\t%s\t%d bytes\t%s\n",
+			manifestField(manifestFile(r.File)), manifestField(r.Source), r.Bytes, manifestField(status))
 	}
 	return sb.String()
+}
+
+// manifestField escapes one text column of the manifest, so one artifact stays
+// on one line in four columns. The text in a row is not all the harness's own:
+// a node-agent failure carries whatever the command printed, several lines of
+// it, and one raw newline would split a row in two and leave the second half
+// reading as an artifact nobody collected. The backslash is escaped too, so
+// that an escape sequence in the manifest always means one of these characters
+// and never itself.
+func manifestField(s string) string {
+	return strings.NewReplacer(`\`, `\\`, "\t", `\t`, "\n", `\n`, "\r", `\r`).Replace(s)
 }
 
 // dumpEnvironment writes the run's environment record into the case bundle.
@@ -241,8 +253,11 @@ func (f *Framework) dumpPods(ctx context.Context, b *bundle, ns, selector, kind 
 			// container that has not restarted has none, and asking anyway
 			// would put a refusal against every healthy pod in the manifest,
 			// burying the gaps that matter. The count is the one in the pod
-			// record beside the logs, so the two agree.
-			if restarts[c.Name] == 0 {
+			// record beside the logs, so the two agree. Only a count the pod
+			// actually reported earns the skip: a container with no status
+			// yet, as on a pending pod, is unknown rather than unrestarted,
+			// so its previous log is asked for and the answer recorded.
+			if n, reported := restarts[c.Name]; reported && n == 0 {
 				b.skip(logFile(sub, p.Name, c.Name, true), logSource(ns, p.Name, c.Name, true),
 					"the container has not restarted, so there is no previous log")
 				continue
