@@ -162,7 +162,7 @@ three on `gke-w1` and three on `gke-w2` (`w{1,2}-e2e-run{1,2,3}-20260925-*`),
 preflight named `ganesha.nfsd` as the process holding 2049 every time. CHAOS-01,
 DATA-12 and DATA-13 passed 18 of 18. CHAOS-01 recovered in 92s in four runs
 and 107s in two, and the DATA pair in 92 to 93s. That is grace plus a respawn
-(see #104), not a pod restart.
+(see [F-029](F029-neither-deployment-ever-lifts-grace-early-for-different.md)), not a pod restart.
 
 **The lesson reached CHAOS-01 and not the rest of the harness.** The two things
 this entry says are wrong about a supervised server are still assumed in three
