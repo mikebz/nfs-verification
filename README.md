@@ -209,6 +209,14 @@ the supervisor and killing that measures a container restart
 ([F-026](docs/findings.md)). A server preflight cannot read leaves the name
 empty, preflight says so in a note, and those three cases report blocked.
 
+Beside the name it records the capability sets of that process and of its
+container's PID 1, with what the container declares, and SEC-09 judges that
+record rather than reading a node itself. A record written before this was
+recorded, or one whose server pod now runs other images or declares another set,
+makes SEC-09 report blocked and name `-refresh-preflight`. The rule behind both
+is in the test plan's harness design section: a fact about the cluster that no
+case changes is evaluated in preflight, and the case judges the record.
+
 Nothing runs until preflight passes. The first invocation under a run ID
 writes `artifacts/<run-id>/environment.json`, from a fresh or a cached preflight; a failed case writes its own bundle under
 `artifacts/<run-id>/<CASE-ID>/` with pod logs, Kubernetes Events, `/proc/mounts`

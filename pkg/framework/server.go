@@ -124,11 +124,21 @@ func DescribeServers(ctx context.Context, c *Client, agent *Agent) ([]env.Server
 		// more useful than an exec that fails for a reason of its own.
 		if p.Status.Phase != corev1.PodRunning {
 			info.ProcessNote = "pod is " + string(p.Status.Phase)
+			info.CapabilitiesNote, info.CapabilitiesBlocked = info.ProcessNote, true
 		} else if sp, err := DiscoverServerProcess(ctx, c, agent,
 			p.Namespace, p.Name, p.Spec.NodeName, names, NFSPort); err != nil {
 			info.ProcessNote = err.Error()
+			info.CapabilitiesNote = "the process serving NFS could not be named: " + err.Error()
+			info.CapabilitiesBlocked = true
 		} else {
 			info.Process = sp.Name
+			// Read here for the same reason as the name: SEC-09 evaluates it,
+			// and reading the server's set needs the node agent.
+			if caps, err := ReadServerCapabilities(ctx, c, agent, p, sp); err != nil {
+				info.CapabilitiesNote, info.CapabilitiesBlocked = err.Error(), IsBlocked(err)
+			} else {
+				info.Capabilities = &caps
+			}
 		}
 		out = append(out, info)
 	}

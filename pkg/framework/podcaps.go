@@ -3,12 +3,15 @@ package framework
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+
+	"github.com/mikebz/nfs-verification/pkg/env"
 )
 
 // What a pod spec declares and what its process holds are two different facts,
@@ -172,22 +175,23 @@ func ParseProcStatus(contents string) (CapSet, error) {
 //
 // A pod whose PID 1 is not its container's first process is refused as blocked
 // rather than read; pid1IsNotTheContainers says which pods those are.
-func ContainerCaps(ctx context.Context, c *Client, pod *corev1.Pod, container string) (CapSet, error) {
+func ContainerCaps(ctx context.Context, c *Client, pod *corev1.Pod, container string) (ProcessCaps, error) {
 	if err := pid1IsNotTheContainers(pod, container); err != nil {
-		return CapSet{}, err
+		return ProcessCaps{}, err
 	}
 	r := c.Sh(ctx, pod.Namespace, pod.Name, container, "cat /proc/1/status")
 	if r.Err != nil {
-		return CapSet{}, Blockedf("reading the capability set of PID 1 in %s/%s container %s: %v: %s. "+
+		return ProcessCaps{}, Blockedf("reading the capability set of PID 1 in %s/%s container %s: %v: %s. "+
 			"This needs exec into the server's container and a cat in its image",
 			pod.Namespace, pod.Name, container, r.Err, truncate(r.Combined(), 200))
 	}
 	caps, err := ParseProcStatus(r.Stdout)
 	if err != nil {
-		return CapSet{}, fmt.Errorf("reading the capability set of PID 1 in %s/%s container %s: %w",
+		return ProcessCaps{}, fmt.Errorf("reading the capability set of PID 1 in %s/%s container %s: %w",
 			pod.Namespace, pod.Name, container, err)
 	}
-	return caps, nil
+	return ProcessCaps{PID: 1, Node: pod.Spec.NodeName, Name: statusName(strings.Split(r.Stdout, "\n")),
+		Container: container, Caps: caps}, nil
 }
 
 // pid1IsNotTheContainers refuses the pods in which /proc/1, read from inside a
@@ -218,16 +222,17 @@ func pid1IsNotTheContainers(pod *corev1.Pod, container string) error {
 // on one node; a node that cannot answer that in this long is not answering.
 const procStatusTimeout = 20 * time.Second
 
-// ProcessCaps is the capability set of one process on a node, with what
-// identifies it: the name the kernel reports and the container it runs in.
+// ProcessCaps is the capability set of one process, with what identifies it:
+// the name the kernel reports and the container it runs in.
 type ProcessCaps struct {
-	// PID is the process id on the node.
+	// PID is the process id: the node's for the server, read through the node
+	// agent, and 1 for a container's first process, read from inside it.
 	PID int
-	// Node is where that pid lives.
+	// Node is where the process runs.
 	Node string
 	// Name is the Name line of its status file, which is its comm.
 	Name string
-	// Container is the pod container whose cgroup the process is in.
+	// Container is the pod container the process is in.
 	Container string
 	Caps      CapSet
 }
@@ -319,17 +324,21 @@ func parseProcRead(out string) (procRead, error) {
 	if err != nil {
 		return procRead{}, err
 	}
-	var name string
-	for _, line := range status {
-		if v, ok := strings.CutPrefix(line, "Name:"); ok {
-			name = strings.TrimSpace(v)
-			break
-		}
-	}
+	name := statusName(status)
 	if name == "" {
 		return procRead{}, fmt.Errorf("the status file carries no Name line, so which process it describes cannot be checked")
 	}
 	return procRead{name: name, cgroup: strings.Join(cgroup, "\n"), caps: caps}, nil
+}
+
+// statusName returns the Name line of a status file, or nothing if it has none.
+func statusName(lines []string) string {
+	for _, line := range lines {
+		if v, ok := strings.CutPrefix(line, "Name:"); ok {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
 }
 
 // commLen is the longest name /proc/<pid>/status reports: the kernel's comm
@@ -425,4 +434,108 @@ func DeclaredCapsOf(pod *corev1.Pod, container string) (DeclaredCaps, error) {
 		d.Drop = append(d.Drop, string(dr))
 	}
 	return d, nil
+}
+
+// ReadServerCapabilities reads everything SEC-09 judges about one server pod,
+// at one moment, for preflight to record: the declaration of the container the
+// server runs in, the set the server process holds, and the set the container's
+// PID 1 holds.
+//
+// It runs in preflight rather than in the case because the server's set is read
+// through the node agent (F-027), and a case should not need elevated
+// privilege to evaluate a fact about the platform that it does not change. The
+// three are read together so the record never pairs one moment's declaration
+// with another moment's process.
+func ReadServerCapabilities(ctx context.Context, c *Client, agent *Agent, pod *corev1.Pod, sp ServerProcess) (env.ServerCapabilities, error) {
+	server, err := ServerProcessCaps(ctx, agent, pod, sp)
+	if err != nil {
+		return env.ServerCapabilities{}, fmt.Errorf("reading the capability set of %s: %w", sp.Name, err)
+	}
+	declared, err := DeclaredCapsOf(pod, server.Container)
+	if err != nil {
+		return env.ServerCapabilities{}, err
+	}
+	init, err := ContainerCaps(ctx, c, pod, server.Container)
+	if err != nil {
+		return env.ServerCapabilities{}, err
+	}
+	return env.ServerCapabilities{
+		Container:    server.Container,
+		DeclaredAdd:  declared.Add,
+		DeclaredDrop: declared.Drop,
+		Privileged:   declared.Privileged,
+		Server:       capMasksOf(server),
+		Init:         capMasksOf(init),
+	}, nil
+}
+
+// capMasksOf renders a process's set in the form /proc/<pid>/status prints.
+func capMasksOf(p ProcessCaps) env.CapMasks {
+	hex := func(m uint64) string { return fmt.Sprintf("%016x", m) }
+	return env.CapMasks{
+		Name:        p.Name,
+		Inheritable: hex(p.Caps.Inheritable),
+		Permitted:   hex(p.Caps.Permitted),
+		Effective:   hex(p.Caps.Effective),
+		Bounding:    hex(p.Caps.Bounding),
+		Ambient:     hex(p.Caps.Ambient),
+	}
+}
+
+// CapSetOf decodes a recorded set. A mask that does not parse is an error, not
+// an empty set, for ParseProcStatus's reason: an empty set would read as every
+// declared capability stripped.
+func CapSetOf(m env.CapMasks) (CapSet, error) {
+	var caps CapSet
+	for _, f := range []struct {
+		name  string
+		value string
+		into  *uint64
+	}{
+		{"inheritable", m.Inheritable, &caps.Inheritable},
+		{"permitted", m.Permitted, &caps.Permitted},
+		{"effective", m.Effective, &caps.Effective},
+		{"bounding", m.Bounding, &caps.Bounding},
+		{"ambient", m.Ambient, &caps.Ambient},
+	} {
+		v, err := strconv.ParseUint(f.value, 16, 64)
+		if err != nil {
+			return CapSet{}, fmt.Errorf("recorded %s mask of %s %q: %w", f.name, m.Name, f.value, err)
+		}
+		*f.into = v
+	}
+	return caps, nil
+}
+
+// StaleCapabilityRecord says why a recorded capability read no longer describes
+// the live pod, or returns nothing when it still does.
+//
+// A preflight record is reused for up to -preflight-max-age, and a StatefulSet
+// recreates a pod under the same name. The recorded sets follow from the image,
+// the declaration and the platform, so a pod whose images or declaration have
+// changed since is a pod the record does not describe, and judging it on the
+// record would report on a server that is no longer there. The images are
+// compared the way chaos.ResolveProcess compares them.
+func StaleCapabilityRecord(rec env.ServerInfo, pod *corev1.Pod) string {
+	live := make([]string, 0, len(pod.Spec.Containers))
+	for _, ct := range pod.Spec.Containers {
+		live = append(live, ct.Image)
+	}
+	if !slices.Equal(rec.Images, live) {
+		return fmt.Sprintf("preflight recorded %s/%s running %v and it now runs %v; re-run preflight with "+
+			"-refresh-preflight", rec.Namespace, rec.Pod, rec.Images, live)
+	}
+	declared, err := DeclaredCapsOf(pod, rec.Capabilities.Container)
+	if err != nil {
+		return fmt.Sprintf("%v, though preflight read the server in it; re-run preflight with -refresh-preflight", err)
+	}
+	if !slices.Equal(declared.Add, rec.Capabilities.DeclaredAdd) ||
+		!slices.Equal(declared.Drop, rec.Capabilities.DeclaredDrop) ||
+		declared.Privileged != rec.Capabilities.Privileged {
+		return fmt.Sprintf("container %s of %s/%s now declares add=%v drop=%v privileged=%v, and preflight read "+
+			"it declaring add=%v drop=%v privileged=%v; re-run preflight with -refresh-preflight",
+			declared.Container, rec.Namespace, rec.Pod, declared.Add, declared.Drop, declared.Privileged,
+			rec.Capabilities.DeclaredAdd, rec.Capabilities.DeclaredDrop, rec.Capabilities.Privileged)
+	}
+	return ""
 }

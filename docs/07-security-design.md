@@ -93,8 +93,9 @@ Four readers and one probe, and nothing else:
 - **The capability set.** The declared set from the server pod's spec, the set
   of the process holding 2049, read on its node, and the set of its container's
   PID 1, which is what the runtime delivered. Decoded from the mask to names.
-  Until #98 this read PID 1 alone, as though it were the server; SEC-09 below
-  says what changed.
+  Until #98 this read PID 1 alone, as though it were the server, and read it in
+  the case; preflight reads all three now and SEC-09 judges the record. SEC-09
+  below says what changed.
 - **The volume ownership sweep.** How many files under a path have which owner
   and group, from one exec, so "nothing was chowned" is a count and not an
   impression.
@@ -317,7 +318,8 @@ set of that container's PID 1. Two processes, because the question has two
 halves and each process answers one. The server is whatever holds the listening
 socket on 2049, found and read through the node agent (F-026, F-027), and its set
 is what the server actually holds. PID 1 is what the runtime started, so its set
-is what the platform delivered.
+is what the platform delivered. Preflight reads all three and records them; the
+case judges the record, and needs no node agent itself.
 
 | What was found | Verdict |
 |---|---|
@@ -362,6 +364,21 @@ deployment did not change, and that is correct rather than a sign the change
 did nothing: the platform delivered both capabilities on both clusters, and
 `gke-w2`'s run now records the one its server gave up, which no earlier run
 could see.
+
+The same change moved the reads out of the case. Preflight reads the
+declaration and both sets once, beside the server process name it already
+records, and writes them to `environment.json`; SEC-09 judges that record and
+reads nothing from a node. The sets follow from the image, the pod spec and the
+platform, none of which a case changes, and naming the server needs the node
+agent (F-027), so reading them per case bought a privileged dependency and no
+information. The test plan's harness design section now states the rule for
+every case. What the case still reads live is the pod, through the API: a record
+whose pod now runs other images or declares another set does not describe it,
+and the case reports blocked with `-refresh-preflight` rather than judge it. A
+pod that only moved node is judged, and the log says which node's runtime the
+record describes. Preflight carries whether an unread set was a condition of the
+cluster or the harness failing, so the case still reports the first blocked and
+the second failed, as it did when it read the sets itself.
 
 ## 6. The probe mount, and why it is safe
 

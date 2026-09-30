@@ -115,6 +115,10 @@ func Run(ctx context.Context) (*Result, error) {
 				"DATA-13 will report blocked: there is nothing else to ask, and signalling a guessed name "+
 				"node-wide is worse than not running them", s.Namespace, s.Pod, s.ProcessNote)
 		}
+		if s.Capabilities == nil {
+			e.AddNote("the capability sets of the server in %s/%s could not be read (%s), so SEC-09 will "+
+				"report blocked", s.Namespace, s.Pod, s.CapabilitiesNote)
+		}
 	}
 
 	e.CSIDriverImages = csiImages(ctx, c, e.CSIDriver)

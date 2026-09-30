@@ -1,12 +1,16 @@
 package framework
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+
+	"github.com/mikebz/nfs-verification/pkg/env"
 )
 
 // A capability set is a hex mask, and every way of getting it wrong produces a
@@ -369,5 +373,102 @@ func TestServerIdentityChecks(t *testing.T) {
 	}
 	if c, err := containerOf(w2ServerCgroup, other); err == nil {
 		t.Errorf("a process outside the pod read as container %q", c)
+	}
+}
+
+// TestCapabilityRecordRoundTrip exists because SEC-09 now judges what preflight
+// wrote down rather than what it read, so the record is the only path a bit
+// takes from the kernel to the verdict. A mask that lost a bit on the way would
+// file ganesha.nfsd on gke-w2 as holding SYS_RESOURCE, or anything as stripped,
+// and neither would produce an error.
+//
+// Steps:
+//  1. Record gke-w2's server set, through JSON as environment.json carries it,
+//     and decode it: every set comes back bit for bit.
+//  2. Decode a record with a mask that does not parse, and one with a mask
+//     missing: both are errors, not an empty set that reads as every declared
+//     capability stripped.
+func TestCapabilityRecordRoundTrip(t *testing.T) {
+	want := CapSet{Permitted: maskNoSysResource, Effective: maskNoSysResource, Bounding: maskFull}
+	masks := capMasksOf(ProcessCaps{Name: "ganesha.nfsd", Caps: want})
+	raw, err := json.Marshal(masks)
+	if err != nil {
+		t.Fatalf("encoding the record: %v", err)
+	}
+	var back env.CapMasks
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatalf("decoding the record: %v", err)
+	}
+	if back.Permitted != "00000000a80425ff" {
+		t.Errorf("the permitted mask was recorded as %q, not as /proc prints it", back.Permitted)
+	}
+	got, err := CapSetOf(back)
+	if err != nil {
+		t.Fatalf("decoding a record preflight wrote: %v", err)
+	}
+	if got != want {
+		t.Errorf("the set came back as %+v from %+v", got, want)
+	}
+
+	bad := masks
+	bad.Permitted = "a80425fg"
+	if s, err := CapSetOf(bad); err == nil {
+		t.Errorf("a mask that does not parse decoded as %+v rather than an error", s)
+	}
+	missing := masks
+	missing.Ambient = ""
+	if s, err := CapSetOf(missing); err == nil {
+		t.Errorf("a missing mask decoded as %+v rather than an error", s)
+	}
+}
+
+// TestStaleCapabilityRecordComparesImagesAndDeclaration exists because a
+// preflight record outlives the pod it was read from: it is reused for up to
+// -preflight-max-age, and a StatefulSet recreates its pod under the same name.
+// Judging a changed pod on the old record reports on a server that is no longer
+// there, and nothing about that fails on its own.
+//
+// Steps:
+//  1. The pod preflight read, unchanged: fresh.
+//  2. The same pod rescheduled to another node: still fresh, since the sets
+//     follow from the image, the declaration and the platform.
+//  3. A new image, a new declared capability, and privileged turned on: each
+//     stale, with a message pointing at -refresh-preflight.
+//  4. The recorded container gone from the spec: stale, not a panic or an
+//     empty declaration.
+func TestStaleCapabilityRecordComparesImagesAndDeclaration(t *testing.T) {
+	const image = "registry.example/nfs-provisioner:v4.0.8"
+	pod := func(img string, add []corev1.Capability, priv bool, name, node string) *corev1.Pod {
+		return &corev1.Pod{Spec: corev1.PodSpec{NodeName: node, Containers: []corev1.Container{{
+			Name: name, Image: img, SecurityContext: &corev1.SecurityContext{
+				Privileged:   &priv,
+				Capabilities: &corev1.Capabilities{Add: add},
+			},
+		}}}}
+	}
+	declared := []corev1.Capability{"DAC_READ_SEARCH", "SYS_RESOURCE"}
+	rec := env.ServerInfo{Namespace: "nfs-provisioner", Pod: "nfs-0", Node: "node-a", Images: []string{image},
+		Capabilities: &env.ServerCapabilities{Container: "nfs-server-provisioner",
+			DeclaredAdd: []string{"DAC_READ_SEARCH", "SYS_RESOURCE"}}}
+
+	for _, tc := range []struct {
+		name  string
+		pod   *corev1.Pod
+		stale bool
+	}{
+		{"unchanged", pod(image, declared, false, "nfs-server-provisioner", "node-a"), false},
+		{"rescheduled", pod(image, declared, false, "nfs-server-provisioner", "node-b"), false},
+		{"new image", pod(image+"-1", declared, false, "nfs-server-provisioner", "node-a"), true},
+		{"new capability", pod(image, append(declared, "NET_ADMIN"), false, "nfs-server-provisioner", "node-a"), true},
+		{"privileged", pod(image, declared, true, "nfs-server-provisioner", "node-a"), true},
+		{"container gone", pod(image, declared, false, "server", "node-a"), true},
+	} {
+		why := StaleCapabilityRecord(rec, tc.pod)
+		if (why != "") != tc.stale {
+			t.Errorf("%s: stale=%v, want %v (%q)", tc.name, why != "", tc.stale, why)
+		}
+		if tc.stale && !strings.Contains(why, "-refresh-preflight") {
+			t.Errorf("%s: the reason does not say how to refresh the record: %q", tc.name, why)
+		}
 	}
 }
