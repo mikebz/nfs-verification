@@ -651,16 +651,16 @@ func TestSecServerCapabilities(t *testing.T) {
 			pod.Namespace, pod.Name, server.Container)
 	}
 
-	held := framework.CapNames(server.Caps.Effective)
+	held := framework.CapNames(server.Caps.Permitted)
 	t.Logf("%s/%s container %s declares add=%v drop=%v privileged=%v; PID 1 holds %v; the server, %s pid %d "+
-		"on %s, holds %v", pod.Namespace, pod.Name, declared.Container, declared.Add, declared.Drop,
-		declared.Privileged, framework.CapNames(delivered.Effective), server.Name, server.PID, server.Node, held)
+		"on %s, holds %v (permitted sets)", pod.Namespace, pod.Name, declared.Container, declared.Add, declared.Drop,
+		declared.Privileged, framework.CapNames(delivered.Permitted), server.Name, server.PID, server.Node, held)
 	if err := f.WriteArtifact("server-capabilities.txt", []byte(fmt.Sprintf(
 		"pod: %s/%s\nnode: %s\ncontainer: %s\ndeclared add: %v\ndeclared drop: %v\nprivileged: %v\n\n"+
 			"server process: %s\n  effective: %v\n  permitted: %v\n  bounding: %v\n  ambient: %v\n\n"+
 			"container PID 1, what the runtime delivered:\n  effective: %v\n  permitted: %v\n  bounding: %v\n  ambient: %v\n",
 		pod.Namespace, pod.Name, server.Node, declared.Container, declared.Add, declared.Drop, declared.Privileged,
-		sp, held, framework.CapNames(server.Caps.Permitted), framework.CapNames(server.Caps.Bounding),
+		sp, framework.CapNames(server.Caps.Effective), held, framework.CapNames(server.Caps.Bounding),
 		framework.CapNames(server.Caps.Ambient),
 		framework.CapNames(delivered.Effective), framework.CapNames(delivered.Permitted),
 		framework.CapNames(delivered.Bounding), framework.CapNames(delivered.Ambient)))); err != nil {

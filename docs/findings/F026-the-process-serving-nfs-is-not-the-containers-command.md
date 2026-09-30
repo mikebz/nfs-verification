@@ -215,6 +215,6 @@ declaration would have turned `gke-w2` red for `ganesha.nfsd` lowering its own
 privileges, which is the plan's "no more", not a breach of it.
 
 Run with `make test-case CASE=TestSecServerCapabilities` on `gke-w1` and `gke-w2`
-(`w{1,2}-issue98-sec09-*`, and after review `w{1,2}-issue98-review-sec09-*`):
+(`w{1,2}-issue98-sec09-*`, and after each review round `w{1,2}-issue98-review-sec09-*` and `w{1,2}-issue98-review2-sec09-*`):
 both pass each time. `gke-w2`'s runs record `SYS_RESOURCE` as dropped by the
 server; `gke-w1`'s record nothing dropped.
