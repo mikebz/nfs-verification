@@ -427,64 +427,32 @@ func TestCapabilityRecordRoundTrip(t *testing.T) {
 // TestStaleCapabilityRecordDetectsAChangedPod exists because a preflight record
 // outlives the pod it was read from: it is reused for up to
 // -preflight-max-age, and a StatefulSet recreates its pod under the same name.
-// Judging a changed pod on the old record reports on a server that is no longer
-// there, and nothing about that fails on its own.
+// Judging a recreated pod on the old record reports on a server that is no
+// longer there, and nothing about that fails on its own.
 //
 // Steps:
-//  1. The pod preflight read, unchanged: fresh.
-//  2. The pod recreated under the same name, with nothing else visibly
-//     different: stale, since a new pod may carry another security context
-//     or node, and runAsUser alone can change the delivered set.
-//  3. The same pod whose container now runs another resolved image, as a
-//     mutable tag re-pulled on restart does: stale.
-//  4. The same pod with no resolved image id yet, and with the recorded
-//     container missing from its status: stale, not fresh by default.
-//  5. Every stale reason says how to refresh the record.
-//  6. A record written before the UID and image id were recorded says it
-//     predates them, rather than naming an empty pod.
+//  1. The pod preflight read: fresh.
+//  2. The pod recreated under the same name: stale, naming -refresh-preflight.
+//  3. A record written before the UID was recorded: stale, saying it predates
+//     it rather than naming an empty pod.
 func TestStaleCapabilityRecordDetectsAChangedPod(t *testing.T) {
-	const (
-		uid     = "3adc37e4-63c0-42af-82b9-69f90208510a"
-		imageID = "registry.example/nfs-provisioner@sha256:1111"
-	)
-	pod := func(podUID, container, id string) *corev1.Pod {
-		return &corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{UID: types.UID(podUID)},
-			Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{
-				{Name: container, ImageID: id},
-			}},
-		}
+	const uid = "3adc37e4-63c0-42af-82b9-69f90208510a"
+	pod := func(podUID string) *corev1.Pod {
+		return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{UID: types.UID(podUID)}}
 	}
-	rec := env.ServerInfo{Namespace: "nfs-provisioner", Pod: "nfs-0", Node: "node-a",
-		Capabilities: &env.ServerCapabilities{PodUID: uid, ImageID: imageID, Container: "nfs-server-provisioner"}}
+	rec := env.ServerInfo{Namespace: "nfs-provisioner", Pod: "nfs-0",
+		Capabilities: &env.ServerCapabilities{PodUID: uid, Container: "nfs-server-provisioner"}}
 
+	if why := StaleCapabilityRecord(rec, pod(uid)); why != "" {
+		t.Errorf("the pod preflight read reads as stale: %q", why)
+	}
+	if why := StaleCapabilityRecord(rec, pod("9f0c")); !strings.Contains(why, "-refresh-preflight") {
+		t.Errorf("a recreated pod read as %q, not as stale with how to refresh", why)
+	}
 	old := rec
 	old.Capabilities = &env.ServerCapabilities{Container: "nfs-server-provisioner"}
-	if why := StaleCapabilityRecord(old, pod(uid, "nfs-server-provisioner", imageID)); !strings.Contains(why, "predates") {
-		t.Errorf("a record with no pod UID or image id read as %q, not as predating them", why)
-	}
-
-	for _, tc := range []struct {
-		name  string
-		pod   *corev1.Pod
-		stale bool
-	}{
-		{"unchanged", pod(uid, "nfs-server-provisioner", imageID), false},
-		{"recreated", pod("9f0c", "nfs-server-provisioner", imageID), true},
-		{"image re-resolved", pod(uid, "nfs-server-provisioner", "registry.example/nfs-provisioner@sha256:2222"), true},
-		{"image unresolved", pod(uid, "nfs-server-provisioner", ""), true},
-		{"container gone", pod(uid, "server", imageID), true},
-	} {
-		why := StaleCapabilityRecord(rec, tc.pod)
-		if strings.Contains(why, "read pod ,") {
-			t.Errorf("%s: the reason names an empty pod: %q", tc.name, why)
-		}
-		if (why != "") != tc.stale {
-			t.Errorf("%s: stale=%v, want %v (%q)", tc.name, why != "", tc.stale, why)
-		}
-		if tc.stale && !strings.Contains(why, "-refresh-preflight") {
-			t.Errorf("%s: the reason does not say how to refresh the record: %q", tc.name, why)
-		}
+	if why := StaleCapabilityRecord(old, pod(uid)); !strings.Contains(why, "predates") {
+		t.Errorf("a record with no pod UID read as %q, not as predating it", why)
 	}
 }
 

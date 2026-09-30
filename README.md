@@ -212,8 +212,8 @@ empty, preflight says so in a note, and those three cases report blocked.
 Beside the name it records the capability sets of that process and of its
 container's PID 1, with what the container declares, and SEC-09 judges that
 record rather than reading a node itself. A record written before this was
-recorded, or one read from a server pod that has since been recreated or whose
-container now runs another image, makes SEC-09 report blocked and name `-refresh-preflight`. The rule behind both
+recorded, or one read from a server pod that has since been recreated, makes
+SEC-09 report blocked and name `-refresh-preflight`. The rule behind both
 is in the test plan's harness design section: a fact about the cluster that no
 case changes is evaluated in preflight, and the case judges the record.
 

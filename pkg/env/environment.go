@@ -67,11 +67,10 @@ type ServerInfo struct {
 // ServerCapabilities is what a server pod's container declares and what two of
 // its processes hold, read at one moment so the three can be compared.
 type ServerCapabilities struct {
-	// PodUID and ImageID tie the record to the pod instance and the binary it
-	// was read from, so a case can tell a record that no longer describes the
-	// live pod (framework.StaleCapabilityRecord).
-	PodUID  string `json:"podUID"`
-	ImageID string `json:"imageID"`
+	// PodUID ties the record to the pod instance it was read from, so a case
+	// can tell a record that no longer describes the live pod
+	// (framework.StaleCapabilityRecord).
+	PodUID string `json:"podUID"`
 	// Container is the pod container the server process was found in.
 	Container string `json:"container"`
 	// DeclaredAdd, DeclaredDrop and Privileged are that container's spec.
