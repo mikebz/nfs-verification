@@ -28,9 +28,9 @@ func TestKeepPodFileRejectsUnusableNames(t *testing.T) {
 	for _, name := range []string{
 		"", "..", "../escape.log", "sub/dir.log", ".hidden", "has space.log",
 		"quote'.log", "$(whoami).log", strings.Repeat("x", 65),
-		// The manifest itself: a capture landing on it would leave the bundle
+		// The manifests: a capture landing on either would leave the bundle
 		// with no account of what the rest of it is.
-		evidenceManifest,
+		evidenceManifest, artifactManifest,
 	} {
 		f := &Framework{CaseID: "DATA-02", state: &caseState{}}
 		if err := f.KeepPodFile("reader", "/mnt/data/f", name); err == nil {
