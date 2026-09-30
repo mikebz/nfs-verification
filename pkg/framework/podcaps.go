@@ -512,10 +512,16 @@ func CapSetOf(m env.CapMasks) (CapSet, error) {
 //
 // A preflight record is reused for up to -preflight-max-age, and a StatefulSet
 // recreates a pod under the same name. The recorded sets follow from the image,
-// the declaration and the platform, so a pod whose images or declaration have
-// changed since is a pod the record does not describe, and judging it on the
-// record would report on a server that is no longer there. The images are
-// compared the way chaos.ResolveProcess compares them.
+// the declaration and the node's runtime, so a pod whose images, declaration or
+// node have changed since is a pod the record does not describe, and judging it
+// on the record would report on a server that is no longer there. The node
+// counts because nothing in the suite requires a cluster's nodes to share one
+// runtime configuration. The images are compared the way chaos.ResolveProcess
+// compares them.
+//
+// A pod that has since taken on hostPID or a shared process namespace is stale
+// as well, for pid1IsNotTheContainers' reason: the record's PID 1 was the
+// container's own, and a refreshed preflight will report why it cannot read one.
 func StaleCapabilityRecord(rec env.ServerInfo, pod *corev1.Pod) string {
 	live := make([]string, 0, len(pod.Spec.Containers))
 	for _, ct := range pod.Spec.Containers {
@@ -524,6 +530,14 @@ func StaleCapabilityRecord(rec env.ServerInfo, pod *corev1.Pod) string {
 	if !slices.Equal(rec.Images, live) {
 		return fmt.Sprintf("preflight recorded %s/%s running %v and it now runs %v; re-run preflight with "+
 			"-refresh-preflight", rec.Namespace, rec.Pod, rec.Images, live)
+	}
+	if pod.Spec.NodeName != rec.Node {
+		return fmt.Sprintf("preflight read %s/%s on %s and it now runs on %s, whose runtime the record does not "+
+			"describe; re-run preflight with -refresh-preflight", rec.Namespace, rec.Pod, rec.Node, pod.Spec.NodeName)
+	}
+	if err := pid1IsNotTheContainers(pod, rec.Capabilities.Container); err != nil {
+		return fmt.Sprintf("%v; preflight read it before that changed, so re-run preflight with "+
+			"-refresh-preflight to record why it cannot be read now", err)
 	}
 	declared, err := DeclaredCapsOf(pod, rec.Capabilities.Container)
 	if err != nil {

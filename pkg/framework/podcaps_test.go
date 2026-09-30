@@ -422,7 +422,7 @@ func TestCapabilityRecordRoundTrip(t *testing.T) {
 	}
 }
 
-// TestStaleCapabilityRecordComparesImagesAndDeclaration exists because a
+// TestStaleCapabilityRecordDetectsAChangedPod exists because a
 // preflight record outlives the pod it was read from: it is reused for up to
 // -preflight-max-age, and a StatefulSet recreates its pod under the same name.
 // Judging a changed pod on the old record reports on a server that is no longer
@@ -430,13 +430,13 @@ func TestCapabilityRecordRoundTrip(t *testing.T) {
 //
 // Steps:
 //  1. The pod preflight read, unchanged: fresh.
-//  2. The same pod rescheduled to another node: still fresh, since the sets
-//     follow from the image, the declaration and the platform.
-//  3. A new image, a new declared capability, and privileged turned on: each
-//     stale, with a message pointing at -refresh-preflight.
-//  4. The recorded container gone from the spec: stale, not a panic or an
+//  2. A new image, a new declared capability, privileged turned on, another
+//     node, and hostPID or a shared process namespace turned on: each stale,
+//     with a message pointing at -refresh-preflight. The node counts because
+//     the sets describe what that node's runtime delivered.
+//  3. The recorded container gone from the spec: stale, not a panic or an
 //     empty declaration.
-func TestStaleCapabilityRecordComparesImagesAndDeclaration(t *testing.T) {
+func TestStaleCapabilityRecordDetectsAChangedPod(t *testing.T) {
 	const image = "registry.example/nfs-provisioner:v4.0.8"
 	pod := func(img string, add []corev1.Capability, priv bool, name, node string) *corev1.Pod {
 		return &corev1.Pod{Spec: corev1.PodSpec{NodeName: node, Containers: []corev1.Container{{
@@ -446,6 +446,8 @@ func TestStaleCapabilityRecordComparesImagesAndDeclaration(t *testing.T) {
 			},
 		}}}}
 	}
+	withSpec := func(p *corev1.Pod, edit func(*corev1.PodSpec)) *corev1.Pod { edit(&p.Spec); return p }
+	yes := true
 	declared := []corev1.Capability{"DAC_READ_SEARCH", "SYS_RESOURCE"}
 	rec := env.ServerInfo{Namespace: "nfs-provisioner", Pod: "nfs-0", Node: "node-a", Images: []string{image},
 		Capabilities: &env.ServerCapabilities{Container: "nfs-server-provisioner",
@@ -457,7 +459,11 @@ func TestStaleCapabilityRecordComparesImagesAndDeclaration(t *testing.T) {
 		stale bool
 	}{
 		{"unchanged", pod(image, declared, false, "nfs-server-provisioner", "node-a"), false},
-		{"rescheduled", pod(image, declared, false, "nfs-server-provisioner", "node-b"), false},
+		{"rescheduled", pod(image, declared, false, "nfs-server-provisioner", "node-b"), true},
+		{"hostPID", withSpec(pod(image, declared, false, "nfs-server-provisioner", "node-a"),
+			func(s *corev1.PodSpec) { s.HostPID = true }), true},
+		{"shared process namespace", withSpec(pod(image, declared, false, "nfs-server-provisioner", "node-a"),
+			func(s *corev1.PodSpec) { s.ShareProcessNamespace = &yes }), true},
 		{"new image", pod(image+"-1", declared, false, "nfs-server-provisioner", "node-a"), true},
 		{"new capability", pod(image, append(declared, "NET_ADMIN"), false, "nfs-server-provisioner", "node-a"), true},
 		{"privileged", pod(image, declared, true, "nfs-server-provisioner", "node-a"), true},

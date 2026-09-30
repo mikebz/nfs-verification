@@ -52,11 +52,15 @@ type ServerInfo struct {
 	// CapabilitiesNote is why Capabilities is empty, when it is.
 	CapabilitiesNote string `json:"capabilitiesNote,omitempty"`
 	// CapabilitiesBlocked says the note is a condition of this cluster that
-	// another would not have, such as no node agent or a server pod that is not
-	// running, rather than the harness failing to read what was there. SEC-09
-	// reports the first blocked and the second failed, as it did when it read
-	// the sets itself; an error's type does not survive the record, and the
-	// note's text is not something to match on.
+	// another would not have, such as a server pod that is not running or a
+	// PID 1 that is not the container's own, rather than the harness failing to
+	// read what was there. SEC-09 reports the first blocked and the second
+	// failed, as it did when it read the sets itself; an error's type does not
+	// survive the record, and the note's text is not something to match on.
+	// A server process that could not be named at all counts as blocked, as it
+	// did for SEC-09 before, and as ProcessNote does for the cases that kill
+	// it: DiscoverServerProcess does not yet type its errors, so the harness
+	// failures among them are not told apart here.
 	CapabilitiesBlocked bool `json:"capabilitiesBlocked,omitempty"`
 }
 

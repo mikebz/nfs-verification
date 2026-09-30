@@ -615,8 +615,9 @@ func podStartInterval(ctx context.Context, f *framework.Framework, pod string) (
 //  1. Take each server preflight recorded. Report blocked where preflight
 //     could not read the sets for a reason of this cluster's, and fail where
 //     it could not read them at all.
-//  2. Check the record against the live pod: the same images and the same
-//     declaration, or blocked with -refresh-preflight.
+//  2. Check the record against the live pod: the same images, declaration and
+//     node, and no hostPID or shared process namespace, or blocked with
+//     -refresh-preflight.
 //  3. Fail on a declared capability neither the server process nor PID 1
 //     held. Record one the server gave up after PID 1 was given it.
 //  4. Fail if the container is privileged.
@@ -661,11 +662,6 @@ func TestSecServerCapabilities(t *testing.T) {
 		if why := framework.StaleCapabilityRecord(rec, pod); why != "" {
 			unjudged = append(unjudged, where+": "+why)
 			continue
-		}
-		if pod.Spec.NodeName != rec.Node {
-			t.Logf("%s was read by preflight on %s and runs on %s now; the images and declaration are unchanged, "+
-				"so the record is judged, and it describes what %s's runtime delivered", where, rec.Node,
-				pod.Spec.NodeName, rec.Node)
 		}
 		judgeServerCapabilities(t, rec, &record)
 	}
