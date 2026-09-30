@@ -2,10 +2,12 @@ package framework
 
 import (
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/iotest"
 
 	"github.com/mikebz/nfs-verification/pkg/env"
 	corev1 "k8s.io/api/core/v1"
@@ -118,6 +120,49 @@ func TestNodeReadMarksAFailedDmesgLikeAFailedMountsRead(t *testing.T) {
 		if r.Bytes != 0 {
 			t.Errorf("%s counts %d bytes, but a placeholder is not what was asked for", r.File, r.Bytes)
 		}
+	}
+}
+
+// TestSaveLogKeepsWhatAStreamDeliveredBeforeItFailed exists because the fake
+// clientset always returns a whole log, so nothing else exercises this path. A
+// regression that dropped the bytes delivered before a read error, or recorded
+// them as complete, would pass every other test. Those bytes are the lines
+// nearest whatever broke the stream.
+//
+// Steps:
+//  1. Save a stream that yields some bytes and then fails.
+//  2. Assert the file holds exactly those bytes, the row counts them, and the
+//     manifest marks it PARTIAL with the reason.
+//  3. Save a stream that could not be opened, and assert it leaves no file
+//     and a NOT CAPTURED row.
+func TestSaveLogKeepsWhatAStreamDeliveredBeforeItFailed(t *testing.T) {
+	b := &bundle{dir: t.TempDir()}
+	delivered := "line one\nline two\n"
+	broken := io.NopCloser(io.MultiReader(strings.NewReader(delivered), iotest.ErrReader(io.ErrUnexpectedEOF)))
+	b.saveLog("writer-main.log", "log of container main in pod default/writer", broken, nil)
+	b.saveLog("reader-main.log", "log of container main in pod default/reader", nil, errors.New("container is waiting to start"))
+
+	data, err := os.ReadFile(filepath.Join(b.dir, "writer-main.log"))
+	if err != nil {
+		t.Fatalf("a stream that failed partway left no file: %v", err)
+	}
+	if string(data) != delivered {
+		t.Errorf("the file holds %q, want the %q the stream delivered", data, delivered)
+	}
+	if r := b.rows[0]; r.Bytes != int64(len(delivered)) || r.Problem == "" {
+		t.Errorf("the partial log was recorded as %+v, want %d bytes and a problem", r, len(delivered))
+	}
+	got := renderArtifacts(b.rows)
+	for _, want := range []string{
+		"writer-main.log\tlog of container main in pod default/writer\t18 bytes\tPARTIAL, this is what arrived before it stopped: the stream stopped after 18 bytes: unexpected EOF",
+		"reader-main.log\tlog of container main in pod default/reader\t0 bytes\tNOT CAPTURED: not streamed: container is waiting to start",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the manifest does not say %q:\n%s", want, got)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(b.dir, "reader-main.log")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("a log that was never streamed left a file that could pass for the container's output: %v", err)
 	}
 }
 

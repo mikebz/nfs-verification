@@ -284,36 +284,41 @@ func logSource(ns, pod, container string, previous bool) string {
 }
 
 // writeLogs copies one container's log into the bundle and records what
-// arrived. A log that could not be fetched leaves no file, so that nothing in
-// the bundle poses as the container's output; the manifest says why instead.
+// arrived.
 func (f *Framework) writeLogs(ctx context.Context, b *bundle, sub, ns, pod, container string, previous bool) {
-	file := logFile(sub, pod, container, previous)
-	n, err := f.copyLogs(ctx, filepath.Join(b.dir, file), ns, pod, container, previous)
-	row := artifactRow{File: file, Source: logSource(ns, pod, container, previous), Bytes: n}
-	if err != nil {
-		row.Problem = err.Error()
-	}
-	b.rows = append(b.rows, row)
-}
-
-// copyLogs streams one container's log to dest and returns how many bytes
-// landed. A stream that stops partway keeps what it delivered and says so,
-// because the lines before the break are the ones nearest whatever broke it.
-func (f *Framework) copyLogs(ctx context.Context, dest, ns, pod, container string, previous bool) (int64, error) {
 	req := f.C.Kube.CoreV1().Pods(ns).GetLogs(pod, &corev1.PodLogOptions{Container: container, Previous: previous})
 	rc, err := req.Stream(ctx)
-	if err != nil {
-		return 0, fmt.Errorf("not streamed: %w", err)
+	b.saveLog(logFile(sub, pod, container, previous), logSource(ns, pod, container, previous), rc, err)
+}
+
+// saveLog writes one log stream into the bundle and records what landed. It
+// is separate from the request so that a stream failing partway can be tested
+// without a cluster.
+//
+// A log that could not be opened leaves no file, so that nothing in the bundle
+// poses as the container's output; the manifest says why instead. A stream
+// that stops partway keeps what it delivered and is marked PARTIAL, because
+// the lines before the break are the ones nearest whatever broke it.
+func (b *bundle) saveLog(file, source string, rc io.ReadCloser, openErr error) {
+	row := artifactRow{File: file, Source: source}
+	defer func() { b.rows = append(b.rows, row) }()
+	if openErr != nil {
+		row.Problem = fmt.Sprintf("not streamed: %v", openErr)
+		return
 	}
-	out, err := os.Create(dest)
+	out, err := os.Create(filepath.Join(b.dir, file))
 	if err != nil {
-		return 0, errors.Join(fmt.Errorf("streamed but not written: %w", err), rc.Close())
+		row.Problem = errors.Join(fmt.Errorf("streamed but not written: %w", err), rc.Close()).Error()
+		return
 	}
 	n, err := io.Copy(out, rc)
 	if err != nil {
 		err = fmt.Errorf("the stream stopped after %d bytes: %w", n, err)
 	}
-	return n, errors.Join(err, out.Close(), rc.Close())
+	row.Bytes = n
+	if err := errors.Join(err, out.Close(), rc.Close()); err != nil {
+		row.Problem = err.Error()
+	}
 }
 
 func (f *Framework) dumpEvents(ctx context.Context, b *bundle) {
