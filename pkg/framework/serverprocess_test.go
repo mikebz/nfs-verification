@@ -204,6 +204,35 @@ func TestListeningInodesRefusesWhatItCannotRead(t *testing.T) {
 	}
 }
 
+// TestPickHolderKeepsEveryPreforkedHolder exists because SEC-09 reads every
+// process serving the socket and takes what all of them hold. If discovery
+// handed over only the lowest pid, which on a preforking server is the master,
+// the capability read would judge the master alone, and every test of the
+// intersection would still pass.
+//
+// Steps:
+//  1. Pose the reference server with a second ganesha.nfsd holding the same
+//     listening socket, as a preforked worker does.
+//  2. Assert the name is unchanged, PID is still the lowest, and PIDs carries
+//     both, sorted.
+func TestPickHolderKeepsEveryPreforkedHolder(t *testing.T) {
+	prefork := serverAsItIs()
+	prefork.procs = append(prefork.procs, "153 ganesha.nfsd")
+	prefork.argv0 = append(prefork.argv0, "153 /usr/bin/ganesha.nfsd")
+	prefork.fds = append(prefork.fds, "153 socket:[8470545]")
+
+	got, err := pickHolder(parseListenerFacts(prefork.String()), []string{"8470545"})
+	if err != nil {
+		t.Fatalf("naming a preforked server: %v", err)
+	}
+	if got.Name != "ganesha.nfsd" || got.PID != 152 {
+		t.Errorf("named %q pid %d, want ganesha.nfsd pid 152", got.Name, got.PID)
+	}
+	if len(got.PIDs) != 2 || got.PIDs[0] != 152 || got.PIDs[1] != 153 {
+		t.Errorf("holders are %v, want [152 153]", got.PIDs)
+	}
+}
+
 // TestPickHolderRefusesWhatItCannotAttribute covers the node's half: every way
 // the search for a holder can fail to be conclusive. Each must produce a named
 // refusal rather than a name, because the alternative is a SIGKILL aimed by

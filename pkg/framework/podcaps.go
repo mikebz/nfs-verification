@@ -257,11 +257,11 @@ func ServerProcessCaps(ctx context.Context, agent *Agent, pod *corev1.Pod, sp Se
 		return ProcessCaps{}, Blockedf("no node agent, so the capability set of %s in %s/%s cannot be read",
 			sp.Name, pod.Namespace, pod.Name)
 	}
+	// No fallback to PID alone: discovery always fills PIDs, and a caller
+	// that did not would have the read judge one process of a preforked
+	// server as though it were all of them.
 	pids := sp.PIDs
-	if len(pids) == 0 {
-		pids = []int{sp.PID}
-	}
-	if pids[0] <= 0 || sp.Node == "" {
+	if len(pids) == 0 || pids[0] <= 0 || sp.Node == "" {
 		return ProcessCaps{}, fmt.Errorf("the server process in %s/%s has no node pid to read (%s)",
 			pod.Namespace, pod.Name, sp)
 	}
