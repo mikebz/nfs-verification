@@ -222,6 +222,8 @@ both pass each time. `gke-w2`'s runs record `SYS_RESOURCE` as dropped by the
 server; `gke-w1`'s record nothing dropped. The same verdicts came back once
 preflight made the reads, with `-refresh-preflight`
 (`w{1,2}-issue98-preflight-sec09-20260930-213321`, and after review
-`w{1,2}-issue98-review3-sec09-20260930-225727`), and a run on `gke-w1` fed an
-older record through `-env-file` reported blocked, naming `-refresh-preflight`
-(`w1-issue98-oldrecord-sec09-20260930-213407`).
+`w{1,2}-issue98-review3-sec09-20260930-225727` and
+`w{1,2}-issue98-review4b-sec09-20260930-232103`). Runs on `gke-w1` fed older
+records through `-env-file` reported blocked, naming `-refresh-preflight`: one
+with no capabilities (`w1-issue98-oldrecord-sec09-20260930-213407`) and one
+with capabilities but no pod UID (`w1-issue98-staleuid2-sec09-20260930-232103`).

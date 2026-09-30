@@ -615,8 +615,8 @@ func podStartInterval(ctx context.Context, f *framework.Framework, pod string) (
 //  1. Take each server preflight recorded. Report blocked where preflight
 //     could not read the sets for a reason of this cluster's, and fail where
 //     it could not read them at all.
-//  2. Check the record against the live pod: the same images, declaration and
-//     node, and no hostPID or shared process namespace, or blocked with
+//  2. Check the record against the live pod: the same pod UID and the same
+//     resolved image in the server's container, or blocked with
 //     -refresh-preflight.
 //  3. Fail on a declared capability neither the server process nor PID 1
 //     held. Record one the server gave up after PID 1 was given it.

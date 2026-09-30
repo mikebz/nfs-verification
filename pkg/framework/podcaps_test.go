@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/mikebz/nfs-verification/pkg/env"
 )
@@ -422,59 +424,105 @@ func TestCapabilityRecordRoundTrip(t *testing.T) {
 	}
 }
 
-// TestStaleCapabilityRecordDetectsAChangedPod exists because a
-// preflight record outlives the pod it was read from: it is reused for up to
+// TestStaleCapabilityRecordDetectsAChangedPod exists because a preflight record
+// outlives the pod it was read from: it is reused for up to
 // -preflight-max-age, and a StatefulSet recreates its pod under the same name.
 // Judging a changed pod on the old record reports on a server that is no longer
 // there, and nothing about that fails on its own.
 //
 // Steps:
 //  1. The pod preflight read, unchanged: fresh.
-//  2. A new image, a new declared capability, privileged turned on, another
-//     node, and hostPID or a shared process namespace turned on: each stale,
-//     with a message pointing at -refresh-preflight. The node counts because
-//     the sets describe what that node's runtime delivered.
-//  3. The recorded container gone from the spec: stale, not a panic or an
-//     empty declaration.
+//  2. The pod recreated under the same name, with nothing else visibly
+//     different: stale, since a new pod may carry another security context
+//     or node, and runAsUser alone can change the delivered set.
+//  3. The same pod whose container now runs another resolved image, as a
+//     mutable tag re-pulled on restart does: stale.
+//  4. The same pod with no resolved image id yet, and with the recorded
+//     container missing from its status: stale, not fresh by default.
+//  5. Every stale reason says how to refresh the record.
+//  6. A record written before the UID and image id were recorded says it
+//     predates them, rather than naming an empty pod.
 func TestStaleCapabilityRecordDetectsAChangedPod(t *testing.T) {
-	const image = "registry.example/nfs-provisioner:v4.0.8"
-	pod := func(img string, add []corev1.Capability, priv bool, name, node string) *corev1.Pod {
-		return &corev1.Pod{Spec: corev1.PodSpec{NodeName: node, Containers: []corev1.Container{{
-			Name: name, Image: img, SecurityContext: &corev1.SecurityContext{
-				Privileged:   &priv,
-				Capabilities: &corev1.Capabilities{Add: add},
-			},
-		}}}}
+	const (
+		uid     = "3adc37e4-63c0-42af-82b9-69f90208510a"
+		imageID = "registry.example/nfs-provisioner@sha256:1111"
+	)
+	pod := func(podUID, container, id string) *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{UID: types.UID(podUID)},
+			Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{
+				{Name: container, ImageID: id},
+			}},
+		}
 	}
-	withSpec := func(p *corev1.Pod, edit func(*corev1.PodSpec)) *corev1.Pod { edit(&p.Spec); return p }
-	yes := true
-	declared := []corev1.Capability{"DAC_READ_SEARCH", "SYS_RESOURCE"}
-	rec := env.ServerInfo{Namespace: "nfs-provisioner", Pod: "nfs-0", Node: "node-a", Images: []string{image},
-		Capabilities: &env.ServerCapabilities{Container: "nfs-server-provisioner",
-			DeclaredAdd: []string{"DAC_READ_SEARCH", "SYS_RESOURCE"}}}
+	rec := env.ServerInfo{Namespace: "nfs-provisioner", Pod: "nfs-0", Node: "node-a",
+		Capabilities: &env.ServerCapabilities{PodUID: uid, ImageID: imageID, Container: "nfs-server-provisioner"}}
+
+	old := rec
+	old.Capabilities = &env.ServerCapabilities{Container: "nfs-server-provisioner"}
+	if why := StaleCapabilityRecord(old, pod(uid, "nfs-server-provisioner", imageID)); !strings.Contains(why, "predates") {
+		t.Errorf("a record with no pod UID or image id read as %q, not as predating them", why)
+	}
 
 	for _, tc := range []struct {
 		name  string
 		pod   *corev1.Pod
 		stale bool
 	}{
-		{"unchanged", pod(image, declared, false, "nfs-server-provisioner", "node-a"), false},
-		{"rescheduled", pod(image, declared, false, "nfs-server-provisioner", "node-b"), true},
-		{"hostPID", withSpec(pod(image, declared, false, "nfs-server-provisioner", "node-a"),
-			func(s *corev1.PodSpec) { s.HostPID = true }), true},
-		{"shared process namespace", withSpec(pod(image, declared, false, "nfs-server-provisioner", "node-a"),
-			func(s *corev1.PodSpec) { s.ShareProcessNamespace = &yes }), true},
-		{"new image", pod(image+"-1", declared, false, "nfs-server-provisioner", "node-a"), true},
-		{"new capability", pod(image, append(declared, "NET_ADMIN"), false, "nfs-server-provisioner", "node-a"), true},
-		{"privileged", pod(image, declared, true, "nfs-server-provisioner", "node-a"), true},
-		{"container gone", pod(image, declared, false, "server", "node-a"), true},
+		{"unchanged", pod(uid, "nfs-server-provisioner", imageID), false},
+		{"recreated", pod("9f0c", "nfs-server-provisioner", imageID), true},
+		{"image re-resolved", pod(uid, "nfs-server-provisioner", "registry.example/nfs-provisioner@sha256:2222"), true},
+		{"image unresolved", pod(uid, "nfs-server-provisioner", ""), true},
+		{"container gone", pod(uid, "server", imageID), true},
 	} {
 		why := StaleCapabilityRecord(rec, tc.pod)
+		if strings.Contains(why, "read pod ,") {
+			t.Errorf("%s: the reason names an empty pod: %q", tc.name, why)
+		}
 		if (why != "") != tc.stale {
 			t.Errorf("%s: stale=%v, want %v (%q)", tc.name, why != "", tc.stale, why)
 		}
 		if tc.stale && !strings.Contains(why, "-refresh-preflight") {
 			t.Errorf("%s: the reason does not say how to refresh the record: %q", tc.name, why)
 		}
+	}
+}
+
+// TestIntersectServerReadsTakesWhatEveryProcessHolds exists because a server
+// that preforks answers from several processes, and reading only the lowest
+// pid, which is typically the master, would report the server holding a
+// capability its workers dropped.
+//
+// Steps:
+//  1. A master holding the full gke-w1 set and a worker holding gke-w2's,
+//     without SYS_RESOURCE: the server holds the worker's set, reported under
+//     the master's pid.
+//  2. One process: its own set, unchanged.
+//  3. Two processes in different containers: an error, not one server.
+func TestIntersectServerReadsTakesWhatEveryProcessHolds(t *testing.T) {
+	full := CapSet{Permitted: maskFull, Effective: maskFull, Bounding: maskFull}
+	lowered := CapSet{Permitted: maskNoSysResource, Effective: maskNoSysResource, Bounding: maskFull}
+	master := ProcessCaps{PID: 10, Name: "ganesha.nfsd", Container: "nfs", Caps: full}
+	worker := ProcessCaps{PID: 11, Name: "ganesha.nfsd", Container: "nfs", Caps: lowered}
+
+	got, err := intersectServerReads([]ProcessCaps{worker, master})
+	if err != nil {
+		t.Fatalf("intersecting a master and a worker: %v", err)
+	}
+	if got.Caps != lowered || got.PID != 10 {
+		t.Errorf("master and worker combined as pid %d %+v, want pid 10 %+v", got.PID, got.Caps, lowered)
+	}
+	if HasCap(got.Caps.Permitted, "SYS_RESOURCE") {
+		t.Errorf("the server reads as holding SYS_RESOURCE, which its worker dropped")
+	}
+
+	if one, err := intersectServerReads([]ProcessCaps{master}); err != nil || one.Caps != full {
+		t.Errorf("one process combined as %+v, %v", one, err)
+	}
+
+	other := worker
+	other.Container = "sidecar"
+	if c, err := intersectServerReads([]ProcessCaps{master, other}); err == nil {
+		t.Errorf("processes in two containers combined as %+v rather than an error", c)
 	}
 }

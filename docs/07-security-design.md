@@ -373,11 +373,17 @@ platform, none of which a case changes, and naming the server needs the node
 agent (F-027), so reading them per case bought a privileged dependency and no
 information. The test plan's harness design section now states the rule for
 every case. What the case still reads live is the pod, through the API: a record
-whose pod now runs other images, declares another set, runs on another node or
-has taken on `hostPID` or a shared process namespace does not describe it, and
-the case reports blocked with `-refresh-preflight` rather than judge it. The node
-counts because the sets are what that node's runtime delivered, and nothing
-requires a cluster's nodes to share one runtime configuration. Preflight carries whether an unread set was a condition of the
+read from another pod instance, or from a binary the container no longer runs,
+does not describe it, and the case reports blocked with `-refresh-preflight`
+rather than judge it. The record carries the pod's UID and the container's
+resolved image id for this. The UID pins everything else that decides the set,
+because the security context, the process namespace and the node cannot change
+without a new pod; the image id pins the binary, which can change in place.
+Comparing the declaration and the node field by field was tried first and
+dropped in review: it missed `runAsUser`, and every field it did not list. A
+server that preforks is read in every process holding the socket, and what it
+holds is what all of them hold, so a master that kept a capability its workers
+dropped does not stand in for them. Preflight carries whether an unread set was a condition of the
 cluster or the harness failing, so the case still reports the first blocked and
 the second failed, as it did when it read the sets itself.
 

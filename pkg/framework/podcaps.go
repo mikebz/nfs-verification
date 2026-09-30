@@ -3,7 +3,6 @@ package framework
 import (
 	"context"
 	"fmt"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -246,35 +245,85 @@ type ProcessCaps struct {
 // discovery saw and the cgroup has to be one of this pod's containers, so a
 // server that restarted between the two reads, leaving its old pid to
 // something else, is an error rather than somebody else's capabilities.
+//
+// A server that preforks holds its socket from several processes of one name,
+// and every one of them is read. What the server holds is what all of them
+// hold, so the sets are intersected: the lowest pid may be a master that kept
+// a capability the workers serving requests have dropped, and reading only it
+// would report the server holding what it does not. Processes in different
+// containers are an error, since they cannot be one server's.
 func ServerProcessCaps(ctx context.Context, agent *Agent, pod *corev1.Pod, sp ServerProcess) (ProcessCaps, error) {
 	if agent == nil {
 		return ProcessCaps{}, Blockedf("no node agent, so the capability set of %s in %s/%s cannot be read",
 			sp.Name, pod.Namespace, pod.Name)
 	}
-	if sp.PID <= 0 || sp.Node == "" {
+	pids := sp.PIDs
+	if len(pids) == 0 {
+		pids = []int{sp.PID}
+	}
+	if pids[0] <= 0 || sp.Node == "" {
 		return ProcessCaps{}, fmt.Errorf("the server process in %s/%s has no node pid to read (%s)",
 			pod.Namespace, pod.Name, sp)
 	}
+	reads := make([]ProcessCaps, 0, len(pids))
+	for _, pid := range pids {
+		r, err := readServerPID(ctx, agent, pod, sp, pid)
+		if err != nil {
+			return ProcessCaps{}, err
+		}
+		reads = append(reads, r)
+	}
+	return intersectServerReads(reads)
+}
+
+// readServerPID reads one of the server's processes, with the identity checks
+// ServerProcessCaps describes.
+func readServerPID(ctx context.Context, agent *Agent, pod *corev1.Pod, sp ServerProcess, pid int) (ProcessCaps, error) {
 	readCtx, cancel := context.WithTimeout(ctx, procStatusTimeout)
 	defer cancel()
 	out, err := agent.RunScript(readCtx, sp.Node, "proc-status.sh",
-		"caps-"+strings.ToLower(Cfg().RunID), "/proc", strconv.Itoa(sp.PID))
+		"caps-"+strings.ToLower(Cfg().RunID), "/proc", strconv.Itoa(pid))
 	if err != nil {
-		return ProcessCaps{}, fmt.Errorf("reading pid %d on %s: %w", sp.PID, sp.Node, err)
+		return ProcessCaps{}, fmt.Errorf("reading pid %d on %s: %w", pid, sp.Node, err)
 	}
 	read, err := parseProcRead(out)
 	if err != nil {
-		return ProcessCaps{}, fmt.Errorf("reading pid %d on %s: %w", sp.PID, sp.Node, err)
+		return ProcessCaps{}, fmt.Errorf("reading pid %d on %s: %w", pid, sp.Node, err)
 	}
 	if err := sameProcessName(read.name, sp.Name); err != nil {
-		return ProcessCaps{}, fmt.Errorf("pid %d on %s: %w", sp.PID, sp.Node, err)
+		return ProcessCaps{}, fmt.Errorf("pid %d on %s: %w", pid, sp.Node, err)
 	}
 	container, err := containerOf(read.cgroup, pod.Status.ContainerStatuses)
 	if err != nil {
 		return ProcessCaps{}, fmt.Errorf("pid %d on %s is %s but not in %s/%s: %w",
-			sp.PID, sp.Node, read.name, pod.Namespace, pod.Name, err)
+			pid, sp.Node, read.name, pod.Namespace, pod.Name, err)
 	}
-	return ProcessCaps{PID: sp.PID, Node: sp.Node, Name: read.name, Container: container, Caps: read.caps}, nil
+	return ProcessCaps{PID: pid, Node: sp.Node, Name: read.name, Container: container, Caps: read.caps}, nil
+}
+
+// intersectServerReads combines the reads of every process serving one socket
+// into the set the server holds: a capability counts only if every one of
+// them holds it. The result carries the lowest pid, as discovery does.
+func intersectServerReads(reads []ProcessCaps) (ProcessCaps, error) {
+	if len(reads) == 0 {
+		return ProcessCaps{}, fmt.Errorf("no server process was read")
+	}
+	out := reads[0]
+	for _, r := range reads[1:] {
+		if r.Container != out.Container {
+			return ProcessCaps{}, fmt.Errorf("the processes holding the socket run in containers %s (pid %d) and "+
+				"%s (pid %d), so they are not one server", out.Container, out.PID, r.Container, r.PID)
+		}
+		out.Caps.Inheritable &= r.Caps.Inheritable
+		out.Caps.Permitted &= r.Caps.Permitted
+		out.Caps.Effective &= r.Caps.Effective
+		out.Caps.Bounding &= r.Caps.Bounding
+		out.Caps.Ambient &= r.Caps.Ambient
+		if r.PID < out.PID {
+			out.PID = r.PID
+		}
+	}
+	return out, nil
 }
 
 // procRead is what scripts/proc-status.sh printed, parsed.
@@ -459,7 +508,19 @@ func ReadServerCapabilities(ctx context.Context, c *Client, agent *Agent, pod *c
 	if err != nil {
 		return env.ServerCapabilities{}, err
 	}
+	imageID := ""
+	for _, st := range pod.Status.ContainerStatuses {
+		if st.Name == server.Container {
+			imageID = st.ImageID
+		}
+	}
+	if imageID == "" {
+		return env.ServerCapabilities{}, fmt.Errorf("%s/%s container %s reports no resolved image id, so the "+
+			"record could not be tied to the binary it was read from", pod.Namespace, pod.Name, server.Container)
+	}
 	return env.ServerCapabilities{
+		PodUID:       string(pod.UID),
+		ImageID:      imageID,
 		Container:    server.Container,
 		DeclaredAdd:  declared.Add,
 		DeclaredDrop: declared.Drop,
@@ -511,45 +572,35 @@ func CapSetOf(m env.CapMasks) (CapSet, error) {
 // the live pod, or returns nothing when it still does.
 //
 // A preflight record is reused for up to -preflight-max-age, and a StatefulSet
-// recreates a pod under the same name. The recorded sets follow from the image,
-// the declaration and the node's runtime, so a pod whose images, declaration or
-// node have changed since is a pod the record does not describe, and judging it
-// on the record would report on a server that is no longer there. The node
-// counts because nothing in the suite requires a cluster's nodes to share one
-// runtime configuration. The images are compared the way chaos.ResolveProcess
-// compares them.
-//
-// A pod that has since taken on hostPID or a shared process namespace is stale
-// as well, for pid1IsNotTheContainers' reason: the record's PID 1 was the
-// container's own, and a refreshed preflight will report why it cannot read one.
+// recreates a pod under the same name. The recorded sets follow from the
+// binary, the pod spec and the node's runtime, so the record is tied to the
+// two things that pin all of them. The pod's UID pins the spec and the node:
+// the security context, hostPID, a shared process namespace and the node
+// cannot change without a new pod, and a new pod gets a new UID. The
+// container's resolved image id pins the binary, which the UID does not: a
+// container image is the one field that can change in place, and a mutable tag
+// can resolve to another binary when the container restarts. An image id the
+// live pod has not resolved is stale too, since what it runs cannot be told.
 func StaleCapabilityRecord(rec env.ServerInfo, pod *corev1.Pod) string {
-	live := make([]string, 0, len(pod.Spec.Containers))
-	for _, ct := range pod.Spec.Containers {
-		live = append(live, ct.Image)
+	c := rec.Capabilities
+	if c.PodUID == "" || c.ImageID == "" {
+		return fmt.Sprintf("the preflight record of %s/%s predates the pod UID and image id that tie it to a "+
+			"pod; re-run preflight with -refresh-preflight", rec.Namespace, rec.Pod)
 	}
-	if !slices.Equal(rec.Images, live) {
-		return fmt.Sprintf("preflight recorded %s/%s running %v and it now runs %v; re-run preflight with "+
-			"-refresh-preflight", rec.Namespace, rec.Pod, rec.Images, live)
+	if string(pod.UID) != c.PodUID {
+		return fmt.Sprintf("%s/%s is pod %s now and preflight read pod %s, so it has been recreated since and "+
+			"its spec, node or image may differ; re-run preflight with -refresh-preflight",
+			rec.Namespace, rec.Pod, pod.UID, c.PodUID)
 	}
-	if pod.Spec.NodeName != rec.Node {
-		return fmt.Sprintf("preflight read %s/%s on %s and it now runs on %s, whose runtime the record does not "+
-			"describe; re-run preflight with -refresh-preflight", rec.Namespace, rec.Pod, rec.Node, pod.Spec.NodeName)
+	live := ""
+	for _, st := range pod.Status.ContainerStatuses {
+		if st.Name == c.Container {
+			live = st.ImageID
+		}
 	}
-	if err := pid1IsNotTheContainers(pod, rec.Capabilities.Container); err != nil {
-		return fmt.Sprintf("%v; preflight read it before that changed, so re-run preflight with "+
-			"-refresh-preflight to record why it cannot be read now", err)
-	}
-	declared, err := DeclaredCapsOf(pod, rec.Capabilities.Container)
-	if err != nil {
-		return fmt.Sprintf("%v, though preflight read the server in it; re-run preflight with -refresh-preflight", err)
-	}
-	if !slices.Equal(declared.Add, rec.Capabilities.DeclaredAdd) ||
-		!slices.Equal(declared.Drop, rec.Capabilities.DeclaredDrop) ||
-		declared.Privileged != rec.Capabilities.Privileged {
-		return fmt.Sprintf("container %s of %s/%s now declares add=%v drop=%v privileged=%v, and preflight read "+
-			"it declaring add=%v drop=%v privileged=%v; re-run preflight with -refresh-preflight",
-			declared.Container, rec.Namespace, rec.Pod, declared.Add, declared.Drop, declared.Privileged,
-			rec.Capabilities.DeclaredAdd, rec.Capabilities.DeclaredDrop, rec.Capabilities.Privileged)
+	if live == "" || live != c.ImageID {
+		return fmt.Sprintf("container %s of %s/%s runs image %q and preflight read it running %q; re-run "+
+			"preflight with -refresh-preflight", c.Container, rec.Namespace, rec.Pod, live, c.ImageID)
 	}
 	return ""
 }
