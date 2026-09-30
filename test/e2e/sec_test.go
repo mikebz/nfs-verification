@@ -586,7 +586,9 @@ func podStartInterval(ctx context.Context, f *framework.Framework, pod string) (
 // not the container's PID 1 (F-026): the case read PID 1 until #98, and so
 // asserted on the supervisor. PID 1 is still read, for the other half: it is
 // what the runtime started, so its set is what the platform delivered. A
-// declared capability PID 1 does not hold was taken by the platform, and fails.
+// declared capability the server holds is fine whatever PID 1 holds, since a
+// supervisor may drop one from its own set after starting the server. One
+// neither holds was taken by the platform, and fails.
 // One PID 1 holds and the server does not was given up inside the container, by
 // the server or its supervisor, and is recorded: that is the server narrowing
 // itself, which is the plan's "no more" rather than a breach of it, and failing
@@ -608,8 +610,8 @@ func podStartInterval(ctx context.Context, f *framework.Framework, pod string) (
 //     that its cgroup is one of the pod's containers.
 //  3. Read that container's declared capabilities from the pod spec, and the
 //     set its PID 1 holds.
-//  4. Fail on a declared capability PID 1 does not hold. Record one the server
-//     process gave up after PID 1 was given it.
+//  4. Fail on a declared capability neither the server process nor PID 1
+//     holds. Record one the server gave up after PID 1 was given it.
 //  5. Fail if the container is privileged.
 //  6. Record both sets, and how far the server's exceeds the declaration.
 func TestSecServerCapabilities(t *testing.T) {
@@ -667,14 +669,14 @@ func TestSecServerCapabilities(t *testing.T) {
 
 	stripped, dropped := framework.CapGaps(declared.Add, delivered, server.Caps)
 	for _, want := range stripped {
-		t.Errorf("container %s of %s/%s on %s declares %s and its PID 1, the process the runtime started, "+
-			"does not hold it (permitted %v), so neither can the server, %s. Something between the spec and "+
+		t.Errorf("container %s of %s/%s on %s declares %s, and neither the server, %s, nor PID 1, the "+
+			"process the runtime started, holds it (PID 1 permitted %v). Something between the spec and "+
 			"the process removed it: an admission policy, a restricted bounding set, or a runtime default "+
 			"such as a non-root user with no ambient set; the one alternative is that PID 1 dropped it "+
 			"itself. The pod started anyway, so what an operator will see is the operations needing that "+
 			"capability failing with EPERM against a server that looks healthy",
-			declared.Container, pod.Namespace, pod.Name, server.Node, want,
-			framework.CapNames(delivered.Permitted), server.Name)
+			declared.Container, pod.Namespace, pod.Name, server.Node, want, server.Name,
+			framework.CapNames(delivered.Permitted))
 	}
 	for _, want := range dropped {
 		t.Logf("recorded: container %s declares %s and the runtime delivered it to PID 1, but the server, "+

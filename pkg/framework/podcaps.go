@@ -82,16 +82,22 @@ func HasCap(mask uint64, name string) bool {
 // CapGaps sorts the declared capabilities the server does not hold by where
 // each one went missing, because the two places belong to different people.
 //
-// Stripped is what the container's first process was never given, so the
-// platform took it between the spec and the runtime: an admission policy, a
-// restricted bounding set, or a runtime default such as a non-root user with no
-// ambient set. That is SEC-09's failure. The one thing the witness cannot rule
-// out is a first process that dropped the capability itself before the case
-// read it, and the case's failure message says so. Dropped is what the
-// platform delivered and the server process no longer holds, so something
-// inside the container gave it up, the server or its supervisor. That is the
-// server's own choice, and on gke-w2 it is ganesha.nfsd lowering
-// CAP_SYS_RESOURCE at start (#98).
+// The server's own set is asked first. A capability the server holds is not
+// missing, whatever PID 1 holds: a supervisor may start the server and then
+// drop the capability from its own set, so PID 1 lacking it later proves
+// nothing about what the platform delivered, and the server holding it proves
+// the platform did.
+//
+// Of what the server does not hold, stripped is what the container's first
+// process does not hold either, so the platform took it between the spec and
+// the runtime: an admission policy, a restricted bounding set, or a runtime
+// default such as a non-root user with no ambient set. That is SEC-09's
+// failure. The one thing the witness cannot rule out is a first process that
+// dropped the capability itself before the case read it, and the case's
+// failure message says so. Dropped is what the platform delivered and the
+// server process no longer holds, so something inside the container gave it
+// up, the server or its supervisor. That is the server's own choice, and on
+// gke-w2 it is ganesha.nfsd lowering CAP_SYS_RESOURCE at start (#98).
 //
 // Both are judged on the permitted set rather than the effective one. A process
 // may lower a capability from its effective set and raise it again around the
@@ -100,9 +106,10 @@ func HasCap(mask uint64, name string) bool {
 func CapGaps(declared []string, delivered, held CapSet) (stripped, dropped []string) {
 	for _, want := range declared {
 		switch {
+		case HasCap(held.Permitted, want):
 		case !HasCap(delivered.Permitted, want):
 			stripped = append(stripped, want)
-		case !HasCap(held.Permitted, want):
+		default:
 			dropped = append(dropped, want)
 		}
 	}
@@ -163,14 +170,11 @@ func ParseProcStatus(contents string) (CapSet, error) {
 // ganesha.nfsd drops CAP_SYS_RESOURCE at start and nfs-provisioner, PID 1,
 // keeps it (F-026, #98). ServerProcessCaps reads the server.
 //
-// A pod sharing one process namespace between its containers has the pause
-// process as PID 1 in all of them, which would report the sandbox's set as the
-// container's. That is refused as blocked rather than read.
+// A pod whose PID 1 is not its container's first process is refused as blocked
+// rather than read; pid1IsNotTheContainers says which pods those are.
 func ContainerCaps(ctx context.Context, c *Client, pod *corev1.Pod, container string) (CapSet, error) {
-	if pod.Spec.ShareProcessNamespace != nil && *pod.Spec.ShareProcessNamespace {
-		return CapSet{}, Blockedf("%s/%s shares one process namespace between its containers, so PID 1 "+
-			"in container %s is the pod's sandbox rather than the process the runtime started for it, "+
-			"and what the platform delivered to that container cannot be read there", pod.Namespace, pod.Name, container)
+	if err := pid1IsNotTheContainers(pod, container); err != nil {
+		return CapSet{}, err
 	}
 	r := c.Sh(ctx, pod.Namespace, pod.Name, container, "cat /proc/1/status")
 	if r.Err != nil {
@@ -184,6 +188,30 @@ func ContainerCaps(ctx context.Context, c *Client, pod *corev1.Pod, container st
 			pod.Namespace, pod.Name, container, err)
 	}
 	return caps, nil
+}
+
+// pid1IsNotTheContainers refuses the pods in which /proc/1, read from inside a
+// container, is not the process the runtime started for that container. Each
+// of these reads a real set belonging to somebody else, so the failure has no
+// symptom: SEC-09 would pass or fail on it without a word.
+//
+//   - hostPID: PID 1 is the node's init, which on an ordinary node holds every
+//     capability, so a stripped one would read as delivered.
+//   - A process namespace shared between the pod's containers: PID 1 is the
+//     pause process, whose set is the sandbox's rather than this container's,
+//     so a declared capability could read as stripped that was delivered.
+func pid1IsNotTheContainers(pod *corev1.Pod, container string) error {
+	switch {
+	case pod.Spec.HostPID:
+		return Blockedf("%s/%s runs in the node's process namespace, so PID 1 in container %s is the node's "+
+			"init rather than the process the runtime started for it, and what the platform delivered to "+
+			"that container cannot be read there", pod.Namespace, pod.Name, container)
+	case pod.Spec.ShareProcessNamespace != nil && *pod.Spec.ShareProcessNamespace:
+		return Blockedf("%s/%s shares one process namespace between its containers, so PID 1 in container "+
+			"%s is the pod's sandbox rather than the process the runtime started for it, and what the "+
+			"platform delivered to that container cannot be read there", pod.Namespace, pod.Name, container)
+	}
+	return nil
 }
 
 // procStatusTimeout bounds the node read of one process. One small file pair

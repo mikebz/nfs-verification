@@ -181,6 +181,9 @@ const (
 //     server holds.
 //  4. A server that lowered a capability from its effective set only: it can
 //     raise it again, so it is neither.
+//  5. A supervisor that dropped SYS_RESOURCE from its own set after starting a
+//     server that kept it: the server holds it, so it is neither, and calling
+//     it stripped would blame the platform for a capability the server has.
 func TestCapGapsAttributesEachMissingCapability(t *testing.T) {
 	declared := []string{"DAC_READ_SEARCH", "SYS_RESOURCE"}
 	full := CapSet{Permitted: maskFull, Effective: maskFull, Bounding: maskFull}
@@ -209,6 +212,42 @@ func TestCapGapsAttributesEachMissingCapability(t *testing.T) {
 	if s, d := CapGaps(declared, full, lowered); len(s) != 0 || len(d) != 0 {
 		t.Errorf("a server holding SYS_RESOURCE permitted but not effective read as stripped %v, dropped %v; "+
 			"it can raise it again", s, d)
+	}
+
+	supervisorDropped := CapSet{Permitted: maskNoSysResource, Effective: maskNoSysResource, Bounding: maskFull}
+	if s, d := CapGaps(declared, supervisorDropped, full); len(s) != 0 || len(d) != 0 {
+		t.Errorf("a server holding SYS_RESOURCE under a PID 1 that later dropped it read as stripped %v, "+
+			"dropped %v; the server holding it proves the platform delivered it", s, d)
+	}
+}
+
+// TestPID1RefusesPodsWhereItIsNotTheContainers exists because each refused pod
+// shape reads a real capability set belonging to another process, so getting it
+// wrong produces no error, only a SEC-09 verdict about the node's init or the
+// pod's pause process.
+//
+// Steps:
+//  1. An ordinary pod: PID 1 is the container's own, and is read.
+//  2. hostPID: refused as blocked.
+//  3. A process namespace shared across the pod: refused as blocked.
+func TestPID1RefusesPodsWhereItIsNotTheContainers(t *testing.T) {
+	yes := true
+	for _, tc := range []struct {
+		name    string
+		spec    corev1.PodSpec
+		refused bool
+	}{
+		{"ordinary", corev1.PodSpec{}, false},
+		{"hostPID", corev1.PodSpec{HostPID: true}, true},
+		{"shared process namespace", corev1.PodSpec{ShareProcessNamespace: &yes}, true},
+	} {
+		err := pid1IsNotTheContainers(&corev1.Pod{Spec: tc.spec}, "server")
+		switch {
+		case tc.refused && !IsBlocked(err):
+			t.Errorf("%s: PID 1 would be read as the container's (err %v)", tc.name, err)
+		case !tc.refused && err != nil:
+			t.Errorf("%s: refused: %v", tc.name, err)
+		}
 	}
 }
 

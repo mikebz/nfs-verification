@@ -3,7 +3,7 @@
 Author: mikebz@
 Created: 2026-09-13
 Updated: 2026-09-30
-Status: **in review**, [PR #57](https://github.com/mikebz/nfs-verification/pull/57).
+Status: **shipped**, delivery step 8, [PR #57](https://github.com/mikebz/nfs-verification/pull/57).
 SEC-03 to SEC-09 landed in delivery step 8; SEC-01 shipped in Step 2
 ([PR #3](https://github.com/mikebz/nfs-verification/pull/3)) and SEC-02 in Step 2b
 ([PR #4](https://github.com/mikebz/nfs-verification/pull/4)), and both are
@@ -321,7 +321,8 @@ is what the platform delivered.
 
 | What was found | Verdict |
 |---|---|
-| A declared capability PID 1 does not hold | **fail**, naming it: the platform took it between the spec and the process, which is the EPERM trap the plan's row describes. A file-handle backend without `CAP_DAC_READ_SEARCH` fails operations rather than failing to start |
+| A declared capability the server process holds | nothing to report, whatever PID 1 holds: a supervisor may drop a capability from its own set after starting the server, so PID 1 lacking it later proves nothing, and the server holding it proves the platform delivered it |
+| A declared capability neither the server process nor PID 1 holds | **fail**, naming it: the platform took it between the spec and the process, which is the EPERM trap the plan's row describes. A file-handle backend without `CAP_DAC_READ_SEARCH` fails operations rather than failing to start |
 | A declared capability PID 1 holds and the server process does not | **record**, naming it: something inside the container gave it up, the server or its supervisor |
 | The container is privileged | **fail**: nothing is constraining the server, so "the set it needs and no more" cannot be true |
 | Otherwise | **pass**, recording both sets and how far the server's exceeds what was declared |
@@ -331,7 +332,7 @@ capability from its effective set and raise it again when it needs it, and only
 one gone from the permitted set is gone for good
 ([`capabilities(7)`](https://man7.org/linux/man-pages/man7/capabilities.html)).
 
-The second row is a record and not a failure, and that is the decision in this
+The third row is a record and not a failure, and that is the decision in this
 case. The plan's failure is a policy stripping a capability, and a capability the
 platform delivered and the server then discarded is the opposite: the server
 narrowing its own set, which is what "no more" asks for. Failing it would report
@@ -341,6 +342,11 @@ keeps, so the record is where that goes. The one thing PID 1 cannot rule out as
 a witness is a first process that dropped a capability itself before the case
 read it, and the failure message says so rather than claiming the platform for
 certain.
+
+PID 1 is only a witness where it is the container's own first process. With
+`hostPID` it is the node's init, and with a process namespace shared across the
+pod it is the pause process; both would give a real answer about the wrong
+process, so the case reports blocked on either rather than reading it.
 
 The last row's excess is a record on purpose. The runtime's default set is the
 platform's choice, not the server's, and a suite that failed on it would fail on
