@@ -268,11 +268,18 @@ func (f *Framework) dumpPods(ctx context.Context, b *bundle, ns, selector, kind 
 }
 
 // logFile names one container's log in the bundle.
+//
+// The separator is an underscore because neither name can contain one: a pod
+// name is a DNS-1123 subdomain and a container name a DNS-1123 label. A hyphen
+// was used before, and pod a-b with container c landed on the same file as pod
+// a with container b-c, the second log silently replacing the first while the
+// manifest claimed both. A container name cannot contain a dot either, so the
+// .previous suffix cannot be mistaken for part of the name.
 func logFile(sub, pod, container string, previous bool) string {
 	if previous {
-		return sub + "/" + pod + "-" + container + ".previous.log"
+		return sub + "/" + pod + "_" + container + ".previous.log"
 	}
-	return sub + "/" + pod + "-" + container + ".log"
+	return sub + "/" + pod + "_" + container + ".log"
 }
 
 // logSource says in the manifest which log a file is.
@@ -351,9 +358,24 @@ func (f *Framework) dumpNodeState(ctx context.Context, b *bundle) {
 		b.fail("", source, fmt.Sprintf("not reached, so no node was inspected: %v", err))
 		return
 	}
+	inspectNodes(ctx, b, agent, source)
+}
+
+// inspectNodes reads /proc/mounts and dmesg from every node with a running
+// agent pod. Separate from dumpNodeState, which goes through the process-wide
+// agent, so that it can be tested against an agent over a fake cluster.
+func inspectNodes(ctx context.Context, b *bundle, agent *Agent, source string) {
 	nodes, err := agent.Nodes(ctx)
 	if err != nil {
 		b.fail("", source, fmt.Sprintf("nodes not listed, so no node was inspected: %v", err))
+		return
+	}
+	if len(nodes) == 0 {
+		// The capability was established at preflight, and Nodes lists only
+		// agent pods that are Running now, so an agent disrupted since then
+		// answers with nothing. Nothing is not a clean result: no node was
+		// read, and the manifest has to say so.
+		b.fail("", source, "no agent pod is running on any node, so no node was inspected")
 		return
 	}
 	for _, n := range nodes {

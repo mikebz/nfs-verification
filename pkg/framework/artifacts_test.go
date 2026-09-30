@@ -2,6 +2,7 @@ package framework
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 )
@@ -139,10 +141,10 @@ func TestSaveLogKeepsWhatAStreamDeliveredBeforeItFailed(t *testing.T) {
 	b := &bundle{dir: t.TempDir()}
 	delivered := "line one\nline two\n"
 	broken := io.NopCloser(io.MultiReader(strings.NewReader(delivered), iotest.ErrReader(io.ErrUnexpectedEOF)))
-	b.saveLog("writer-main.log", "log of container main in pod default/writer", broken, nil)
+	b.saveLog("writer_main.log", "log of container main in pod default/writer", broken, nil)
 	b.saveLog("reader-main.log", "log of container main in pod default/reader", nil, errors.New("container is waiting to start"))
 
-	data, err := os.ReadFile(filepath.Join(b.dir, "writer-main.log"))
+	data, err := os.ReadFile(filepath.Join(b.dir, "writer_main.log"))
 	if err != nil {
 		t.Fatalf("a stream that failed partway left no file: %v", err)
 	}
@@ -154,7 +156,7 @@ func TestSaveLogKeepsWhatAStreamDeliveredBeforeItFailed(t *testing.T) {
 	}
 	got := renderArtifacts(b.rows)
 	for _, want := range []string{
-		"writer-main.log\tlog of container main in pod default/writer\t18 bytes\tPARTIAL, this is what arrived before it stopped: the stream stopped after 18 bytes: unexpected EOF",
+		"writer_main.log\tlog of container main in pod default/writer\t18 bytes\tPARTIAL, this is what arrived before it stopped: the stream stopped after 18 bytes: unexpected EOF",
 		"reader-main.log\tlog of container main in pod default/reader\t0 bytes\tNOT CAPTURED: not streamed: container is waiting to start",
 	} {
 		if !strings.Contains(got, want) {
@@ -208,7 +210,7 @@ func TestCollectArtifactsRecordsEveryGap(t *testing.T) {
 		return false, nil, nil
 	})
 	dir := CaseDir("DATA-02")
-	if err := os.MkdirAll(filepath.Join(dir, "client-pods", "writer-main.log"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(dir, "client-pods", "writer_main.log"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -222,13 +224,13 @@ func TestCollectArtifactsRecordsEveryGap(t *testing.T) {
 		"environment.json\tthe run's environment record\t",
 		"fault-timeline.json\tthe faults this case injected\t",
 		"client-pods/writer.json\tpod default/writer\t",
-		"client-pods/writer-main.log\tlog of container main in pod default/writer\t0 bytes\tNOT CAPTURED: streamed but not written",
-		"client-pods/writer-main.previous.log\tprevious log of container main in pod default/writer\t0 bytes\tnot attempted: the container has not restarted",
-		"client-pods/writer-sidecar.log\tlog of container sidecar in pod default/writer\t9 bytes\tcomplete",
+		"client-pods/writer_main.log\tlog of container main in pod default/writer\t0 bytes\tNOT CAPTURED: streamed but not written",
+		"client-pods/writer_main.previous.log\tprevious log of container main in pod default/writer\t0 bytes\tnot attempted: the container has not restarted",
+		"client-pods/writer_sidecar.log\tlog of container sidecar in pod default/writer\t9 bytes\tcomplete",
 		// Attempted, because an unreported count is not a zero one. The fake
 		// answers every log request, so complete is what proves it was asked.
-		"client-pods/writer-late.previous.log\tprevious log of container late in pod default/writer\t9 bytes\tcomplete",
-		"client-pods/writer-sidecar.previous.log\tprevious log of container sidecar in pod default/writer\t9 bytes\tcomplete",
+		"client-pods/writer_late.previous.log\tprevious log of container late in pod default/writer\t9 bytes\tcomplete",
+		"client-pods/writer_sidecar.previous.log\tprevious log of container sidecar in pod default/writer\t9 bytes\tcomplete",
 		"server-pods/\tserver pods in namespace nfs-server matching \t0 bytes\tNOT CAPTURED: not listed: pods is forbidden",
 		"events-default.txt\tKubernetes Events in namespace default\t0 bytes\tcomplete",
 		"events-nfs-server.txt\tKubernetes Events in namespace nfs-server\t0 bytes\tcomplete",
@@ -250,7 +252,7 @@ func TestCollectArtifactsRecordsEveryGap(t *testing.T) {
 	if err == nil {
 		t.Fatal("two artifacts were not captured and CollectArtifacts returned no error")
 	}
-	for _, want := range []string{"writer-main.log", "server-pods/"} {
+	for _, want := range []string{"writer_main.log", "server-pods/"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("the error does not name the gap %q: %v", want, err)
 		}
@@ -259,5 +261,64 @@ func TestCollectArtifactsRecordsEveryGap(t *testing.T) {
 		if strings.Contains(err.Error(), not) {
 			t.Errorf("the error reports %q, which was deliberately not attempted, as a gap: %v", not, err)
 		}
+	}
+}
+
+// TestLogFileNamesCannotCollide exists because a collision has no symptom: the
+// second log overwrites the first and the manifest still lists both as
+// complete. Two valid pod and container pairs once mapped to one file.
+//
+// Steps:
+//  1. Confirm the example names are valid Kubernetes names, so the test is
+//     about names a cluster can actually produce.
+//  2. Assert that pod a-b with container c and pod a with container b-c get
+//     different files, for both the current and the previous log, and that
+//     no current log shares a name with a previous one.
+func TestLogFileNamesCannotCollide(t *testing.T) {
+	pairs := [][2]string{{"a-b", "c"}, {"a", "b-c"}, {"a.b", "c"}, {"a", "b"}}
+	for _, p := range pairs {
+		if errs := validation.IsDNS1123Subdomain(p[0]); len(errs) > 0 {
+			t.Fatalf("pod name %q is not valid, so it proves nothing: %v", p[0], errs)
+		}
+		if errs := validation.IsDNS1123Label(p[1]); len(errs) > 0 {
+			t.Fatalf("container name %q is not valid, so it proves nothing: %v", p[1], errs)
+		}
+	}
+	seen := map[string]string{}
+	for _, p := range pairs {
+		for _, previous := range []bool{false, true} {
+			file := logFile("client-pods", p[0], p[1], previous)
+			who := fmt.Sprintf("pod %s container %s previous=%t", p[0], p[1], previous)
+			if other, dup := seen[file]; dup {
+				t.Errorf("%s and %s both land on %s, so one log would replace the other", other, who, file)
+			}
+			seen[file] = who
+		}
+	}
+}
+
+// TestInspectNodesRecordsNoRunningAgent covers the node agent that answers
+// with nothing. The capability was set at preflight; an agent disrupted since
+// lists no running pods, and a loop over no nodes would write no rows and
+// report no gap, so the bundle would look like node collection went fine.
+//
+// Steps:
+//  1. Build an agent over a fake cluster whose only agent pod is Pending.
+//  2. Inspect, and assert one NOT CAPTURED row that is counted as a gap.
+func TestInspectNodesRecordsNoRunningAgent(t *testing.T) {
+	kube := fake.NewSimpleClientset(&corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: agentDaemonSet + "-x", Namespace: Namespace,
+			Labels: map[string]string{"app": agentDaemonSet}},
+		Spec:   corev1.PodSpec{NodeName: "node-a"},
+		Status: corev1.PodStatus{Phase: corev1.PodPending},
+	})
+	b := &bundle{dir: t.TempDir()}
+	inspectNodes(t.Context(), b, &Agent{c: &Client{Kube: kube}, pods: map[string]string{}}, "the node agent")
+
+	if len(b.rows) != 1 {
+		t.Fatalf("%d rows recorded for an agent with no running pod, want one saying so: %+v", len(b.rows), b.rows)
+	}
+	if gaps := b.gaps(); len(gaps) != 1 || !strings.Contains(gaps[0], "no agent pod is running") {
+		t.Errorf("an agent with no running pod was not reported as a gap: %v", gaps)
 	}
 }
