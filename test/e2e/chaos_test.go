@@ -774,9 +774,11 @@ func readKernelBaseline(ctx context.Context, t *testing.T, f *framework.Framewor
 				"reported without saying whether its reclaim was refused", node, err)
 			continue
 		}
-		// Agent.Dmesg ends in "|| true", so a failed read can come back empty
-		// with no error. Left out rather than stored, though NewLostLocks also
-		// refuses an empty baseline, so the log says the check was not made.
+		// Agent.Dmesg reports a dmesg that could not run as an error, but a
+		// read that succeeds with nothing is still no baseline: a booted
+		// kernel's ring buffer is never empty. Left out rather than stored,
+		// though NewLostLocks also refuses an empty baseline, so the log says
+		// the check was not made.
 		if strings.TrimSpace(out) == "" {
 			t.Logf("the ring buffer on %s read back empty before the fault, which a booted kernel's never "+
 				"is, so the read failed. A lock lost on that node will be reported without saying whether "+
