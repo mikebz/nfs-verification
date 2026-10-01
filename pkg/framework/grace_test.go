@@ -197,6 +197,35 @@ func TestGraceWindowAndClockGuard(t *testing.T) {
 	}
 }
 
+// TestGraceInstantExit covers an exit stamped at the same moment as the entry
+// before it. Window rejects that pair, so without this OBS-02 would read it as
+// grace never left and send triage to the re-entry loop, when the server did
+// leave grace and only gave no measurable duration (#19).
+//
+// Steps:
+//  1. Build an entry and an exit with the same timestamp.
+//  2. Assert Window gives no window and InstantExit finds the exit.
+//  3. Assert an entry with no exit and an ordinary window are not instant exits.
+func TestGraceInstantExit(t *testing.T) {
+	at := time.Unix(1700000000, 0)
+	same := GraceObservation{Signals: []GraceSignal{{At: at}, {At: at, Exit: true, Line: "lifted"}}}
+	if _, ok := same.Window(); ok {
+		t.Fatal("an entry and exit at the same moment produced a window, so the case would report a zero-length grace as a measurement")
+	}
+	if s, ok := same.InstantExit(); !ok || s.Line != "lifted" {
+		t.Errorf("InstantExit = %+v, %v; want the exit stamped with the entry's time", s, ok)
+	}
+
+	open := GraceObservation{Signals: []GraceSignal{{At: at}}}
+	if _, ok := open.InstantExit(); ok {
+		t.Error("an entry with no exit was reported as an instant exit, hiding the re-entry symptom")
+	}
+	later := GraceObservation{Signals: []GraceSignal{{At: at}, {At: at.Add(time.Second), Exit: true}}}
+	if _, ok := later.InstantExit(); ok {
+		t.Error("an ordinary window was reported as an instant exit")
+	}
+}
+
 // TestParseGraceLogSurvivesAnEnormousLine covers a stream holding one line too
 // long for a buffered scanner. This is the failure that has no symptom: a
 // scanner stops at such a line and the lines after it vanish with an error

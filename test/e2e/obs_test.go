@@ -208,12 +208,13 @@ func TestObsFailoverIsObservable(t *testing.T) {
 	}
 
 	window, obs, ok := waitGraceWindow(ctx, t, f, since, slo.GraceExitBound(profile(t))+s.budget)
-	if !ok || window.Duration() <= 0 {
+	if !ok {
 		shape := "the server's log stream says nothing about grace after the fault"
+		instant, isInstant := obs.InstantExit()
 		switch {
-		case ok:
+		case isInstant:
 			shape = fmt.Sprintf("grace was observed entering and leaving at the same moment (%s), so no "+
-				"duration can be measured from it", window)
+				"duration can be measured from it", instant.At.UTC().Format(time.RFC3339Nano))
 		case len(obs.Entries()) > 0:
 			shape = fmt.Sprintf("the server entered grace at %s and was never observed to leave it, so the "+
 				"failover has a start and no end", obs.Entries()[0].At.UTC().Format(time.RFC3339))

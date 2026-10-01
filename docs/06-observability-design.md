@@ -57,7 +57,7 @@ events and metrics suggests, and the boundary decides what these cases can hones
 
 | Question an operator asks | Answered from outside (control plane)? | Telemetry channel / condition |
 |---|---|---|
-| Is the process running; did it restart, and when | Yes | Container status (`ServerStartedAfter`) / Events. Context only: OBS-02 logs it and never passes on it, since its own fault caused it |
+| Is the process running; did it restart, and when | Yes | Container status (`ServerStartedAfter`), which OBS-02 logs as context and never passes on, since its own fault caused it; Events |
 | How much CPU and memory is it using | Yes | Kubelet stats summary (OBS-05) |
 | Was it OOMKilled | Yes, when a limit exists | Container termination reason |
 | Did a client fail to mount a volume, and why | Yes | Kubelet Events on client pod (OBS-04) |

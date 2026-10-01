@@ -210,8 +210,9 @@ so a failing case does not leave a lock held by a pod that outlives it.
   "only Kubernetes answered" let the case pass on the container start its own
   pod deletion caused, and accepting any timestamped server line let the
   provisioner's klog pass it. OBS-02 now reads the server's grace window from
-  its log stream and reports blocked, naming OBS-03, without one; the container
-  start and Events are context only. The replacement and its reasons are in
+  its log stream and reports blocked, naming OBS-03, without one. The container
+  start is logged as context only, and OBS-02 reads no Events. The replacement
+  and its reasons are in
   [`06-observability-design.md`](06-observability-design.md) Section 6.
 
 Still open: a deployment that reports grace only through metrics fails OBS-03 for

@@ -119,6 +119,25 @@ func (o GraceObservation) Window() (GraceWindow, bool) {
 	return w, false
 }
 
+// InstantExit returns an exit that follows the first entry in the stream but
+// carries the same timestamp. Window does not accept it, since a window with no
+// length measures nothing. It is a different shape from grace never left,
+// though, and a message that calls it "never left" sends triage to the wrong
+// place. OBS-02 reports the two apart (#19).
+func (o GraceObservation) InstantExit() (GraceSignal, bool) {
+	started := false
+	var start time.Time
+	for _, s := range o.Signals {
+		switch {
+		case !s.Exit && !started:
+			start, started = s.At, true
+		case s.Exit && started && s.At.Equal(start):
+			return s, true
+		}
+	}
+	return GraceSignal{}, false
+}
+
 // Duration is how long grace lasted.
 func (w GraceWindow) Duration() time.Duration { return w.End.Sub(w.Start) }
 
