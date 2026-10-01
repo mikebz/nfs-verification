@@ -130,25 +130,41 @@ func containsAny(s string, subs []string) bool {
 	return false
 }
 
-// OBS-02: a failover must be visible to whoever runs the cluster, with a
-// timestamp and a duration. A failover only the client noticed is an
-// observability defect: the operator is left with a stalled workload and no
+// OBS-02: a failover must be visible to whoever runs the cluster as an NFS
+// event, with a timestamp and a duration. A failover only the client noticed is
+// an observability defect: the operator is left with a stalled workload and no
 // record of what happened underneath it.
 //
-// Two channels are read, and either satisfies the case. The server's own log
-// stream says NFS failed over; the Kubernetes API says a pod restarted, which
-// is less, but it is still something an operator can see. Both are recorded,
-// because the difference matters when the server is one pod among many.
+// Only the server can satisfy this case. The fault is a pod delete, so a
+// replacement container starting afterwards is Kubernetes reporting the case's
+// own action back to it: it fires on every run, whatever the server did, and
+// says a pod restarted rather than that NFS failed over. That is doc 06
+// section 1, "no case passes on a signal its own fault produced". It is logged,
+// next to the client's outage, and asserts nothing. Issue #19 has the runs in
+// which it was the whole of a passing result.
+//
+// The server's signal is grace, read from its log stream through the
+// Kubernetes API with runtime timestamps. A server that restarts with state to
+// recover enters grace (RFC 8881 Section 8.4.2), so entry is the server itself
+// announcing the failover, exit is when it accepts new state again, and the
+// window between them is the duration. Any line at all after the fault is not
+// enough: a supervisor's own output, such as the provisioner's klog on the
+// reference deployments, is timestamped and says nothing about NFS. A server
+// that announces grace somewhere this suite does not read is indistinguishable
+// here from one that announces nothing: F-008 and F-022.
+//
+// No grace window reports blocked rather than failed, pointing at OBS-03. That
+// is the case that fails for the missing signal, and one missing signal should
+// produce one failure, as CHAOS-07 does with the same window.
 //
 // Steps:
-//  1. Start a workload and delete the server pod.
-//  2. Assert the ordinary recovery, and keep the outage the client experienced.
-//  3. Read the server's log stream from the fault onwards.
-//  4. Read the Kubernetes API for a server container that started after it.
-//  5. Fail when neither channel produced a timestamp, since the failover was
-//     then invisible from outside the client.
-//  6. Report each channel's duration next to the client's outage, and say so
-//     when only Kubernetes noticed.
+//  1. Start a workload and take a lock that is never released, so the server
+//     has state to reclaim and grace means something.
+//  2. Delete the server pod, and assert the ordinary recovery.
+//  3. Log what Kubernetes saw of the replacement container, as context only.
+//  4. Wait for the server's log stream to show grace entered and left.
+//  5. Report blocked, naming OBS-03 and which shape it was, when it does not.
+//  6. Report the server's window next to the client's outage.
 func TestObsFailoverIsObservable(t *testing.T) {
 	f := framework.New(t, "OBS-02")
 	ctx, cancel := caseCtx(t, 45*time.Minute)
@@ -159,14 +175,22 @@ func TestObsFailoverIsObservable(t *testing.T) {
 		t.Skipf("blocked: server pod %s has no controller, so deleting it would not bring it back", s.target.Pod)
 	}
 
+	// Outstanding state, as in OBS-03. A server with nothing to reclaim may
+	// lift grace at once, and this case would then report blocked on a server
+	// that had nothing to say rather than on one that said nothing.
+	holder, err := f.HoldFlock(ctx, s.writer, s.dir+"/obs02.lock", "obs02")
+	if err != nil {
+		t.Fatalf("taking the lock that gives grace something to reclaim: %v", err)
+	}
+	f.Defer(func(ctx context.Context) { _ = holder.Release(ctx) })
+
 	faultAt, err := f.PodNow(ctx, s.writer)
 	if err != nil {
 		t.Fatalf("reading the writer's clock: %v", err)
 	}
-	// The reference for both channels below. It is the workstation's clock,
-	// while the timestamps the channels carry are the server node's, so the
-	// durations here are reported rather than asserted against an SLO. What is
-	// asserted is that a duration can be produced at all.
+	// The workstation's clock, used only to cut the log stream and the
+	// container statuses at the fault. The server's window is measured between
+	// two stamps from its own node, so nothing here compares across clocks.
 	since := time.Now()
 	if err := chaos.DeleteServerPod(ctx, f, s.target); err != nil {
 		t.Skipf("blocked: %v", err)
@@ -174,43 +198,47 @@ func TestObsFailoverIsObservable(t *testing.T) {
 
 	outage := assertRecovered(ctx, t, s, faultAt)
 
-	lines, sources, logErr := framework.ServerLog(ctx, f.C, since)
-	if logErr != nil {
-		t.Logf("could not read the server log stream: %v", logErr)
-	}
-	said, serverSpoke := framework.FirstDated(lines)
-	start, kubeSaw, err := framework.ServerStartedAfter(ctx, f.C, since)
-	if err != nil {
+	// Context, never the result. See the case comment.
+	if start, ok, err := framework.ServerStartedAfter(ctx, f.C, since); err != nil {
 		t.Logf("could not read the server pods back from the API: %v", err)
-	}
-
-	switch {
-	case !serverSpoke && !kubeSaw:
-		t.Errorf("the failover left no timestamped trace an operator could find: the server printed nothing "+
-			"after the fault in %v, and no server container reports having started since. The client saw a "+
-			"%s outage, so something happened; an operator watching this deployment would see a stalled "+
-			"workload and no record of why",
-			sources, outage.Round(time.Second))
-	case !serverSpoke:
-		t.Logf("only Kubernetes noticed: container in %s on %s started %s after the fault, and the server "+
-			"itself printed nothing. That tells an operator a pod restarted, not that NFS failed over, "+
-			"which is thin when the server is one pod among many",
-			start.Pod, start.Node, start.At.Sub(since).Round(time.Second))
-	default:
-		t.Logf("the server spoke %s after the fault: %q (from %s)",
-			said.At.Sub(since).Round(time.Second), said.Text, said.Source)
-	}
-	if kubeSaw {
-		t.Logf("Kubernetes reports the replacement container in %s on %s started %s after the fault",
+	} else if ok {
+		t.Logf("Kubernetes reports the replacement container in %s on %s started %s after the fault. "+
+			"This case deleted that pod, so this is not evidence the server announced anything",
 			start.Pod, start.Node, start.At.Sub(since).Round(time.Second))
 	}
-	t.Logf("the client's own outage was %s, measured from the writer pod's clock at both ends",
-		outage.Round(time.Second))
 
-	// Grace is the OBS-03 assertion, not this one, but a grace line in the
-	// window is the strongest thing a server can say about a failover, so it is
-	// worth recording here.
-	observeGrace(ctx, t, f, since)
+	window, obs, ok := waitGraceWindow(ctx, t, f, since, slo.GraceExitBound(profile(t))+s.budget)
+	if !ok || window.Duration() <= 0 {
+		shape := "the server's log stream says nothing about grace after the fault"
+		switch {
+		case ok:
+			shape = fmt.Sprintf("grace was observed entering and leaving at the same moment (%s), so no "+
+				"duration can be measured from it", window)
+		case len(obs.Entries()) > 0:
+			shape = fmt.Sprintf("the server entered grace at %s and was never observed to leave it, so the "+
+				"failover has a start and no end", obs.Entries()[0].At.UTC().Format(time.RFC3339))
+		}
+		blocked(t, "%s: %s. The client saw a %s outage on the %s profile, so a failover happened, and the only "+
+			"other record of it is the container start this case caused by deleting %s on %s, which says a "+
+			"pod restarted and not that NFS failed over. OBS-03 is the case that fails for the missing "+
+			"signal; see F-008 and F-022 in docs/findings.md for where the reference deployments write it",
+			shape, obs.Describe(), outage.Round(time.Second), profile(t).Name, s.target.Pod, s.target.Node)
+	}
+	t.Logf("the server announced the failover: grace ran %s, stamped by the server's node at both ends, "+
+		"from %q to %q", window, obs.Entries()[0].Line, exitLine(obs, window))
+	t.Logf("the client's own outage was %s, measured from the writer pod's clock at both ends (profile %s)",
+		outage.Round(time.Second), profile(t).Name)
+}
+
+// exitLine is the server's line that closed a window, for the log. Window
+// returns the first exit after the first entry, so that is the one quoted.
+func exitLine(obs framework.GraceObservation, w framework.GraceWindow) string {
+	for _, s := range obs.Signals {
+		if s.Exit && s.At.Equal(w.End) {
+			return s.Line
+		}
+	}
+	return ""
 }
 
 // OBS-03: grace entry and exit must both be observable, and the window between

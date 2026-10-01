@@ -35,7 +35,8 @@ is whether the inputs those rules need exist at all.
 The second half is the harder half. An input that exists because Kubernetes
 produces it for every workload is not evidence about NFS. So **no case passes on
 a signal its own fault produced**, and every case **fails rather than skipping**
-when the deployment publishes nothing. That is F-008's rule applied uniformly.
+when the deployment publishes nothing. That is F-008's rule applied uniformly,
+with one exception, OBS-02, whose missing signal is OBS-03's to fail (Section 4).
 
 Done means an operator on this deployment can answer seven operational questions
 from telemetry data that actually exists:
@@ -56,7 +57,7 @@ events and metrics suggests, and the boundary decides what these cases can hones
 
 | Question an operator asks | Answered from outside (control plane)? | Telemetry channel / condition |
 |---|---|---|
-| Is the process running; did it restart, and when | Yes | Container status (`ServerStartedAfter`) / Events (OBS-02) |
+| Is the process running; did it restart, and when | Yes | Container status (`ServerStartedAfter`) / Events. Context only: OBS-02 logs it and never passes on it, since its own fault caused it |
 | How much CPU and memory is it using | Yes | Kubelet stats summary (OBS-05) |
 | Was it OOMKilled | Yes, when a limit exists | Container termination reason |
 | Did a client fail to mount a volume, and why | Yes | Kubelet Events on client pod (OBS-04) |
@@ -94,12 +95,11 @@ requiring an in-cluster monitoring stack:
    Streams server container logs via the Kubernetes Pod API (`PodLogOptions{Timestamps: true}`).
    Crucially, timestamps come from the container runtime (RFC 3339 nano), not from the server's
    own log formatting. It classifies lines into grace entry or exit using an exit-first heuristic,
-   reading previous-container logs across pod restarts (`OBS-03`).
-3. **The Event Poller and Container Status Reader** (`pkg/framework/events.go` and `pkg/framework/status.go`):
+   reading previous-container logs across pod restarts (`OBS-03`, and `OBS-02`'s failover window).
+3. **The Event Poller and Container Status Reader** (`pkg/framework/events.go` and `pkg/framework/server.go`):
    Polls Kubernetes `v1.Event` objects associated with client pods (`WaitPodEvent` in `events.go`)
-   for `Warning` events such as `FailedMount` and `FailedAttachVolume` (`OBS-04`). For failover traces
-   (`OBS-02`), reads container restart timestamps via `ServerStartedAfter` (`pkg/framework/status.go`)
-   and server logs (`ServerLog`).
+   for `Warning` events such as `FailedMount` and `FailedAttachVolume` (`OBS-04`). Reads container
+   start timestamps via `ServerStartedAfter`, which `OBS-02` logs as context and never asserts on.
 4. **The Server Metrics Pod Proxy Reader** (`pkg/framework/metrics.go`):
    Accessed via the API server's pod proxy (`/api/v1/namespaces/<ns>/pods/<pod>:<port>/proxy/metrics`).
    Implements a minimal text scanner for the Prometheus exposition format, checking series
@@ -130,9 +130,13 @@ than skips, so the lack of visibility is highlighted as a deployment defect. Sim
 when an export reports the entire backing disk rather than the claim's provisioned size,
 OBS-06 fails on its quota assertion (F-009).
 
-Where secondary channel errors occur during multi-channel discovery (e.g., `ServerLog` returning
-an error in OBS-02 while container start status is available), the harness logs the channel failure
-as a diagnostic while asserting that at least one primary operator channel recorded the event.
+OBS-02 is the one case that reports blocked when the deployment publishes nothing, and the
+exception is deliberate ([issue #19](https://github.com/mikebz/nfs-verification/issues/19)). Its
+signal is the grace window the server announces in its log stream, the same window OBS-03 reads.
+When that window is missing, the deployment defect is OBS-03's to fail; OBS-02 cannot measure a
+failover without it, so it reports blocked and names OBS-03, rather than filing one defect twice.
+The container start of the pod the case itself deleted is logged as context and never satisfies
+OBS-02: Section 1's rule, since Kubernetes produces that start for every workload.
 
 ## 5. What these seven cases assert
 
@@ -143,7 +147,7 @@ specific to the Observability test group:
 | Case | Assertion | Source & Basis |
 |---|---|---|
 | **OBS-01** | The deployment declares an active readiness probe targeting the NFS service, and endpoints drop when NFS is unavailable | Kubernetes probes and Service endpoints. An active probe targeting port 2049 or an NFS health check is verified in configuration (Step 7); behavioral drop of endpoints when frozen is verified with a fault in Step 10 |
-| **OBS-02** | ✅ Failover leaves a timestamped trace an operator can find; duration is measurable | Container start status (`ServerStartedAfter`) and server log stream (`ServerLog`). Fails if neither provides a timestamped record after the fault |
+| **OBS-02** | ✅ Failover leaves a timestamped trace the server itself published; duration is measurable | RFC 8881 Section 8.4.2. Grace entry and exit read from the server's log stream (`pkg/framework/grace.go`) after a pod deletion, with a lock held so grace has state to protect. The container start the fault caused is logged, never asserted on. Blocked, naming OBS-03, when no window is published ([#19](https://github.com/mikebz/nfs-verification/issues/19)) |
 | **OBS-03** | ✅ Grace period entry and exit are observable with timestamps; duration is bounded by `2 * LeaseSeconds` ([why](storage_terms.md#reclaim_complete-and-early-end-of-grace)) | RFC 8881 Section 8.4.2. Read from runtime log timestamps; fails if unannounced (F-008) |
 | **OBS-04** | ✅ A mount failure on a client pod surfaces as an actionable `Warning` Event naming the volume; pod does not report Ready | Kubelet mount logic. Fails if no mount failure event arrives within budget, if the event omits the volume name, or if container status reports Ready. Wording of the failure cause is logged as a diagnostic warning because kubelet controls event phrasing |
 | **OBS-05** | The server container declares a memory limit, and its working set is readable and moves under load | Kubelet Summary API. Fails if no limit is declared; never manufactures an OOMKill |
@@ -171,11 +175,33 @@ specific to the Observability test group:
 - **Problem**: When a failover happens, an operator needs to see when it started, when it finished,
   and how long it took, using standard operational tooling.
 - **Design**:
-  - Monitors two timestamped channels: the server container's log stream (`ServerLog`) and container
-    restart status (`ServerStartedAfter`).
-  - Asserts that at least one channel provides timestamped evidence after the fault. Fails on complete silence.
-  - Records the client's measured outage duration against the time since the fault.
-  - Logs whether the trace came from Kubernetes container restart status or NFS daemon logs.
+  - Takes a lock that is never released before the fault, as OBS-03 does, so the replacement has
+    state to reclaim and grace is not lifted at once for want of it.
+  - Deletes the server pod, asserts the ordinary recovery, and keeps the client's measured outage.
+  - Reads the server's log stream through `pkg/framework/grace.go` until grace has been entered and
+    left, bounded by `slo.GraceExitBound` plus the case's recovery budget. Entry is the server
+    announcing the failover; the window to exit is its duration, measured between two stamps from
+    the server's own node.
+  - Reports blocked, naming OBS-03, F-008 and F-022, when the stream is silent about grace, shows an
+    entry with no exit, or shows a zero-length window. The message names the shape, the client's
+    outage, the profile, and the pod and node deleted.
+  - Logs the container start Kubernetes reports for the replacement as context, saying that the
+    case caused it.
+- **Decisions**:
+  - **Container start or any server line satisfied the case.** *Reversed 2026-10-01 by
+    [issue #19](https://github.com/mikebz/nfs-verification/issues/19); the bullets above replaced
+    it.* The case passed when either the server printed any timestamped line after the fault or a
+    server container reported starting after it. The second is produced by the case's own pod
+    deletion on every deployment, so the case could not fail, against Section 1's rule. The first
+    is satisfied by the provisioner's klog on both reference deployments, which says nothing about
+    NFS. Before the fix the case was green on both; after it, both report blocked, which is the
+    state F-008 and F-022 describe.
+  - **Blocked, not fail, when no window is published.** OBS-03 already fails for the missing grace
+    signal, as CHAOS-07 already reports blocked on it; failing OBS-02 too would count one defect
+    twice. See Section 4.
+  - **Metrics are not a second channel here.** A failover counter on a metrics endpoint would also
+    be the server's own record, but whether the endpoint survives a restart is OBS-07's question,
+    and adding it here would make OBS-02's verdict depend on two unrelated publications.
 
 ### OBS-03: Grace period entry and exit
 - **Problem**: A server re-entering grace looks like a hung client (test plan

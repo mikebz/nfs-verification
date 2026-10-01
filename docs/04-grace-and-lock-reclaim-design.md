@@ -205,6 +205,14 @@ so a failing case does not leave a lock held by a pod that outlives it.
 - **F-008 happened.** The provisioner this project runs against announces no
   grace at all, so CHAOS-07 reports blocked and OBS-03 fails on it. The design
   anticipated this; the field entry records what it costs a run.
+- **OBS-02's decision in Section 5 was reversed** by
+  [issue #19](https://github.com/mikebz/nfs-verification/issues/19). Accepting
+  "only Kubernetes answered" let the case pass on the container start its own
+  pod deletion caused, and accepting any timestamped server line let the
+  provisioner's klog pass it. OBS-02 now reads the server's grace window from
+  its log stream and reports blocked, naming OBS-03, without one; the container
+  start and Events are context only. The replacement and its reasons are in
+  [`06-observability-design.md`](06-observability-design.md) Section 6.
 
 Still open: a deployment that reports grace only through metrics fails OBS-03 for
 a reason that is half harness gap; the wording rule is the one

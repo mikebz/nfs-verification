@@ -195,23 +195,6 @@ func ServerLog(ctx context.Context, c *Client, since time.Time) ([]LogLine, []st
 	return lines, sources, nil
 }
 
-// FirstDated returns the earliest line carrying a timestamp. Read against a
-// stream ServerLog already cut at a fault, it is the server's own answer to
-// whether anything happened, which is what OBS-02 asks of it.
-func FirstDated(lines []LogLine) (LogLine, bool) {
-	best := LogLine{}
-	found := false
-	for _, l := range lines {
-		if l.At.IsZero() {
-			continue
-		}
-		if !found || l.At.Before(best.At) {
-			best, found = l, true
-		}
-	}
-	return best, found
-}
-
 // ObserveGrace reads the server pods' log streams from since onwards and
 // classifies what they say about grace.
 func ObserveGrace(ctx context.Context, c *Client, since time.Time) (GraceObservation, error) {

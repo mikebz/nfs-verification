@@ -200,9 +200,9 @@ func PodReady(p *corev1.Pod) bool {
 }
 
 // ServerStart is a server container coming up, as the Kubernetes API reports
-// it. It is the channel an operator has when the server itself says nothing:
-// it states that a pod restarted, which is less than saying NFS failed over,
-// and it is timestamped by the kubelet rather than by the process under test.
+// it. It states that a pod restarted, which is less than saying NFS failed
+// over, and it is timestamped by the kubelet rather than by the process under
+// test.
 type ServerStart struct {
 	At   time.Time
 	Pod  string
@@ -210,9 +210,11 @@ type ServerStart struct {
 }
 
 // ServerStartedAfter returns the earliest server container that reports having
-// started at or after t. OBS-02 reads it as the second of the two channels an
-// operator can reach; nothing measures a recovery from it, because a container
-// that has started is not a server that is serving.
+// started at or after t. OBS-02 logs it as context and never passes on it:
+// after a fault that deletes the server pod, a replacement container is the
+// case's own action reported back, not the server announcing anything (#19,
+// doc 06 section 1). Nothing measures a recovery from it either, because a
+// container that has started is not a server that is serving.
 //
 // The caller's t comes from the workstation's clock and the start times from
 // the kubelet's, so the comparison is relaxed by the same guard band that
