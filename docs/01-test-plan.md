@@ -527,9 +527,14 @@ is that narrow.
 
 **SEC-09 after the fix for #98, 2026-09-30**, `make test-case
 CASE=TestSecServerCapabilities` on both clusters, repeated through review
-(`w{1,2}-issue98-*`). It passed on both every time. On `gke-w2` it records
-`SYS_RESOURCE` as given up by `ganesha.nfsd` after the platform delivered it,
-which the PID 1 read could not see; on `gke-w1` nothing is given up.
+(`w{1,2}-issue98-*`). Every run against a current preflight record passed on
+both clusters. On `gke-w2` it records `SYS_RESOURCE` as given up by
+`ganesha.nfsd` after the platform delivered it, which the PID 1 read could not
+see; on `gke-w1` nothing is given up. Two further runs on `gke-w1` were fed
+older records through `-env-file` on purpose, one with no capabilities
+(`w1-issue98-oldrecord-*`) and one with no pod UID
+(`w1-issue98-nodigest-stale-*`), and both reported blocked, naming
+`-refresh-preflight`, which is the expected answer to a stale record.
 [F-026](findings.md)
 
 ### 5.3 Delivery steps
