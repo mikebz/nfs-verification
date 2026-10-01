@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-10
-Updated: 2026-09-30
+Updated: 2026-10-01
 Version: 1.0 (v1 scope)
 
 This is the requirements and delivery document: what gets verified, why, the
@@ -375,15 +375,17 @@ next phase has to rediscover:
 
 ### 4.2 Execution by Category
 
-| Target | Contents | Budget |
-|---|---|---|
-| `make preflight` | Section 0 only | < 3 min |
-| `make test-prov` | All PROV cases | < 45 min, 2 nodes |
-| `make test-data` | All DATA cases | < 45 min, 2 nodes |
-| `make test-chaos` | All CHAOS cases | < 4 h, 4 nodes |
-| `make test-obs` | All OBS cases | < 45 min, 2 nodes |
-| `make test-sec` | All SEC cases | < 30 min, 2 nodes |
-| `make test-e2e` | All categories end to end | < 5 h, 4 nodes |
+| Target | Contents | Budget | Nodes |
+|---|---|---|---|
+| `make preflight` | Section 0 only | < 3 min | 2 |
+| `make test-prov` | All PROV cases | < 45 min | 2 |
+| `make test-data` | All DATA cases | < 45 min | 2 |
+| `make test-chaos` | All CHAOS cases | < 4 h | 3 (4 with Step 10) |
+| `make test-obs` | All OBS cases | < 45 min | 2 |
+| `make test-sec` | All SEC cases | < 30 min | 3 |
+| `make test-e2e` | All categories end to end | < 5 h | 3 (4 with Step 10) |
+
+**The `Nodes` column is the schedulable node count needed to run every case in the target in full, without a node-count skip or a shared-node fallback.** Section 0's floor of 2 schedulable nodes is the only hard minimum: every target starts on 2 nodes, and a case that needs more skips through `requireCap`. `make test-sec` needs 3 because SEC-04 asks a third, unlocked node whether the survivor's lock is still held after the second node unmounts (a holder's own kernel answers `F_GETLK` from its local table) and skips on 2. The shipped `CHAOS` cases and every recorded `make test-e2e` run in Section 5.2 use 3 nodes, which gives CHAOS-06 a third node for its post-failover lock probe rather than sharing a holder's node; the fourth node is for Step 10's node-loss cases (CHAOS-03), where one node is powered off while the server and two distinct client nodes remain.
 
 E2E tests are organized strictly by category. Each category has its own test file, Makefile target, and corresponding `Test<Category>...` function prefix.
 
@@ -399,9 +401,9 @@ Every run, failed or not, also leaves the files each case named as its evidence:
 
 Triage order:
 
-1. **Is it the harness?** Re-run the single case in isolation (`make test-case`), under a new run ID so its bundle stays apart from the failure's. Flaky-on-isolation means harness bug; file against the suite.
-2. **Which side of the mount?** Compare client `/proc/mounts` and dmesg against server logs at the fault timestamp. Client stuck with a healthy server means client or network. Server restarted means server.
-3. **Is it grace?** Look for repeated grace entry in the window. Grace re-entry loops present as "hung client, healthy server" and are the single most common false diagnosis in this architecture.
+1. **Is it the harness?** Check the failure's bundle first, then re-run the single case in isolation (`make test-case`), under a new run ID so its bundle stays apart from the failure's. Two patterns point at the harness (file against the suite): the case's own collected evidence contradicts what its failure message claimed (a lock table holding the lock the case reported lost in [F-010](findings.md), a workload log with a 1m43s stall reported as 0s in [F-014](findings.md), or a readiness wait satisfied by a terminating pod in [F-013](findings.md)); or the failure depends on residue an earlier case left behind — leaked objects, an uncleaned mount, a server still in recovery, or an un-baselined scrape that inherited earlier traffic ([F-025](findings.md)) — so it reproduces after that earlier case and never on a clean cluster across repeated isolated runs. **Passing on a single isolated re-run, or failing intermittently across runs whether alone or in the suite, does not point at the harness**: a concurrency race on the share or a tight recovery margin is intermittent by nature — DATA-02 passed both `make test-data` runs and failed 9 of 13 whole-suite runs ([F-016](findings.md)), and CHAOS-06 lost a late client's locks on 1 of 6 runs ([F-028](findings.md)) — and both are deployment behavior, not harness bugs. One green `make test-case` means the race did not fire that time.
+2. **Which side of the mount?** Compare client `/proc/mounts` and dmesg against server logs around the fault. Client stuck with a healthy server means client or network. Server restarted means server. **Do not line `dmesg-<node>.txt` timestamps directly up against `fault-timeline.json` or the server log** until #124 is fixed: the bundle runs `dmesg -T`, which reconstructs wall time from boot time plus the kernel clock and drifts as the node stays up (`dmesg(1)`). On the reference nodes it ran about two minutes early, stamping CHAOS-06's `lost 2 locks` line 31 seconds before the fault that caused it ([F-028](findings.md)). Match `dmesg` by event order across the fault, or measure the node's offset by comparing `date -u` against `dmesg -T` on the host.
+3. **Is it grace?** Look for repeated grace entry in the window. Grace re-entry loops present as "hung client, healthy server" and are the single most common false diagnosis in this architecture. **On a supervised server, the bundle's `server-pods/*.log` will not have these lines**: it is the container log stream (`kubectl logs`), which carries only the PID 1 supervisor's output ([F-008](findings.md), [F-026](findings.md)). The NFS daemon writes grace entry, reclaim progress, and grace exit to its own log file inside the export volume — `/export/ganesha.log` on both reference deployments ([F-022](findings.md)), named by `-L` on the `ganesha.nfsd` command line — and the harness does not collect that file until #123 is settled. Fetch it by hand from the server pod before the export is wiped: `kubectl -n <server-ns> exec <server-pod> -- grep -E 'GRACE|reclaim complete' /export/ganesha.log`.
 4. **Provisioning or data path?** Provisioning failures go to the CSI driver owner. Data path failures go to the server owner.
 5. **Version skew?** Compare the two versions in `environment.json`. If they are independently versioned and differ from the last green run, suspect skew first.
 6. **Reproduce minimally**, then file with the artifact bundle attached. A failure filed without `environment.json` will be closed as unreproducible.
