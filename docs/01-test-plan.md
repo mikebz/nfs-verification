@@ -404,7 +404,7 @@ Triage order:
 
 1. **Is it the harness?** Check the failure's bundle first, then re-run the single case in isolation (`make test-case`), under a new run ID so its bundle stays apart from the failure's. Two patterns point at the harness (file against the suite): the case's own collected evidence contradicts what its failure message claimed (a lock table holding the lock the case reported lost in [F-010](findings.md), a workload log with a 1m43s stall reported as 0s in [F-014](findings.md), or a readiness wait satisfied by a terminating pod in [F-013](findings.md)); or the failure depends on residue an earlier case left behind — leaked objects, an uncleaned mount, a server still in recovery, or an un-baselined scrape that inherited earlier traffic ([F-025](findings.md)) — so it reproduces after that earlier case and never on a clean cluster across repeated isolated runs. **Passing on a single isolated re-run, or failing intermittently across runs whether alone or in the suite, does not point at the harness**: a concurrency race on the share or a tight recovery margin is intermittent by nature — DATA-02 passed both `make test-data` runs and failed 9 of 13 whole-suite runs ([F-016](findings.md)), and CHAOS-06 lost a late client's locks on 1 of 6 runs ([F-028](findings.md)) — and both are deployment behavior, not harness bugs. One green `make test-case` means the race did not fire that time.
 2. **Which side of the mount?** Compare client `/proc/mounts` and dmesg against server logs around the fault. Client stuck with a healthy server means client or network. Server restarted means server. **Do not line `dmesg-<node>.txt` timestamps directly up against `fault-timeline.json` or the server log** until #124 is fixed: the bundle runs `dmesg -T`, which reconstructs wall time from boot time plus the kernel clock and drifts as the node stays up (`dmesg(1)`). On the reference nodes it ran about two minutes early, stamping CHAOS-06's `lost 2 locks` line 31 seconds before the fault that caused it ([F-028](findings.md)). Until #124 anchors those stamps, only the relative order of entries within `dmesg-<node>.txt` itself is reliable, not their wall-clock alignment with `fault-timeline.json` or the server log.
-3. **Is it grace?** Look for repeated grace entry in the window. Grace re-entry loops present as "hung client, healthy server" and are the single most common false diagnosis in this architecture. Check `server-pods/*.log` in the bundle first; **where a supervised server directs the NFS daemon's log to a file instead of stdout/stderr, as both reference deployments do, `server-pods/*.log` will not have these lines**: it is the container log stream (`kubectl logs`), which then carries only the PID 1 supervisor's output ([F-008](findings.md), [F-026](findings.md)). On both reference deployments `ganesha.nfsd` is started with `-L /export/ganesha.log` and writes grace entry, reclaim progress, and grace exit to that file inside the export volume ([F-022](findings.md)), which the harness does not collect until #123 is settled. Fetch it by hand from the server pod before the export is wiped: `kubectl -n <server-ns> exec <server-pod> -- grep -E 'GRACE|reclaim complete' /export/ganesha.log` (or the log path on the serving process's command line).
+3. **Is it grace?** Look for repeated grace entry in the window. While a server is in [grace](storage_terms.md#grace-period), new opens and locks wait in the client's kernel and nothing returns an error, so a server that keeps re-entering grace looks like "hung client, healthy server". Rule it out before filing against the client or the network. CHAOS-05 exists for this: among the upstream reports in Appendix A are clients stalled for hours after repeated grace entry during address takeover. Check `server-pods/*.log` in the bundle first; **where a supervised server directs the NFS daemon's log to a file instead of stdout/stderr, as both reference deployments do, `server-pods/*.log` will not have these lines**: it is the container log stream (`kubectl logs`), which then carries only the PID 1 supervisor's output ([F-008](findings.md), [F-026](findings.md)). On both reference deployments `ganesha.nfsd` is started with `-L /export/ganesha.log` and writes grace entry, reclaim progress, and grace exit to that file inside the export volume ([F-022](findings.md)), which the harness does not collect until #123 is settled. Fetch it by hand from the server pod before the export is wiped: `kubectl -n <server-ns> exec <server-pod> -- grep -E 'GRACE|reclaim complete' /export/ganesha.log` (or the log path on the serving process's command line).
 4. **Provisioning or data path?** Provisioning failures go to the CSI driver owner. Data path failures go to the server owner.
 5. **Version skew?** Compare the two versions in `environment.json`. If they are independently versioned and differ from the last green run, suspect skew first.
 6. **Reproduce minimally**, then file with the artifact bundle attached. A failure filed without `environment.json` will be closed as unreproducible.
@@ -469,22 +469,31 @@ whole-suite run. The block was the harness's inability to name the process
 serving NFS, and it was the harness's defect, not the deployments' (F-026,
 F-027).
 
-Six cases failed identically on both clusters in all six runs. None is a defect
-in the storage server, and each has a finding:
+Some of those greens rested on less than they claimed on this date, for the
+reason [F-026](findings.md) gives: SEC-09 judged the container's PID 1, which on
+both deployments is a supervisor and not the server (#98); DATA-12 and DATA-13
+did not confirm their kill landed, so a kill that missed would have passed
+(#99); and the `server-did-not-restart` subtests of PROV-02, PROV-09, PROV-10,
+PROV-11 and DATA-10 count container restarts, which a respawned `ganesha.nfsd`
+does not move (#97). The first two have since been fixed and run again, under
+their own dates below. #97 is open.
+
+Six cases failed in all six runs. None is a defect in the storage server, and
+each has a finding:
 
 | Case | Whose problem |
 |---|---|
 | SEC-05 | A node with no claim mounted another claim's export and read its bytes. The exports carry no client rules, nothing in the network path restricts who may connect, and `no_root_squash` is set, so the access control around a claim ends at the mount. [F-018](findings.md) |
 | OBS-03 | Neither provisioner announces grace in its container log stream, so there is no signal to observe. [F-008](findings.md), and [F-022](findings.md) for where the signal actually is |
 | OBS-06 | The export has no per-volume quota, so both capacity sources describe the backing filesystem rather than the claim. [F-009](findings.md) |
-| OBS-07 | On `gke-w1` there is no endpoint to scrape, verdict `absent` ([F-023](findings.md)). On `gke-w2`, where the exposer was enabled by hand, it passes with `resumed-reset` since the harness defect that reported `never-resumed` was fixed ([F-025](findings.md), #81) |
+| OBS-07 | On `gke-w1` there is no endpoint to scrape, verdict `absent` ([F-023](findings.md)). On `gke-w2`, where the exposer was enabled by hand, `never-resumed` over 21 metric names: the case scraped the replacement before it had served any traffic, which is a harness defect ([F-025](findings.md), #81) |
 | PROV-04, PROV-11 | The StorageClass advertises `allowVolumeExpansion` and nothing implements it. [F-004](findings.md) |
 
 Two cases are intermittent, and a green from either clears nothing:
 
 | Case | `gke-w1` | `gke-w2` | Whose problem |
 |---|---|---|---|
-| DATA-02 | failed 2 of 3 | failed 1 of 3 | Four clients appending to one file lose one appender's whole contribution and tear nothing. NFSv4.1 has no append operation, so this goes to the boundary discussion. Whole-suite runs are now 9 red of 13, and the run shape does not predict it. [F-016](findings.md) |
+| DATA-02 | failed 2 of 3 | failed 1 of 3 | Four clients appending to one file lose one appender's whole contribution and tear nothing. NFSv4.1 has no append operation, so this goes to the boundary discussion. [F-016](findings.md) has the tally across every whole-suite run, and the run shape does not predict it |
 | CHAOS-06 | passed 3 of 3 | failed 1 of 3 | A client's reclaim arrived after the 90s grace ended, and the server lawfully refused it. Both of that client's locks were granted to others. [F-028](findings.md) |
 
 The one case reported blocked is CHAOS-07, which needs the grace window OBS-03
@@ -502,6 +511,31 @@ passing case keeps no fault timeline (#101). A server pod delete recovered in
 `gke-w2` took 1m59s against the 2m0s budget**, where the pod restart took about
 29s rather than 13s. That is the narrowest margin recorded, and F-029 is why it
 is that narrow.
+
+**Single cases after fixes, 2026-09-28**, on the same two clusters:
+
+- **OBS-07**, `make test-case CASE=TestObsMetricsSurviveServerRestart`, after
+  the fix for #81. On `gke-w2`, exposer and annotations still enabled by hand,
+  four runs (`w2-issue81-obs07-20260928-*`) all passed with `resumed-reset`:
+  every name back after one round of traffic, counters reset and none advanced.
+  On `gke-w1`, one run (`w1-issue81-obs07-20260928-025533`) failed at discovery
+  with `absent`, as on 2026-09-25. [F-025](findings.md) has the figures.
+- **CHAOS-01, DATA-12 and DATA-13**, after the fix for #99, twice each on
+  `gke-w1` (`w1-pr99-*`, `w1-pr99r2-*`). All six passed, each observing the
+  serving process before the kill and a different pid serving after it.
+  [F-026](findings.md)
+
+**SEC-09 after the fix for #98, 2026-09-30**, `make test-case
+CASE=TestSecServerCapabilities` on both clusters, repeated through review
+(`w{1,2}-issue98-*`). Every run against a current preflight record passed on
+both clusters. On `gke-w2` it records `SYS_RESOURCE` as given up by
+`ganesha.nfsd` after the platform delivered it, which the PID 1 read could not
+see; on `gke-w1` nothing is given up. Two further runs on `gke-w1` were fed
+older records through `-env-file` on purpose, one with no capabilities
+(`w1-issue98-oldrecord-*`) and one with no pod UID
+(`w1-issue98-nodigest-stale-*`), and both reported blocked, naming
+`-refresh-preflight`, which is the expected answer to a stale record.
+[F-026](findings.md)
 
 ### 5.3 Delivery steps
 

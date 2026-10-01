@@ -178,8 +178,8 @@ specific to the Observability test group:
   - Logs whether the trace came from Kubernetes container restart status or NFS daemon logs.
 
 ### OBS-03: Grace period entry and exit
-- **Problem**: Grace re-entry loops mimic hung clients in front of a healthy server (the most common
-  misdiagnosis in NFS on Kubernetes, per triage runbook Section 4.3). A suite cannot evaluate failover
+- **Problem**: A server re-entering grace looks like a hung client (test plan
+  [Section 4.3](01-test-plan.md#43-triage-runbook), step 3). A suite cannot evaluate failover
   correctness without observing grace.
 - **Design**:
   - Uses `pkg/framework/grace.go` to stream logs via the Kubernetes Pod API.
@@ -386,41 +386,37 @@ specific to the Observability test group:
 
 ## 9. What real runs taught
 
+What these cases return is test plan
+[Section 5.2](01-test-plan.md#52-what-the-latest-runs-returned)'s, and the runs
+behind each lesson are in its finding. What the design took from them:
+
 - **[F-008](findings.md) (Grace unannounced)**: The reference `nfs-server-provisioner` logs no grace
-  entry or exit messages. OBS-03 failed as designed, preventing silent misdiagnoses during chaos tests.
+  entry or exit messages in its container log stream, so OBS-03 fails rather than skipping, which is
+  Section 1's rule, and CHAOS-07 reports blocked rather than deriving a window of its own.
 - **[F-009](findings.md) (Missing per-volume quota)**: On shared exports without filesystem quotas,
-  both kubelet and `df` report the host's 10 GiB disk for a 1 GiB claim. OBS-06 fails on its quota check,
-  proving that percentage-based capacity alerts on this deployment would be alerting on the wrong volume.
-- **[F-023](findings.md) (No metrics published as shipped, for two different reasons)**: OBS-07's first
-  runs, against two clusters running different provisioner images, both reported `absent`. The cause is
-  not the same on each. `gke-w1` is built without `USE_MONITORING` and cannot publish. `gke-w2` has
-  `libganesha_monitoring` linked into the running process and publishes nothing only because Ganesha's
-  `Enable_Metrics` defaults to false; setting it served 39 families including lease, lock and
-  client-state metrics. Enabling it is still not enough, because the chart declares no port and no
-  annotation, so nothing can discover the endpoint. Read next to F-008 and F-022, both channels this
-  plan allows for NFS-level observability are empty as configured, and in both cases the content exists
-  and is sent somewhere nobody is looking.
-- **[F-024](findings.md) (Identical counters are not continuity)**: the first end-to-end run of OBS-07
-  passed with `resumed-continuous` and claimed the server keeps its counts across a restart, on a
-  process whose `ganesha_uptime_seconds` read 1. Ganesha's startup is deterministic and the server was
-  idle, so a genuinely restarted process re-derived exactly the same counters. Counters are now split
-  three ways, continuity requires a strict advance, and all-equal reports `resumed-indeterminate`. The
-  deployment's real counter behaviour across a restart remains unmeasured, which is the honest state.
-- **[F-025](findings.md) (A name with no sample yet is not a lost one)**: the whole-suite runs of
-  2026-09-17 reached OBS-07's later steps for the first time and returned `never-resumed` over 21
-  metric names, every one of them a byte counter, a size histogram or a cache counter. Ganesha creates
-  a family on its first sample, so a scrape taken seconds after the restart, before any client traffic,
-  finds them missing; all 21 were back on the same process once traffic resumed, and the post-restart
-  scrape returns the same 367 series under 66 names every time regardless of what preceded it. That is
-  also what F-024's idle server published on both sides, which is why it saw no loss. The fix for
+  both kubelet and `df` report the backing filesystem rather than the claim, so OBS-06 fails its quota
+  check there, and percentage-based capacity alerts on such a deployment would be alerting on the
+  wrong volume.
+- **[F-023](findings.md) (No metrics published as shipped, for two different reasons)**: neither
+  reference deployment publishes an endpoint as shipped, and the cause is not the same on each. `gke-w1`
+  is built without `USE_MONITORING` and cannot publish. `gke-w2` has `libganesha_monitoring` linked
+  into the running process and publishes nothing only because Ganesha's `Enable_Metrics` defaults to
+  false. Enabling it is still not enough, because the chart declares no port and no annotation, so
+  nothing can discover the endpoint. Read next to F-008 and F-022, both channels this plan allows for
+  NFS-level observability are empty as configured, and in both cases the content exists and is sent
+  somewhere nobody is looking.
+- **[F-024](findings.md) (Identical counters are not continuity)**: on an idle server with a
+  deterministic startup, a genuinely restarted process re-derives exactly the counters its
+  predecessor published, so equality read as continuity reports a restart as none. Counters are now
+  split three ways, continuity requires a strict advance, and all-equal reports
+  `resumed-indeterminate`.
+- **[F-025](findings.md) (A name with no sample yet is not a lost one)**: Ganesha creates a metric
+  family on its first sample, so a scrape taken seconds after the restart, before any client traffic,
+  finds the traffic-driven names missing and reads them as lost. The fix for
   [issue #81](https://github.com/mikebz/nfs-verification/issues/81) drives the case's own I/O through
   the export on both sides of the restart, judges names only after it, and still reads counters off
-  the replacement's first answer (section 6, OBS-07). Four runs on `gke-w2` since then returned
-  `resumed-reset`: 0 names lost after one round of traffic, 62 counters reset, none advanced. The
-  series the case's own traffic touched and did not bring back were `CREATE` in the first run, from
-  a directory only the pre-fault round made (fixed in the harness), `LOOKUP` in the second, which is
-  the client's cache deciding, and none in the third and fourth. That is why label sets are reported
-  and not asserted.
+  the replacement's first answer (section 6, OBS-07). The runs since the fix are why label sets are
+  reported and not asserted.
 
 ## 10. Sources
 

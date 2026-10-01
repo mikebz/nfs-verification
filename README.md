@@ -316,9 +316,9 @@ never depends on the workstation and a node agreeing about the time.
 ## How grace is observed
 
 The [grace period](docs/storage_terms.md#grace-period) is the dominant term in
-every recovery number above, and a grace re-entry loop presents as a hung client
-in front of a healthy server, which the triage runbook calls the most common
-wrong diagnosis in this architecture.
+every recovery number above, and a server re-entering it looks like a hung
+client: step 3 of the test plan's [triage
+runbook](docs/01-test-plan.md#43-triage-runbook) says how to tell them apart.
 
 It is read from the server's own log stream through the Kubernetes API, with the
 timestamp the container runtime attached to each line rather than one parsed out
