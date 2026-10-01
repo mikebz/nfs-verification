@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-27
-Updated: 2026-09-27
+Updated: 2026-10-01
 
 
 **Found:** 2026-09-26, reading both servers' `/export/ganesha.log` after three
@@ -12,8 +12,9 @@ whole-suite runs per cluster on 2026-09-25 (`w1-e2e-run{1,2,3}-20260925-222953`,
 V15.3-mb), both with `Grace_Period = 90` in `/export/vfs.conf` and Ganesha's
 default 60s lease, profile `default`.
 
-**Severity:** none for the data, and a real cost to every recovery number the
-suite reports. The headroom under the default profile's 2m0s budget is whatever
+**Severity:** none for the cluster, none for the suite, medium for the
+deployment. No data is at risk; the cost is to every recovery number the suite
+reports. The headroom under the default profile's 2m0s budget is whatever
 the pod restart leaves, and one cycle left one second.
 
 ### What happened
@@ -24,6 +25,8 @@ Across the six runs the servers entered grace 94 times, 45 on `gke-w1` and 49 on
 restart, which started a grace period of its own. Neither server ever lifted
 grace early, that is, ended it before the timer because reclaim was complete.
 The reason differs by deployment.
+
+### Why
 
 **`gke-w1`, Ganesha 4.0.8, keeps grace for its full length even when every
 client it knows has reclaimed.** A typical window:
@@ -57,7 +60,14 @@ logs a failed attempt to clean it up (`Failed to rmdir … Directory not empty
 (39)`). In all 49 windows, the reclaim count reached two of four at most, and
 grace ended on its timer.
 
-### Why it matters
+### What changed
+
+Nothing. The budget stays where `pkg/slo` puts it, because relaxing it for a
+deployment that holds grace for its full length would make the number
+meaningless for one that does not. The 107s outliers below cannot be explained
+after the fact, because a passing case keeps no fault timeline (#101).
+
+### What it means for the system under test
 
 Recovery is therefore grace plus restart, on both deployments, as simple sums:
 
@@ -77,24 +87,20 @@ F-028's lock loss happened in one of these windows. The stale record is not why
 that client was late, but it is why nothing in the log could say grace was
 complete: on this server, "every client reclaimed" is never true.
 
-### What changed
-
-Nothing. The budget stays where `pkg/slo` puts it, because relaxing it for a
-deployment that holds grace for its full length would make the number
-meaningless for one that does not. The outliers cannot be explained after the
-fact, because a passing case keeps no fault timeline (#101).
-
-### What it implies for the system under test
-
 - **On these servers the recovery floor is the configured grace period.** An
   operator who wants faster failover has one lever, `Grace_Period`, and the
   tuned profile (20s/30s) is how the plan expresses that. Reclaim finishing
   early buys nothing on either build as deployed.
 - **Replacing a node leaves `gke-w2`'s server waiting for it forever.** The
   recovery store is on the export PVC and outlives the pod. Nothing prunes a
-  record for a client that will never return. Open: whether `gke-w2` ends grace
-  early once the stale directory is removed. That is a change to the
-  deployment, and it has not been made.
+  record for a client that will never return.
 - For the harness: a grace period that ends early and one that runs out look the
   same from the client. Only the server's log tells them apart, which is one
   more reason to settle how cases may read it (F-022, #21).
+
+### Open
+
+- Whether `gke-w2` ends grace early once the stale directory is removed. That
+  is a change to the deployment, and it has not been made.
+- Where the other 15s went in the two 107s kills. A passing case keeps no fault
+  timeline (#101).

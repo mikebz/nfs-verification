@@ -2,15 +2,17 @@
 
 Author: mikebz@
 Created: 2026-09-14
-Updated: 2026-09-14
+Updated: 2026-10-01
 
 
 **Found:** 2026-09-10, GKE cluster (GKE v1.37.0, Container-Optimized OS,
 `e2-small` node pool), reviewing the first three cases on
 [PR #1](https://github.com/mikebz/nfs-verification/pull/1).
 
-**Severity:** high. The failure is not a failed test, it is a node that stops
-accepting work, and the harness caused it.
+**Severity:** critical for the cluster, high for the suite, low for the
+deployment. The failure is not a failed test, it is a node that stops accepting
+work, and the harness caused it. The deployment did what a hard mount does when
+its export is deleted under it.
 
 ### What happened
 
@@ -24,7 +26,7 @@ pods.DeleteCollection(ctx, DeleteNow(), ListOptions(f.Selector()))
 PersistentVolumeClaims(Namespace).DeleteCollection(ctx, metav1.DeleteOptions{}, ...)
 ```
 
-### Why it wedges the node
+### Why
 
 1. A force delete removes the Pod object from the API at once. It does not wait
    for kubelet on the node to stop the containers or unmount the volume.
@@ -56,7 +58,7 @@ keeping the export alive until the unmount finished.
   (`nodeInspectTimeout`), so a node in this state cannot starve the bundle for
   the healthy nodes. This is how the state gets diagnosed next time.
 
-### What it says about the system under test, not the harness
+### What it means for the system under test
 
 The harness triggered this, but the hazard belongs to the architecture, and the
 plan already predicts the shape of it: the server is a singleton in the data
@@ -78,11 +80,11 @@ Worth carrying into later work:
 - Node recovery after this state is a reboot in practice. Any run that hits it
   should treat the node as spent.
 
-### Follow-up, 2026-09-10
+### What changed after this was written
 
-Teardown has a second path through the same hazard: if a pod does not leave the
-API within `PodTerminateTimeout`, the node has stopped answering, and deleting
-the claim then is exactly the dangerous act. Teardown now deletes only the
-claims no surviving pod mounts, keeps the rest, and fails with the pods, their
-nodes and the kept claims named. Leaking a claim is recoverable; wedging a node
-is not.
+**2026-09-10.** Teardown has a second path through the same hazard: if a pod
+does not leave the API within `PodTerminateTimeout`, the node has stopped
+answering, and deleting the claim then is exactly the dangerous act. Teardown
+now deletes only the claims no surviving pod mounts, keeps the rest, and fails
+with the pods, their nodes and the kept claims named. Leaking a claim is
+recoverable; wedging a node is not.

@@ -45,8 +45,8 @@ prerequisites.
 One design doc per [delivery
 group](docs/storage_terms.md#step-phase-category-section-test-group-delivery-group),
 in `docs/`. Each opens with a header saying which cases it serves and whether it
-is designed, shipped or superseded, so both the scope and the status are read
-there rather than mirrored here:
+is designed, partly shipped, shipped or superseded, so both the scope and the
+status are read there rather than mirrored here:
 
 | Design doc | Delivery group |
 |---|---|

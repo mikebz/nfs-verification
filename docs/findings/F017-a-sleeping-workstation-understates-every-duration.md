@@ -2,13 +2,14 @@
 
 Author: mikebz@
 Created: 2026-09-14
-Updated: 2026-09-14
+Updated: 2026-10-01
 
 
 **Found:** 2026-09-13, run `pr42v2-chaos-20260913`, `make test-chaos` against
 GKE cluster `gke-w1`, driven from a macOS workstation.
 
-**Severity:** nothing measured is wrong, but the run reads as though the harness
+**Severity:** none for the cluster, low for the suite, none for the
+deployment. Nothing measured is wrong, but the run reads as though the harness
 has a false-positive bug, and it costs an hour to work out that it does not.
 
 ### What happened

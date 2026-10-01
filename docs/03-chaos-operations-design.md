@@ -3,11 +3,15 @@
 Author: mikebz@
 Created: 2026-09-10
 Updated: 2026-10-01
-Status: **in progress.** Serves the complete Resiliency and Chaos [test group](storage_terms.md#step-phase-category-section-test-group-delivery-group):
-CHAOS-01, CHAOS-02, CHAOS-05, CHAOS-06, and CHAOS-07 shipped (Steps 3, 4, 6);
-CHAOS-03, CHAOS-04, and CHAOS-08 through CHAOS-18 planned for delivery step 10.
-Serves: CHAOS-01 through CHAOS-18. Requirements in [`01-test-plan.md`](01-test-plan.md)
-Section 3.3, targets in Section 3.8, weighting in Section 2.4.
+Status: partly shipped. CHAOS-01 and CHAOS-02 shipped in delivery step 3
+([PR #4](https://github.com/mikebz/nfs-verification/pull/4)), CHAOS-05, CHAOS-06
+and CHAOS-07 in step 4 ([PR #8](https://github.com/mikebz/nfs-verification/pull/8)),
+and CHAOS-06's byte ranges in step 6 ([PR #14](https://github.com/mikebz/nfs-verification/pull/14)).
+CHAOS-03, CHAOS-04 and CHAOS-08 through CHAOS-18 are designed, for step 10.
+Serves: CHAOS-01 through CHAOS-18, the complete Resiliency and Chaos
+[test group](storage_terms.md#step-phase-category-section-test-group-delivery-group).
+Requirements in [`01-test-plan.md`](01-test-plan.md) Section 3.3, targets in
+Section 3.8, weighting in Section 2.4.
 Builds on [`01-test-plan.md`](01-test-plan.md). Consolidates chaos design ownership
 across the repository, superseding the chaos sections of [`04-grace-and-lock-reclaim-design.md`](04-grace-and-lock-reclaim-design.md).
 

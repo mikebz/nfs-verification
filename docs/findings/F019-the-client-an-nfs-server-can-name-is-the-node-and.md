@@ -2,15 +2,17 @@
 
 Author: mikebz@
 Created: 2026-09-14
-Updated: 2026-09-14
+Updated: 2026-10-01
 
 
 **Found:** 2026-09-13, hand probes against GKE cluster `gke-w1` while designing
 the security cases, single-stack IPv4, and confirmed by the first `make test-sec`
 run.
 
-**Severity:** it decides what a per-client export rule can say, and it is a trap
-for anything that reads the server's socket table.
+**Severity:** none for the cluster, high for the suite, low for the
+deployment. It decides what a per-client export rule can say, and it is a trap
+for anything that reads the server's socket table: a reader of one of the two
+files fails a healthy deployment.
 
 ### What happened
 

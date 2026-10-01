@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-14
-Updated: 2026-09-14
+Updated: 2026-10-01
 
 
 **Found:** 2026-09-11, GKE cluster `gke-w1`, Kubernetes v1.37.0-gke.2941000,
@@ -10,7 +10,8 @@ three workers on Container-Optimized OS, StorageClass `nfs` backed by
 `cluster.local/nfs-provisioner-nfs-server-provisioner`, default profile from
 flags. CHAOS-05, in run `e2e-full-20260911`, and reproduced twice on 2026-09-12.
 
-**Severity:** high. It fails a case with a message that blames the deployment
+**Severity:** none for the cluster, high for the suite, none for the
+deployment. It fails a case with a message that blames the deployment
 for something the harness did, and the cycle it lands on moves between runs, so
 it reads as flakiness rather than as a defect.
 

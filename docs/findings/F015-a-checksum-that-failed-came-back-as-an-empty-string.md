@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-14
-Updated: 2026-09-14
+Updated: 2026-10-01
 
 
 **Found:** 2026-09-13, GKE cluster `gke-w1`, Kubernetes v1.37.0-gke.2941000,
@@ -11,8 +11,10 @@ backed by `nfs-server-provisioner` as a single-replica StatefulSet, profile
 `default` (lease 60s, grace 90s). Run `full-e2e-20260912b`, `make test-e2e`,
 the whole suite: 25 pass, 6 fail, 4 skip.
 
-**Severity:** a case could compare two checksums, get two empty strings, and
-pass having verified nothing.
+**Severity:** none for the cluster, high for the suite, not known for the
+deployment. A case could compare two checksums, get two empty strings, and
+pass having verified nothing. Why `sha256sum` failed on the share is the open
+item below.
 
 ### What happened
 
@@ -100,3 +102,10 @@ is producible without anything going wrong at the exec layer at all.
 
 **A pipeline is not a chain of assertions. Only its last command can fail it,
 so nothing that matters may be followed by something that does not care.**
+
+### Open
+
+Why `sha256sum` failed on the share right after the server pod was replaced,
+which What it means for the system under test describes as a suspicion and no
+more. Since `sumCmd`, a failed checksum arrives as a failure with its stderr
+attached, so the next occurrence keeps what this one discarded.
