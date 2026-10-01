@@ -136,5 +136,5 @@ reported blocked.
 The capability difference in the table above shows up in the server's own log
 on `gke-w2`, at every start: `lower_my_caps … CAP_SYS_RESOURCE was successfully
 removed for proper quota management in FSAL`. It remains beside the point for
-discovery, as this entry says. It matters for SEC-09, which reads PID 1's set
-(#98).
+discovery, as this entry says. It mattered for SEC-09, which read PID 1's set
+until #98 and now reads the server's (F-026, updated 2026-09-30).

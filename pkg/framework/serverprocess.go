@@ -69,6 +69,11 @@ type ServerProcess struct {
 	// matched in. It is evidence rather than a handle: it changes every time
 	// the process restarts, which is what CHAOS-01 is watching for.
 	PID int
+	// PIDs is every process of that name holding the socket, PID among them,
+	// sorted. A server that preforks answers from several; SEC-09 reads each,
+	// since the lowest may be a master that kept what its workers dropped, and
+	// reports blocked where they disagree.
+	PIDs []int
 	// Node is where that pid lives.
 	Node string
 	// Container is the container whose socket table named the socket.
@@ -374,6 +379,7 @@ func pickHolder(f listenerFacts, inodes []string) (ServerProcess, error) {
 	return ServerProcess{
 		Name:  name,
 		PID:   byName[name][0],
+		PIDs:  byName[name],
 		Inode: strings.Join(inodes, ","),
 	}, nil
 }
