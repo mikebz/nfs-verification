@@ -8,8 +8,7 @@ SEC-03 to SEC-09 landed in delivery step 8; SEC-01 shipped in Step 2
 ([PR #3](https://github.com/mikebz/nfs-verification/pull/3)) and SEC-02 in Step 2b
 ([PR #4](https://github.com/mikebz/nfs-verification/pull/4)), and both are
 documented here for the first time. Consolidated to serve the complete Security
-[test group](storage_terms.md#step-phase-category-section-test-group-delivery-group). Every case has been run against a live cluster; Section 10 is what
-that run returned.
+[test group](storage_terms.md#step-phase-category-section-test-group-delivery-group).
 Serves: SEC-01 through SEC-09. Requirements in
 [`01-test-plan.md`](01-test-plan.md) Section 3.6.
 Builds on [`03-chaos-operations-design.md`](03-chaos-operations-design.md),
@@ -513,50 +512,21 @@ asked the wrong witness. The SEC-03 fix also overturned F-020, which had been
 published from the ungated probe; the correction is recorded there rather than
 here.
 
-## 10. What the runs returned
+## 10. What the first runs taught the design
 
-`make test-sec FLAGS="-storage-class=nfs -lease-seconds=60 -grace-seconds=90"`,
-run `20260914-011748`, GKE cluster `gke-w1`, Kubernetes v1.37.0-gke.2941000,
-three `e2-medium` workers on Container-Optimized OS with kernel 6.12.94+,
-StorageClass `nfs` backed by `nfs-server-provisioner` v4.0.8, profile `default`
-(lease 60s, grace 90s). The whole category took 2m45s against a 30 minute budget.
+What the security cases return is test plan
+[Section 5.2](01-test-plan.md#52-what-the-latest-runs-returned)'s, and why each
+result is what it is belongs to its finding: [F-018](findings.md) for SEC-05's
+red, which is the finding this phase was written to reach and stays red;
+[F-021](findings.md) for SEC-02 run with `-root-squash=off`, the branch that
+asserts rather than records; and [F-026](findings.md) for SEC-09, whose pass
+before #98 read the container's PID 1 rather than the server and could not have
+failed. A table of the 2026-09-14 run on `gke-w1` stood here and still listed
+SEC-09 as that pass. It was removed on 2026-10-01
+([#126](https://github.com/mikebz/nfs-verification/issues/126)) rather than
+corrected, because a result in a design doc is out of date by the next run.
 
-This is the sixth run of the category, and the only one that describes the code
-as it stands. The five before it returned the same verdicts on the same cluster,
-but each exercised a case review has since replaced: SEC-04 twice, then SEC-02,
-then SEC-03 and SEC-04 again. The result of a case that has been rewritten is not
-a result for the case in the tree, and two of those rewrites changed what a green
-verdict means rather than only how it is reached.
-
-SEC-02 was also run once on its own with `-root-squash=off`, which is what this
-export is actually configured for, to exercise the branch that asserts rather
-than records. It passes, and prints both halves of F-021 in one output: root's
-`chown` permitted on both nodes, and the file root wrote displaying as
-`65534(nobody):65534(nobody)`. No other case takes a flag the table above does
-not.
-
-| Case | Result | What it said |
-|---|---|---|
-| SEC-01 | pass | ownership survives the crossing |
-| SEC-02 | pass | an owner was refused a `chown` of its own file on both nodes; root was permitted it on both, so this export does not squash, whatever the ownership displays as (F-021) |
-| SEC-03 | pass | no chown storm, no ownership change, 1s against 1s, and the fsGroup gid grants access through the AUTH_SYS gid list while leaving the volume alone (F-020) |
-| SEC-04 | pass | the server held both nodes' locks at once, discarded only the departing node's, and the survivor kept its lock and its I/O — all read from a third node that held nothing |
-| SEC-05 | **fail** | a node with no claim mounted the owner's export and read its bytes (F-018) |
-| SEC-06 | skip | the cluster is single-stack IPv4 |
-| SEC-07 | pass | the survivor kept its lock, the vanished pod's range came back in 2s, the replacement was granted it |
-| SEC-08 | pass | `sec=sys`, no `xprtsec`, no 20049, no NetworkPolicy, and 2049 reachable from a pod with no claim |
-| SEC-09 | pass | both declared capabilities held; 14 more from the runtime's defaults, recorded |
-
-SEC-09's row describes the case as it was then, reading PID 1 as though it were
-the server. Since #98 it reads the process holding 2049 as well; the verdict is
-unchanged on both reference deployments, and Section 5 has why and what the
-re-run on each recorded.
-
-SEC-05's red is the finding the phase was written to reach, and it stays red:
-the deployment cannot meet a correct assertion, which is a statement about the
-deployment. F-018 has the mechanism and what would narrow it.
-
-Three things the run taught that the design did not anticipate:
+Three things the first runs taught that the design did not anticipate:
 
 - The IPv4-mapped peer form is not hypothetical on a single-stack cluster. The
   server binds `:::2049`, so every client appears in `/proc/net/tcp6` and
@@ -564,7 +534,7 @@ Three things the run taught that the design did not anticipate:
   skips, and the normalisation it was written for is visible in what SEC-08
   reads.
 - The server offers the NFSv3 ancillary ports — 111, 662, 875, 20048, 32803 —
-  alongside 2049. SEC-08 records them; what an NFSv3 mount of the same export
+  alongside 2049 (F-018). SEC-08 records them; what an NFSv3 mount of the same export
   would be granted is not asked by any case here.
 - SEC-07 cannot use `ForceDeletePodAndAwaitUnmount`. The survivor legitimately
   holds the same mount on the same node, so there is no unmount to wait for; the

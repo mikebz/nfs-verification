@@ -341,15 +341,13 @@ The design for `DATA-14` is preserved for `SCALE-07`: one job per pod over an is
 - **DATA-11's requirement moved into the test plan.** Narrowing the punch from an
   assertion to a record changes what is verified, so Section 3.2's row was
   amended rather than the narrowing living only here.
-- **The run happened.** On 2026-09-11, against a three-worker GKE cluster on
-  Kubernetes v1.37 with the in-cluster `nfs-server-provisioner`, DATA-05 to
-  DATA-09 and DATA-11 to DATA-13 passed along with CHAOS-06; DATA-11's punch half
-  reported blocked, which is the documented answer on a busybox image.
-- **DATA-10 has since been run, and passes.** Three times: `full-e2e-20260912b`,
-  `pr46-data-20260913` and `pr47-data-20260913`, taking between four and five
-  minutes each. The export holds 100k entries, and a listing racing 50k
-  deletions returned 98–99k of them, which is lawful rather than a defect. This
-  supersedes the sentence that stood here saying it was unmeasured.
+- **Run results are no longer kept here (2026-10-01, [#126](https://github.com/mikebz/nfs-verification/issues/126)).**
+  The 2026-09-11 run of this phase's cases and the DATA-10 runs of 2026-09-12 and
+  2026-09-13 stood in this section. What the data cases return is test plan
+  [Section 5.2](01-test-plan.md#52-what-the-latest-runs-returned)'s, and what
+  those runs taught is in [`findings.md`](findings.md).
+  That a listing racing deletions may lawfully come back short is a design point,
+  and it is DATA-10's step 5 in Section 5.
 - **F-006 and F-007** came out of this [phase](storage_terms.md#step-phase-category-section-test-group-delivery-group): `scripts/lock-probe.sh` passed
   `flock -w` to an applet that has no `-w`, and two cases reported results they
   had not measured. Both are fixed and recorded in [`findings.md`](findings.md).

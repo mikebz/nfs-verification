@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-14
-Updated: 2026-09-30
+Updated: 2026-10-01
 Status: shipped, delivery steps 1 ([PR #1](https://github.com/mikebz/nfs-verification/pull/1)),
 2 ([PR #3](https://github.com/mikebz/nfs-verification/pull/3)),
 and 5 ([PR #10](https://github.com/mikebz/nfs-verification/pull/10)).
@@ -337,10 +337,10 @@ malformed enough to matter cannot be mounted, which the case already requires.
 
 - **Consolidation by test group**: Provisioning design documentation was consolidated from early delivery
   notes (Steps 1, 2, 5) into this single authoritative reference covering `PROV-01` through `PROV-11`.
-- **Real run baseline (2026-09-13)**: On a 3-worker GKE cluster (`gke-w1`) running Kubernetes v1.37 with
-  `nfs-server-provisioner` v4.0.8, nine of the eleven cases passed cleanly. `PROV-04` and `PROV-11` failed
-  because the provisioner advertises expansion without implementing it ([F-004](findings.md)). These failures
-  accurately reflect deployment limitations and are not test defects.
+- **Run results are no longer kept here (2026-10-01, [issue #126](https://github.com/mikebz/nfs-verification/issues/126))**:
+  a 2026-09-13 baseline from `gke-w1` stood in this section. What the provisioning cases return is
+  test plan [Section 5.2](01-test-plan.md#52-what-the-latest-runs-returned)'s, and why PROV-04 and
+  PROV-11 are red there is [F-004](findings.md).
 - **`PROV-10` moved off the apiserver (2026-09-16, [issue #20](https://github.com/mikebz/nfs-verification/issues/20))**:
   the case as first written asserted RFC 1123 validation of PVC object names, which `kube-apiserver`
   performs for every resource and which no NFS deployment can influence. [PR #34](https://github.com/mikebz/nfs-verification/pull/34)
