@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-27
-Updated: 2026-09-28
+Updated: 2026-10-01
 
 
 **Found:** 2026-09-26, reading the bundle and the server's own log for a
@@ -13,8 +13,8 @@ profile `default` (lease 60s, grace 90s). One of three whole-suite runs on that
 cluster that day, run concurrently with three on `gke-w1`, where CHAOS-06 passed
 all three.
 
-**Severity:** a deployment margin, not a server defect, and not a harness
-defect. The server did what RFC 8881 allows. A client that held two locks lost
+**Severity:** none for the cluster, none for the suite, high for the
+deployment. A deployment margin, not a server defect, and not a harness defect. The server did what RFC 8881 allows. A client that held two locks lost
 both across a failover and the application holding them was not told.
 
 ### What happened
@@ -110,7 +110,7 @@ Here it was the count matching the verifier's two locks, and the server's log,
 that showed which locks and why. The message says only what the line says, and
 quoting that log waits until the harness can read it (F-022, #21).
 
-### What it implies for the system under test
+### What it means for the system under test
 
 **On this deployment a lock survives a server restart only if its client
 reclaims within 90 seconds, and one client in six CHAOS-06 failovers did not.**
@@ -122,6 +122,11 @@ run did not exercise that part. Meanwhile another client can take the same
 range, which is the outcome locking exists to prevent.
 
 For a platform owner, the lever is the grace period against the clients'
-reclaim latency, not the server's lock table. Open: whether the tuned profile
-(20s/30s) keeps the same margin in proportion, and whether a longer grace
-would have saved this one or only moved the tail.
+reclaim latency, not the server's lock table.
+
+### Open
+
+- Why the verifier's client reclaimed late. Why above says what is known, and
+  it does not settle it.
+- Whether the tuned profile (20s/30s) keeps the same margin in proportion, and
+  whether a longer grace would have saved this one or only moved the tail.

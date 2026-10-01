@@ -2,13 +2,13 @@
 
 Author: mikebz@
 Created: 2026-09-11
-Updated: 2026-09-28
+Updated: 2026-10-01
 Status: shipped, delivery steps 1 ([PR #1](https://github.com/mikebz/nfs-verification/pull/1)),
 2 ([PR #3](https://github.com/mikebz/nfs-verification/pull/3)),
 2b ([PR #4](https://github.com/mikebz/nfs-verification/pull/4)),
 and 6 ([PR #12](https://github.com/mikebz/nfs-verification/pull/12) onward).
 DATA-01 through DATA-13 shipped; DATA-14 deferred.
-Serves: DATA-01 through DATA-14 (complete Data Path test group). Requirements in
+Serves: DATA-01 through DATA-14 (complete Data Path [test group](storage_terms.md#step-phase-category-section-test-group-delivery-group)). Requirements in
 [`01-test-plan.md`](01-test-plan.md) Section 3.2.
 Builds on [`01-test-plan.md`](01-test-plan.md), [`03-chaos-operations-design.md`](03-chaos-operations-design.md),
 and [`06-observability-design.md`](06-observability-design.md).
@@ -22,11 +22,11 @@ reading back what was written, coordinating access across concurrent clients, an
 surviving unexpected crashes without data corruption.
 
 NFS RWX volumes on Kubernetes present unique data path challenges because multiple
-pods on separate worker nodes mount the exact same export simultaneously. Under
+pods on separate [worker](storage_terms.md#schedulable-node-and-worker) nodes mount the exact same export simultaneously. Under
 POSIX, applications expect strict read-after-write consistency and atomic appends.
 NFSv4.1 makes a different, strictly bounded set of guarantees:
 
-1. **Close-to-open cache consistency (RFC 8881 Section 10)**: Writes from pod A are
+1. **[Close-to-open](storage_terms.md#close-to-open) cache consistency (RFC 8881 Section 10)**: Writes from pod A are
    guaranteed to be visible to pod B on another node only after pod A closes the file
    and pod B subsequently opens it (`DATA-03`). While pod A holds the file open, pod B
    may see nothing or a partial prefix (`DATA-04`), unless attribute caching is
@@ -37,7 +37,7 @@ NFSv4.1 makes a different, strictly bounded set of guarantees:
 3. **Append semantics and implementation limits (`O_APPEND`)**: NFSv4.1 has no native
    append wire operation. Clients implement `O_APPEND` by querying the end of file (EOF)
    and issuing a write at that offset. Under concurrent appends from multiple nodes,
-   record ordering and exact line counts are an implementation property rather than a
+   [record](storage_terms.md#record) ordering and exact line counts are an implementation property rather than a
    protocol guarantee (`DATA-02`). Torn records, however, represent corruption under any reading.
 4. **Native byte-range locking (RFC 8881 Section 9)**: File locking in NFSv4.1 is native
    to the protocol. Clients coordinate access using advisory whole-file locks (`flock`)
@@ -53,7 +53,7 @@ NFSv4.1 makes a different, strictly bounded set of guarantees:
    Uncommitted unstable writes may lawfully be lost, but may never surface as corrupted
    bytes (`DATA-13`).
 
-Done means thirteen repeatable test cases verifying every data path property client pods
+Done means thirteen repeatable test cases verifying every data path property [client pods](storage_terms.md#client-and-client-pod)
 can observe, supported by specialized in-pod tooling (`locktool`), node agent inspection,
 and four-verdict durability sweeps.
 
@@ -63,12 +63,12 @@ Testing data path semantics requires tools that can express subtle kernel and pr
 primitives inside minimal container environments:
 
 - **`locktool` (`cmd/locktool`, `pkg/framework/locktool.go`)**:
-  A static Go binary (~200 lines) built by `make locktool` for both `linux/amd64` and
+  A static Go binary built by `make locktool` for both `linux/amd64` and
   `linux/arm64`. It is streamed into client pods over `pods/exec` and verified via
   SHA-256 checksum. It requires no container image modification and no external registry.
   - `hold`: Acquires a byte range (`F_SETLK`) and keeps the file descriptor open without
     blocking indefinitely in `F_SETLKW` (polling to avoid unkillable `D`-state hangs
-    on hard mounts).
+    on [hard mounts](storage_terms.md#hard-mount)).
   - `try`: Probes acquisition of a range (`F_SETLK`), reporting success or conflict offset/length.
   - `getlk`: Queries the server's lock table via `F_GETLK` without acquiring, proving whether
     an existing client still holds its allocated range.
@@ -111,16 +111,16 @@ File locking in NFSv4.1 rests on principles that differ fundamentally from local
    | `fcntl(F_OFD_SETLK)` | `OFDLCK` | Yes (`start..len`) | The specific descriptor that acquired it closes |
    | `fcntl(F_GETLK)` | Query | Yes (`start..len`) | N/A (query only) |
 
-4. **One lease per client per server**: Under the Linux NFS client architecture
-   ([kernel client-identifier](https://docs.kernel.org/filesystems/nfs/client-identifier.html)),
-   all mounts and pods on a single Kubernetes worker node share a single client lease with the NFS server:
+4. **One lease per client per server**: all mounts and pods on a node share one
+   [lease](storage_terms.md#lease) with the NFS server, because the NFS client is the node
+   ([client identity](storage_terms.md#client-identity)):
    - When a pod dies gracefully or its process terminates, the kernel closes file descriptors,
      releasing locks within ~1 second (`DATA-06`).
    - When an entire node dies, the server retains its locks until the client lease expires (`lease_time`).
 5. **Mount options that disable server locking**: Mount options like `nolock` and
    `local_lock=all|flock|posix` keep locks local to the client node (`fs/nfs/fs_context.c`).
    On such mounts, cross-node locking does not exist. Test cases read `/proc/mounts` first
-   and report `blocked` rather than falsely failing the storage system.
+   and report [`blocked`](storage_terms.md#blocked-and-blocks) rather than falsely failing the storage system.
 
 ## 4. What these cases assert
 
@@ -139,7 +139,7 @@ profile-driven timing) live in [`01-test-plan.md`](01-test-plan.md) Section 4.1.
 | **DATA-08** | ✅ `noac` mount option on clone PV: cross-node reader sees unclosed write immediately | `nfs(5)` attribute caching options |
 | **DATA-09** | ✅ Same-node open unlink creates `.nfs*` silly rename; cross-node unlink returns old data or `ESTALE`; rename follows file | Linux VFS silly-rename semantics, RFC 8881 file handles |
 | **DATA-10** | ✅ 100k entries directory listed while 50k entries deleted: listing completes, 0 invented names; server pod restarts and dmesg error markers monitored | READDIR cache reuse safety under pressure |
-| **DATA-11** | ✅ Sparse file write: holes read as zero, logical size matches; hole punch recorded as unsupported on NFSv4.1 | RFC 7862 (NFSv4.2 `DEALLOCATE` unavailable on 4.1); zero-fill intact |
+| **DATA-11** | ✅ Sparse file write: holes read as zero, logical size matches; hole punch [recorded](storage_terms.md#recorded-and-asserted) as unsupported on NFSv4.1 | RFC 7862 (NFSv4.2 `DEALLOCATE` unavailable on 4.1); zero-fill intact |
 | **DATA-12** | ✅ `fsync` durability: write records with `conv=fsync`, SIGKILL server: 100% acknowledged records survive with verdict `correct` | RFC 8881 Sec 18.3 (`COMMIT` durability guarantee) |
 | **DATA-13** | ✅ Uncommitted durability: write records without `fsync`, SIGKILL server: uncommitted records may be absent or short, 0 `wrong` | RFC 8881 Sec 18.3 (Uncommitted writes lack durability) |
 | **DATA-14** | **Deferred:** 20 pods, 70/30 read/write soak for 1h with `fio`: zero checksum mismatches | Deferred to `SCALE-07` soak testing (see Section 6) |
@@ -289,7 +289,8 @@ CRC32C verification. It was designed, evaluated, and deferred from the data path
    throughput evaluation in test plan Section 3.4). Running two separate soak tests creates redundant,
    uncoordinated evaluations.
 2. **Tooling and image dependencies**: `fio` is not part of busybox and cannot be built as a small
-   hermetic binary. It requires an external container image (`-fio-image`) that operators must host.
+   hermetic binary. It requires an external container image that operators must host; the `-fio-image`
+   flag that named one was removed with the deferral (Section 9).
 3. **Storage capacity footprint**: 20 pods writing up to 1GiB across 4 files each requires up to 80GiB
    of backing volume capacity, exceeding the footprint of all other test cases combined.
 4. **Time budget constraints**: Section 4.2 of the test plan assigns strict budgets (under 45 minutes)
@@ -319,11 +320,12 @@ The design for `DATA-14` is preserved for `SCALE-07`: one job per pod over an is
   if its export is removed. Force deletion must wait for unmount confirmation before claims are deleted.
 - **[F-006](findings.md) (Busybox flock lacks `-w`)**: Shell scripts cannot use flags missing from
   busybox applets. `locktool` was built to replace brittle shell invocations with concrete Go syscalls.
-- **[F-007](findings.md) (Existence is not a check)**: Early durability checks tested whether files were
-  non-empty. Real runs revealed that truncated or zeroed records passed existence checks, necessitating
-  the 4-verdict content sweep.
+- **[F-007](findings.md) (Passing is not measuring)**: DATA-12 and DATA-13 passed over three and four
+  records, and DATA-11 reported a skip that hid a passing sparse half. The durability pair now waits for
+  thirty records and fails below ten, and DATA-11 is two subtests.
 - **[F-010](findings.md) (Anonymous st_dev mismatch)**: The Linux NFS client assigns an anonymous
-  `st_dev` per mount. Cross-node `/proc/locks` comparisons must match on inode and range rather than device ID.
+  `st_dev` per mount, so a file's identity differs per node. Each node's `/proc/locks` is matched against
+  the identity read from a pod on that node, device included.
 - **[F-016](findings.md) (O_APPEND race and attribution)**: Concurrent appends from multiple nodes
   intermittently lose records without tearing under heavy load. A failure message must cite the protocol
   limitation and report missing record IDs.
@@ -347,15 +349,14 @@ The design for `DATA-14` is preserved for `SCALE-07`: one job per pod over an is
   `pr46-data-20260913` and `pr47-data-20260913`, taking between four and five
   minutes each. The export holds 100k entries, and a listing racing 50k
   deletions returned 98–99k of them, which is lawful rather than a defect. This
-  supersedes the sentence that stood here saying it was unmeasured; the test
-  plan's Section 5.2 carries the runs it came from.
-- **F-006 and F-007** came out of this phase: `scripts/lock-probe.sh` passed
+  supersedes the sentence that stood here saying it was unmeasured.
+- **F-006 and F-007** came out of this [phase](storage_terms.md#step-phase-category-section-test-group-delivery-group): `scripts/lock-probe.sh` passed
   `flock -w` to an applet that has no `-w`, and two cases reported results they
   had not measured. Both are fixed and recorded in [`findings.md`](findings.md).
 - **DATA-02 now keeps the file it argues about.** F-016's account of the loss had
   to be squeezed into the failure message, because the claim was deleted at
   teardown and the bundle held pod logs rather than the share. A case can now name
-  one file as its evidence and the harness copies it into the bundle before
+  one file as its [evidence](storage_terms.md#bundle-and-evidence) and the harness copies it into the bundle before
   teardown, on a pass as well as a failure. The per-appender message stays: the
   file says what is in it, the message says what the case made of it, and a
   triage that starts from the second and checks it against the first is the point.
@@ -371,7 +372,7 @@ The design for `DATA-14` is preserved for `SCALE-07`: one job per pod over an is
   kills the server in place.
 
 Still open: whether `locktool` should grow a `dio` subcommand if real images turn
-out not to carry `oflag=direct`, and whether any server reclaims a sub-file range
+out not to carry `oflag=direct`, and whether any server [reclaims](storage_terms.md#reclaim) a sub-file range
 differently from a whole-file one.
 
 ## 10. Sources

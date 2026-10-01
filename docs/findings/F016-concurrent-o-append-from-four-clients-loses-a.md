@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-14
-Updated: 2026-09-27
+Updated: 2026-10-01
 
 
 **Found:** 2026-09-13, GKE cluster `gke-w1`, Kubernetes v1.37.0-gke.2941000,
@@ -62,8 +62,10 @@ longer hold:
   is not established. The failure message does not name each appender's node,
   so the next red run cannot confirm it from the message alone.
 
-**Severity:** a property of this deployment, for the boundary discussion. It is
-not a protocol violation and must not be filed against the server as one.
+**Severity:** none for the cluster, none for the suite, high for the
+deployment. A property of this deployment, for the boundary discussion: records
+are lost and no writer is told. It is not a protocol violation and must not be
+filed against the server as one.
 
 ### What happened
 
@@ -111,7 +113,7 @@ Those two numbers point in opposite directions and both matter:
 ### Why
 
 NFSv4.1 has no append operation. There is no `WRITE` that means "at end of
-file": [RFC 8881](https://www.rfc-editor.org/rfc/rfc8881.html) Section 18.2
+file": [RFC 8881](https://www.rfc-editor.org/rfc/rfc8881.html) Section 18.32
 takes an explicit offset. A client implements `O_APPEND` by writing at the
 offset it believes to be the end of the file, and that belief is a cached
 attribute.
@@ -183,13 +185,15 @@ contiguous, and the message printed it the first time it went red after being
 added. The diagnostic did its job, which is the only reason this entry can say
 "one client out of step" rather than "fifty records short".
 
-Still open: what makes the difference between a run that loses fifty records and
-a run that loses none, and why the client that falls out of step is the one it
-is. The run-shape hypothesis this paragraph proposed testing has since failed
-(see the 2026-09-27 update above). The one pattern left is placement: every
-named loser shared its node with another pod on the share. The next thing to
-try is the same case with one pod per node, which needs five nodes, or with
-`appender3` moved to a node of its own.
-
 **A count that the protocol does not promise is still worth asserting, as long
 as the failure says who it belongs to.**
+
+### Open
+
+What makes the difference between a run that loses fifty records and a run that
+loses none, and why the client that falls out of step is the one it is. The
+run-shape hypothesis this entry proposed testing has since failed (see the
+2026-09-27 update above). The one pattern left is placement: every named loser
+shared its node with another pod on the share. The next thing to try is the same
+case with one pod per node, which needs five nodes, or with `appender3` moved to
+a node of its own. #16 tracks the placement question.

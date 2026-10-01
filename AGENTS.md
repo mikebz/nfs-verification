@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-10
-Updated: 2026-09-17
+Updated: 2026-10-01
 
 This repository is a test harness, not a product. It verifies NFS RWX
 persistent volumes on Kubernetes by driving a real cluster and asserting what a
@@ -48,9 +48,15 @@ that renaming or renumbering one does not leave a stale pointer here.
     test plan it serves so the requirement traces back to one place. Add its row
     to the design doc table in the README in the same change.
   - It opens with a header block: `Author:`, `Created:`, `Updated:`, `Status:`
-    (designed, shipped, or superseded, with the step and the PR), and `Serves:`
-    (the case IDs and the test plan sections). A reader who gets no further than
-    the header should still know whether the document describes code that exists.
+    and `Serves:` (the case IDs and the test plan sections). A reader who gets
+    no further than the header should still know whether the document describes
+    code that exists. `Status:` is one of four values, with the step and the PR:
+    **designed**, when nothing it serves has shipped; **partly shipped**, naming
+    which cases shipped and which are still designed; **shipped**, when every
+    case it designs has shipped, naming any case it defers; or **superseded**,
+    naming the document that owns its decisions now. The header is read at a
+    glance, so `Status:` says where each case is and not how it got there. What
+    runs returned and which decisions moved belong in the body.
     Every document in `docs/`, plus this file and the README, carries `Author:`,
     `Created:` and `Updated:` in UTC. `Created:` never changes once the file has
     landed. **Move `Updated:` in the same change that alters what the document
@@ -307,8 +313,9 @@ the claim-retention rule in teardown.
 Recurring review feedback, all of it from this repository:
 
 - **Build only what is needed now.** No gates, modes, registries or abstraction
-  layers ahead of a case that uses them. Test categories are `go test -run` and
-  a comment until there is more than one category in the repository.
+  layers ahead of a case that uses them. A test category is a test file, a
+  `Test<Category>` name prefix and a `make` target that hands the prefix to
+  `go test -run`, and nothing more: no category registry, build tags or labels.
 - **No wrappers around the standard library.** No bespoke logging layer, no
   helper that reimplements what `testing` already provides.
 - **Fixed values stay fixed until something needs them to vary.** The namespace
@@ -331,6 +338,10 @@ Recurring review feedback, all of it from this repository:
   for a flag the code ignores is a bug.
 - Where a comment enforces a plan rule, say which rule, so the next reader knows
   it is not arbitrary.
+- **A term is defined once, in the glossary in `docs/`.** Link its entry rather
+  than defining the word again. Grace was defined word for word in three
+  documents before the glossary existed, and a word with two meanings, such as
+  blocked or client, says which one it means.
 
 ## Record what a real run teaches
 
@@ -338,13 +349,35 @@ The findings log in `docs/` is the memory of this project, and **the citation of
 record.** It is one file per finding under `docs/findings/`, named `F0NN-` and a
 slug of the title, with `docs/findings.md` as the index. When a run against a
 real cluster teaches something worth keeping, take the next number, write the
-entry as its own file saying what happened, why, what changed in the code, and
-what it implies for the system under test as opposed to the harness, and add its
-row at the top of the index table in the same change. An entry carries the
-`Author:`, `Created:` and `Updated:` block every document in `docs/` carries,
-and a `**Found:**` line for when the finding was actually made, which is not the
-same date as the file. A finding that lives only in a PR comment is lost by the
+entry as its own file, and add its row at the top of the index table in the same
+change, with its status. A finding that lives only in a PR comment is lost by the
 next PR.
+
+Every entry has the same shape, so that two can be compared without reading
+either in full:
+
+- The `Author:`, `Created:` and `Updated:` block every document in `docs/`
+  carries.
+- A `**Found:**` line for when and where the finding was actually made, which is
+  not the same date as the file.
+- A `**Severity:**` line giving one level for the cluster, one for the suite and
+  one for the deployment, in that order, on the scale the findings index
+  defines, then why.
+- Four sections, under these names and in this order: **What happened**,
+  **Why**, **What changed** (in the code, or on the cluster where the code did
+  not change), and **What it means for the system under test**, which keeps the
+  system under test apart from the harness and says "nothing" when that is the
+  answer. A section with nothing to report says so rather than going missing.
+  Then, where they apply, **Open**, for what the entry leaves unresolved, and
+  **What changed after this was written**, for later updates, each opening with
+  its date in bold. A correction to one sentence may sit beside that sentence,
+  dated, instead. Detail inside a section goes under `####` headings of the
+  entry's own choosing.
+
+An entry that a later finding corrects or narrows is not rewritten. It gets a
+note at the top naming the later entry, its index status says so, and a title
+the later entry has made false is retitled. The file keeps its name so that links
+to it still work, which means a slug is of the title the entry landed with.
 
 Cite it afterwards rather than re-explaining it. A case that skips or reports
 blocked, a constant that is the value it is, a teardown step that looks like more

@@ -1,8 +1,8 @@
-# F-008: `nfs-server-provisioner` never announces grace, so the grace cases cannot run against it
+# F-008: `nfs-server-provisioner` announces no grace in its container log stream, so the grace cases cannot run against it
 
 Author: mikebz@
 Created: 2026-09-14
-Updated: 2026-09-27
+Updated: 2026-10-01
 
 
 > **Refined by [F-022](F022-the-servers-grace-announcements-were-in-a-log-file.md).**
@@ -20,9 +20,10 @@ Updated: 2026-09-27
 backed by `cluster.local/nfs-provisioner-nfs-server-provisioner:v4.0.8`. First
 run of CHAOS-07 on this deployment.
 
-**Severity:** none for the cluster, high for what can be concluded from a run on
-it. A whole class of assertion is unreachable here and the results do not look
-empty, they look green.
+**Severity:** none for the cluster, high for the suite, medium for the
+deployment. A whole class of assertion is unreachable here and the results do
+not look empty, they look green. An operator reading the same log stream cannot
+see grace either.
 
 ### What happened
 
@@ -41,7 +42,13 @@ emit. This provisioner emits none that the built-in wording rule matches, and
 `-grace-enter-pattern` cannot help unless someone first establishes that a line
 exists to match.
 
-### What it means for a run on this deployment
+### What changed
+
+No code. This is a property of the deployment, and both cases already report it
+correctly. It is recorded so that a green CHAOS run against this provisioner is
+not read as evidence that grace behaves.
+
+### What it means for the system under test
 
 Three assertions are out of reach, and two of them are silent about it:
 
@@ -58,9 +65,3 @@ from flags, not from discovery. That is the documented fallback and it is sound,
 but it is worth stating that on this deployment the grace value is *declared*
 rather than observed, so a failover measured against it is measured against a
 number nobody confirmed.
-
-### What changed
-
-No code. This is a property of the deployment, and both cases already report it
-correctly. It is recorded so that a green CHAOS run against this provisioner is
-not read as evidence that grace behaves.

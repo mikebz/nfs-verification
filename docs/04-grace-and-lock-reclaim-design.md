@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-10
-Updated: 2026-09-14
+Updated: 2026-10-01
 Status: **superseded.** Serves as the historical record of delivery step 4 ([PR #8](https://github.com/mikebz/nfs-verification/pull/8)).
 Its ongoing design ownership has been consolidated: CHAOS-05, CHAOS-06, and CHAOS-07
 are maintained in [`03-chaos-operations-design.md`](03-chaos-operations-design.md),
@@ -14,20 +14,18 @@ Builds on [`03-chaos-operations-design.md`](03-chaos-operations-design.md).
 
 ## 1. Why this phase exists
 
-Step 3 could injure the server and time the outage. It could not see grace.
+[Step](storage_terms.md#step-phase-category-section-test-group-delivery-group) 3 could injure the server and time the outage. It could not see grace.
 
-Grace is the interval after a restart in which the server accepts reclaims of
-state that existed before the crash and refuses everything new (RFC 8881 Section
-8.4.2). It is the dominant term in every recovery number this suite reports, and
-a grace re-entry loop presents as a hung client in front of a healthy server,
-which the triage runbook in test plan Section 4.3 calls the most common wrong
-diagnosis in this architecture. A suite that cannot see grace reports a slow
-client and cannot say whether the server was enforcing a protocol guarantee or
-had wedged.
+The [grace period](storage_terms.md#grace-period) is the dominant term in every
+recovery number this suite reports, and a grace re-entry loop presents as a hung
+client in front of a healthy server, which the triage runbook in test plan
+Section 4.3 calls the most common wrong diagnosis in this architecture. A suite
+that cannot see grace reports a slow client and cannot say whether the server
+was enforcing a protocol guarantee or had wedged.
 
 Done means: entry and exit with timestamps or an honest statement that this
 server publishes neither; every lock held before a failover still held after it;
-no new lock granted while grace is in force; five failovers each recovering on
+no new lock granted while grace is in force; five [failovers](storage_terms.md#failover) each recovering on
 their own; and a failover that reaches an operator with a timestamp and a
 duration.
 
@@ -57,8 +55,8 @@ specific here:
 | # | Assertion | Where it comes from, and how it is checked |
 |---|---|---|
 | 1 | Grace is read from what the server publishes, never inferred from a stalled client | A stalled client is the symptom this phase exists to tell apart from grace. The observer's only input is the log stream |
-| 2 | A case that needs a window and has none reports blocked | Grace begins when the server restarts, which is later than the fault by an unknown amount, so a window derived from the configured value ends late and would report a lawful grant as a violation. CHAOS-07 reports blocked; OBS-03 is the case that fails for the missing signal ([F-008](findings.md)) |
-| 3 | Reclaim is asserted from both ends: the holder still holds, and a second client is still refused | A client that has lost its lock does not find out until it uses it, so the holder alone proves nothing |
+| 2 | A case that needs a window and has none reports [blocked](storage_terms.md#blocked-and-blocks) | Grace begins when the server restarts, which is later than the fault by an unknown amount, so a window derived from the configured value ends late and would report a lawful grant as a violation. CHAOS-07 reports blocked; OBS-03 is the case that fails for the missing signal ([F-008](findings.md)) |
+| 3 | [Reclaim](storage_terms.md#reclaim) is asserted from both ends: the holder still holds, and a second client is still refused | A client that has lost its lock does not find out until it uses it, so the holder alone proves nothing |
 | 4 | Every lock the case took, not one | The SLO row is 100%, and a case that checks one lock cannot report a fraction |
 | 5 | A new lock granted during grace fails, whether the server granted it deliberately or lost the state that would have refused it | RFC 8881 Section 8.4.2 bars new state during grace. Neither reading is acceptable, and the case does not have to tell them apart to fail |
 | 6 | A refusal during an outage is not evidence that grace was enforced | Every attempt fails while the server is down, for the ordinary reason. The window is established from the server's own signal first, and only then is the probe read inside it |
@@ -116,7 +114,7 @@ because an operator on that deployment cannot see grace either. F-008 in
 [`findings.md`](findings.md) is exactly this, met in the field.
 
 **The two clocks here are unavoidable**, because the window is stamped by the
-kubelet on the server's node and the probe by a client pod, which is on a
+kubelet on the server's node and the probe by a [client pod](storage_terms.md#client-and-client-pod), which is on a
 different node by construction. This is the case that produced the guard band
 convention in the test plan: the band narrows the window at both ends, a
 boundary grant is a note rather than a failure, and the direction is deliberate,
@@ -129,7 +127,7 @@ attempt fails for the ordinary reason that the server is not there. The
 protocol guarantee is that no *grant* lands inside the observed window and that a
 grant does land after it.
 
-**Un-reclaimed state is held through the window.** A server may lift grace early
+**Un-reclaimed state is held through the window.** A server may [lift grace early](storage_terms.md#reclaim_complete-and-early-end-of-grace)
 once it concludes no further clients will reclaim (test plan Section 3.8), so
 CHAOS-07 holds a client with outstanding state across the whole case. Without
 that, the case passes vacuously.
@@ -137,7 +135,7 @@ that, the case passes vacuously.
 **Five cycles, each injected only after the previous recovered.** Injecting on a
 fixed cadence regardless of recovery measures overlapping failovers, which is a
 different case and not what the plan asks for here. The plan's phrase is five
-cycles inside ten minutes; on the default profile grace alone is ninety seconds,
+cycles inside ten minutes; on the `default` [profile](storage_terms.md#profile) grace alone is ninety seconds,
 so five lawful recoveries do not fit and a case asserting the wall clock would
 fail with no defect present. Per-cycle assertions replace it.
 
@@ -177,7 +175,7 @@ failure, not a case that quietly observes nothing. A server whose logs are
 unreadable is reported as such rather than as a server that never entered grace.
 
 Not configurable: the probe rate, the guard band, the number of failover cycles,
-and the grace exit bound of two lease periods.
+and the grace exit bound of two [lease](storage_terms.md#lease) periods.
 
 Nothing new is deployed and no new privilege is needed. One lifecycle addition:
 the probe and every lock holder are registered for stop before the case can fail,
