@@ -467,6 +467,9 @@ func TestStaleCapabilityRecordDetectsAChangedPod(t *testing.T) {
 //  2. A master with gke-w1's set and a worker with gke-w2's: blocked, not a
 //     set, and not a harness failure.
 //  3. Two holders in different containers: an error, not one server.
+//  4. Two holders whose permitted sets agree and effective sets differ: one
+//     server, since only the permitted set is judged and a process may lower
+//     its effective set for a while.
 func TestOneServerSetRefusesHoldersThatDisagree(t *testing.T) {
 	full := CapSet{Permitted: maskFull, Effective: maskFull, Bounding: maskFull}
 	lowered := CapSet{Permitted: maskNoSysResource, Effective: maskNoSysResource, Bounding: maskFull}
@@ -489,5 +492,12 @@ func TestOneServerSetRefusesHoldersThatDisagree(t *testing.T) {
 	other.Caps = full
 	if c, err := oneServerSet([]ProcessCaps{master, other}); err == nil {
 		t.Errorf("processes in two containers combined as %+v rather than an error", c)
+	}
+
+	idle := master
+	idle.PID = 13
+	idle.Caps.Effective = maskNoSysResource
+	if c, err := oneServerSet([]ProcessCaps{master, idle}); err != nil || c.Caps.Permitted != maskFull {
+		t.Errorf("holders differing only in their effective sets gave %+v, %v; want one server", c, err)
 	}
 }

@@ -384,7 +384,7 @@ test suite, not a defence, and whoever edits the server mid-run can refresh
 preflight. A
 server that preforks is read in every process holding the socket, so a master
 that kept a capability its workers dropped does not stand in for them; where
-they hold different sets the case reports blocked. Intersecting them was tried
+their permitted sets differ the case reports blocked. Intersecting them was tried
 first and dropped in review, because it loses the holder that proves a
 capability reached the container and files an in-container drop as the
 platform's. Preflight carries whether an unread set was a condition of the

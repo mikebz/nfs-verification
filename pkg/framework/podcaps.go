@@ -303,7 +303,8 @@ func readServerPID(ctx context.Context, agent *Agent, pod *corev1.Pod, sp Server
 }
 
 // oneServerSet returns the set every process serving one socket holds, under
-// the lowest pid, or refuses when they do not hold one set.
+// the lowest pid, or refuses when their permitted sets differ. The other masks
+// are reported from the lowest pid.
 func oneServerSet(reads []ProcessCaps) (ProcessCaps, error) {
 	if len(reads) == 0 {
 		return ProcessCaps{}, fmt.Errorf("no server process was read")
@@ -314,8 +315,11 @@ func oneServerSet(reads []ProcessCaps) (ProcessCaps, error) {
 			return ProcessCaps{}, fmt.Errorf("the processes holding the socket run in containers %s (pid %d) and "+
 				"%s (pid %d), so they are not one server", out.Container, out.PID, r.Container, r.PID)
 		}
-		if r.Caps != out.Caps {
-			return ProcessCaps{}, Blockedf("the %s processes holding the socket hold different capability sets "+
+		// Permitted alone, because it is the only set SEC-09 judges
+		// (CapGaps): holders that differ only in what they have lowered
+		// from their effective sets for now are one server.
+		if r.Caps.Permitted != out.Caps.Permitted {
+			return ProcessCaps{}, Blockedf("the %s processes holding the socket hold different permitted sets "+
 				"(pid %d permitted %v, pid %d permitted %v), so the server has no one set to judge",
 				out.Name, out.PID, CapNames(out.Caps.Permitted), r.PID, CapNames(r.Caps.Permitted))
 		}
