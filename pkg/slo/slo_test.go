@@ -91,8 +91,8 @@ func TestUnknownProfileIsAnError(t *testing.T) {
 	}
 }
 
-// TestGraceExitBoundIsTwoLeases covers the convention that grace runs about
-// two lease periods, which is the bound the grace cases hold a server to.
+// TestGraceExitBoundIsTwoLeases covers the bound the grace cases hold a server
+// to: two lease periods, the ceiling Linux knfsd puts on extending grace.
 //
 // Steps:
 //  1. Take the grace exit bound for each profile.
