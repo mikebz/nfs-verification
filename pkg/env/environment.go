@@ -43,6 +43,59 @@ type ServerInfo struct {
 	Process string `json:"process,omitempty"`
 	// ProcessNote is why Process is empty, when it is.
 	ProcessNote string `json:"processNote,omitempty"`
+	// Capabilities is the server's capability state, read here once so that
+	// SEC-09 evaluates a record rather than reading the cluster itself: naming
+	// the server process needs the node agent (F-027), and a case should not.
+	// Like Process it is a property of the image, the pod spec and the
+	// platform, none of which a case changes.
+	Capabilities *ServerCapabilities `json:"capabilities,omitempty"`
+	// CapabilitiesNote is why Capabilities is empty, when it is.
+	CapabilitiesNote string `json:"capabilitiesNote,omitempty"`
+	// CapabilitiesBlocked says the note is a condition of this cluster that
+	// another would not have, such as a server pod that is not running or a
+	// PID 1 that is not the container's own, rather than the harness failing to
+	// read what was there. SEC-09 reports the first blocked and the second
+	// failed, as it did when it read the sets itself; an error's type does not
+	// survive the record, and the note's text is not something to match on.
+	// A server process that could not be named at all counts as blocked, as it
+	// did for SEC-09 before, and as ProcessNote does for the cases that kill
+	// it: DiscoverServerProcess does not yet type its errors, so the harness
+	// failures among them are not told apart here.
+	CapabilitiesBlocked bool `json:"capabilitiesBlocked,omitempty"`
+}
+
+// ServerCapabilities is what a server pod's container declares and what two of
+// its processes hold, read at one moment so the three can be compared.
+type ServerCapabilities struct {
+	// PodUID ties the record to the pod instance it was read from, so a case
+	// can tell a record that no longer describes the live pod
+	// (framework.StaleCapabilityRecord).
+	PodUID string `json:"podUID"`
+	// Container is the pod container the server process was found in.
+	Container string `json:"container"`
+	// DeclaredAdd, DeclaredDrop and Privileged are that container's spec.
+	DeclaredAdd  []string `json:"declaredAdd,omitempty"`
+	DeclaredDrop []string `json:"declaredDrop,omitempty"`
+	Privileged   bool     `json:"privileged"`
+	// Server is the process holding the listening NFS socket.
+	Server CapMasks `json:"server"`
+	// Init is the container's PID 1, the process the runtime started, whose
+	// set is what the platform delivered. On a supervised server it is not the
+	// server (F-026, #98).
+	Init CapMasks `json:"init"`
+}
+
+// CapMasks is one process's capability masks, in the 16-digit hex
+// /proc/<pid>/status prints, so a record can be checked against a status file
+// by eye.
+type CapMasks struct {
+	// Name is the process's comm.
+	Name        string `json:"name"`
+	Inheritable string `json:"inheritable"`
+	Permitted   string `json:"permitted"`
+	Effective   string `json:"effective"`
+	Bounding    string `json:"bounding"`
+	Ambient     string `json:"ambient"`
 }
 
 // MountInfo is one line of /proc/mounts on a node, for an NFS mount the suite

@@ -11,8 +11,10 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"github.com/mikebz/nfs-verification/pkg/env"
 	"github.com/mikebz/nfs-verification/pkg/framework"
 	"github.com/mikebz/nfs-verification/pkg/slo"
 )
@@ -581,6 +583,19 @@ func podStartInterval(ctx context.Context, f *framework.Framework, pod string) (
 // spec says one thing and the process does another, and nothing reports the
 // gap; this case is where the gap gets reported.
 //
+// Two processes are compared, because the question has two halves. The server
+// is whatever holds the listening socket on 2049, which on a supervised server
+// is not the container's PID 1 (F-026): the case read PID 1 until #98, and so
+// asserted on the supervisor. PID 1 is still read, for the other half: it is
+// what the runtime started, so its set is what the platform delivered. A
+// declared capability the server holds is fine whatever PID 1 holds, since a
+// supervisor may drop one from its own set after starting the server. One
+// neither holds was taken by the platform, and fails.
+// One PID 1 holds and the server does not was given up inside the container, by
+// the server or its supervisor, and is recorded: that is the server narrowing
+// itself, which is the plan's "no more" rather than a breach of it, and failing
+// it would file ganesha.nfsd's own hardening on gke-w2 as a platform defect.
+//
 // The other direction is the same question asked the other way: a privileged
 // container holds everything regardless of what the spec says, so its declared
 // set means nothing and no admission policy constrains it.
@@ -589,68 +604,149 @@ func podStartInterval(ctx context.Context, f *framework.Framework, pod string) (
 // is the platform's default set, identical on every conformant cluster, so a
 // case that failed on it would fail everywhere and say nothing.
 //
+// The sets are read by preflight, not here. They follow from the image, the pod
+// spec and the platform, none of which a case changes, and naming the server
+// process needs the privileged node agent (F-027); the test plan's harness
+// design section keeps that kind of read out of the cases. What the case reads
+// live is only the pod, through the API, to check the record still describes
+// it.
+//
 // Steps:
-//  1. Find the server pods.
-//  2. Read the declared capabilities from the pod spec.
-//  3. Read the effective set of the container's PID 1.
-//  4. Fail on a declared capability that is not there at runtime.
-//  5. Fail if the container is privileged.
-//  6. Record the effective set and how far it exceeds the declaration.
+//  1. Take each server preflight recorded. Report blocked where preflight
+//     could not read the sets for a reason of this cluster's, and fail where
+//     it could not read them at all.
+//  2. Check the record against the live pod: the same pod UID, or blocked
+//     with -refresh-preflight.
+//  3. Fail on a declared capability neither the server process nor PID 1
+//     held. Record one the server gave up after PID 1 was given it.
+//  4. Fail if the container is privileged.
+//  5. Record both sets, and how far the server's exceeds the declaration.
+//  6. Report blocked, after judging the rest, if any server went unjudged.
 func TestSecServerCapabilities(t *testing.T) {
 	f := framework.New(t, "SEC-09")
 	ctx, cancel := caseCtx(t, 10*time.Minute)
 	defer cancel()
 
-	pod := serverPodOrBlock(ctx, t, f)
-	declared := framework.DeclaredCapsOf(pod)
-	caps, err := framework.ContainerCaps(ctx, f.C, pod)
-	if err != nil {
-		failOrBlock(t, err, "reading the capability set of the server in %s/%s", pod.Namespace, pod.Name)
+	if len(f.Env.Servers) == 0 {
+		blocked(t, "preflight recorded no NFS server pod, so there is no server whose capabilities to judge; "+
+			"-server-namespace and -server-selector name it where the heuristic cannot")
 	}
-	effective := framework.CapNames(caps.Effective)
-	t.Logf("%s/%s container %s declares add=%v drop=%v privileged=%v and holds %v",
-		pod.Namespace, pod.Name, declared.Container, declared.Add, declared.Drop, declared.Privileged, effective)
-	if err := f.WriteArtifact("server-capabilities.txt", []byte(fmt.Sprintf(
-		"pod: %s/%s\ncontainer: %s\ndeclared add: %v\ndeclared drop: %v\nprivileged: %v\n"+
-			"effective: %v\npermitted: %v\nbounding: %v\nambient: %v\n",
-		pod.Namespace, pod.Name, declared.Container, declared.Add, declared.Drop, declared.Privileged,
-		effective, framework.CapNames(caps.Permitted), framework.CapNames(caps.Bounding),
-		framework.CapNames(caps.Ambient)))); err != nil {
-		t.Logf("writing the capability record: %v", err)
+	var record strings.Builder
+	var unjudged []string
+	for _, rec := range f.Env.Servers {
+		where := rec.Namespace + "/" + rec.Pod
+		c := rec.Capabilities
+		switch {
+		case c == nil && rec.CapabilitiesNote == "":
+			unjudged = append(unjudged, where+": the preflight record predates capability recording; "+
+				"re-run with -refresh-preflight")
+			continue
+		case c == nil && rec.CapabilitiesBlocked:
+			unjudged = append(unjudged, where+": "+rec.CapabilitiesNote)
+			continue
+		case c == nil:
+			t.Errorf("preflight could not read the capability sets of the server in %s on %s, for a reason "+
+				"another cluster would share, so this is the harness failing rather than a finding about the "+
+				"server: %s", where, rec.Node, rec.CapabilitiesNote)
+			continue
+		}
+		pod, err := f.C.Kube.CoreV1().Pods(rec.Namespace).Get(ctx, rec.Pod, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			unjudged = append(unjudged, where+": preflight read it and it is gone now; re-run with -refresh-preflight")
+			continue
+		}
+		if err != nil {
+			t.Fatalf("reading %s to check the preflight record still describes it: %v", where, err)
+		}
+		if why := framework.StaleCapabilityRecord(rec, pod); why != "" {
+			unjudged = append(unjudged, where+": "+why)
+			continue
+		}
+		judgeServerCapabilities(t, rec, &record)
 	}
-
-	for _, want := range declared.Add {
-		if !framework.HasCap(caps.Effective, want) {
-			t.Errorf("the server container declares %s and does not hold it at runtime (effective set "+
-				"%v). Something between the spec and the process removed it: an admission policy, a "+
-				"restricted bounding set, or a runtime default. The pod started anyway, so what an "+
-				"operator will see is the operations needing that capability failing with EPERM against "+
-				"a server that looks healthy", want, effective)
+	if record.Len() > 0 {
+		if err := f.WriteArtifact("server-capabilities.txt", []byte(record.String())); err != nil {
+			t.Logf("writing the capability record: %v", err)
 		}
 	}
-	if declared.Privileged {
-		t.Errorf("the server container runs privileged, so it holds every capability the kernel has and " +
-			"nothing the platform's admission policy says constrains it. The plan's requirement for this " +
-			"case is the set it needs and no more, and privileged is the one configuration under which " +
-			"that cannot be true")
+	if len(unjudged) > 0 {
+		blocked(t, "%d of %d servers preflight recorded could not be judged: %s", len(unjudged),
+			len(f.Env.Servers), strings.Join(unjudged, "; "))
+	}
+}
+
+// judgeServerCapabilities applies SEC-09's verdict to one server's preflight
+// record, and appends the record to the case's artifact. The record has no
+// pids: they change on every restart, and preflight read them at one moment.
+func judgeServerCapabilities(t *testing.T, rec env.ServerInfo, record *strings.Builder) {
+	t.Helper()
+	c := rec.Capabilities
+	where := rec.Namespace + "/" + rec.Pod
+	server, err := framework.CapSetOf(c.Server)
+	if err != nil {
+		t.Errorf("decoding the preflight record of %s: %v", where, err)
+		return
+	}
+	delivered, err := framework.CapSetOf(c.Init)
+	if err != nil {
+		t.Errorf("decoding the preflight record of %s: %v", where, err)
+		return
+	}
+
+	held := framework.CapNames(server.Permitted)
+	t.Logf("%s container %s declares add=%v drop=%v privileged=%v; PID 1, %s, held %v; the server, %s on %s, "+
+		"held %v (permitted sets, read by preflight)", where, c.Container, c.DeclaredAdd, c.DeclaredDrop,
+		c.Privileged, c.Init.Name, framework.CapNames(delivered.Permitted), c.Server.Name, rec.Node, held)
+	fmt.Fprintf(record, "pod: %s\nnode: %s\ncontainer: %s\ndeclared add: %v\ndeclared drop: %v\nprivileged: %v\n\n"+
+		"server process: %s\n  effective: %v\n  permitted: %v\n  bounding: %v\n  ambient: %v\n\n"+
+		"container PID 1, %s, what the runtime delivered:\n  effective: %v\n  permitted: %v\n  bounding: %v\n"+
+		"  ambient: %v\n\n", where, rec.Node, c.Container, c.DeclaredAdd, c.DeclaredDrop, c.Privileged,
+		c.Server.Name, framework.CapNames(server.Effective), held, framework.CapNames(server.Bounding),
+		framework.CapNames(server.Ambient), c.Init.Name, framework.CapNames(delivered.Effective),
+		framework.CapNames(delivered.Permitted), framework.CapNames(delivered.Bounding),
+		framework.CapNames(delivered.Ambient))
+
+	stripped, dropped := framework.CapGaps(c.DeclaredAdd, delivered, server)
+	for _, want := range stripped {
+		t.Errorf("container %s of %s on %s declares %s, and neither the server, %s, nor PID 1, the process the "+
+			"runtime started, held it when preflight read them (PID 1 permitted %v). Something between the spec "+
+			"and the process removed it: an admission policy, a restricted bounding set, or a runtime default "+
+			"such as a non-root user with no ambient set; the one alternative is that PID 1 dropped it itself. "+
+			"The pod started anyway, so what an operator will see is the operations needing that capability "+
+			"failing with EPERM against a server that looks healthy", c.Container, where, rec.Node, want,
+			c.Server.Name, framework.CapNames(delivered.Permitted))
+	}
+	for _, want := range dropped {
+		t.Logf("recorded: container %s declares %s and the runtime delivered it to PID 1, but the server, %s on "+
+			"%s, no longer held it (permitted %v). Something inside the container gave it up, the server or its "+
+			"supervisor. That is the server narrowing its own set, not the platform taking it, so it is not this "+
+			"case's failure; it does mean the declaration asks for more than the server keeps", c.Container,
+			want, c.Server.Name, rec.Node, held)
+	}
+	if c.Privileged {
+		t.Errorf("container %s of %s runs privileged, so it holds every capability the kernel has and nothing "+
+			"the platform's admission policy says constrains it. The plan's requirement for this case is the set "+
+			"it needs and no more, and privileged is the one configuration under which that cannot be true",
+			c.Container, where)
 	}
 
 	// Recorded rather than asserted: what the runtime grants by default is the
 	// platform's choice, not the server's.
-	extra := make([]string, 0, len(effective))
-	for _, have := range effective {
-		if !containsCap(declared.Add, have) {
+	extra := make([]string, 0, len(held))
+	for _, have := range held {
+		if !containsCap(c.DeclaredAdd, have) {
 			extra = append(extra, have)
 		}
 	}
 	sort.Strings(extra)
-	if len(declared.Add) > 0 && len(extra) > 0 {
-		t.Logf("recorded: the container asked for %v and holds %d more from the runtime's defaults (%v). "+
-			"Dropping ALL and adding back what it needs is what would narrow that",
-			declared.Add, len(extra), extra)
+	if len(c.DeclaredAdd) > 0 && len(extra) > 0 {
+		t.Logf("recorded: container %s of %s asked for %v and the server holds %d more from the runtime's "+
+			"defaults (%v). Dropping ALL and adding back what it needs is what would narrow that",
+			c.Container, where, c.DeclaredAdd, len(extra), extra)
 	}
-	if len(declared.Add) == 0 && !declared.Privileged {
-		t.Logf("recorded: the server declares no capabilities and runs on the runtime's defaults (%v)", effective)
+	if len(c.DeclaredAdd) == 0 && !c.Privileged {
+		t.Logf("recorded: the server in %s declares no capabilities and runs on the runtime's defaults (%v)",
+			where, held)
 	}
 }
 
