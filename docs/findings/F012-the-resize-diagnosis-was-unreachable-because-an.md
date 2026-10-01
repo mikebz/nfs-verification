@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-14
-Updated: 2026-09-14
+Updated: 2026-10-01
 
 
 **Found:** 2026-09-11, GKE cluster `gke-w1`, Kubernetes v1.37.0-gke.2941000,
@@ -10,7 +10,8 @@ three workers on Container-Optimized OS, StorageClass `nfs` backed by
 `cluster.local/nfs-provisioner-nfs-server-provisioner`, default profile from
 flags. PROV-04 and PROV-11, in run `e2e-full-20260911`.
 
-**Severity:** medium. Nothing is asserted wrongly. What is lost is the
+**Severity:** none for the cluster, medium for the suite, none for the
+deployment. Nothing is asserted wrongly. What is lost is the
 explanation, on the two cases whose failure most needs one, and what replaced it
 points at the wrong thing.
 

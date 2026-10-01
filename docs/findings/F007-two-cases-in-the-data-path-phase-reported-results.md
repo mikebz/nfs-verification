@@ -2,13 +2,19 @@
 
 Author: mikebz@
 Created: 2026-09-14
-Updated: 2026-09-14
+Updated: 2026-10-01
 
+
+> **Refined by [F-010](F010-a-lock-case-accused-the-server-of-losing-a-lock.md).**
+> CHAOS-06's pass recorded below was a coincidence. Its cross-node byte-range
+> check matched one node's file identity against both nodes' lock tables, so it
+> could pass only when the two nodes' device numbers happened to agree.
 
 **Found:** 2026-09-11, GKE cluster `gke-w1` with three workers, first real run of
 the step 6 cases from [PR #14](https://github.com/mikebz/nfs-verification/pull/14).
 
-**Severity:** high for the suite, none for the cluster. Both cases were green,
+**Severity:** none for the cluster, high for the suite, none for the
+deployment. Both cases were green,
 and neither was wrong about anything it claimed. They were wrong about how much
 they had claimed.
 
@@ -63,7 +69,7 @@ DATA-11 is now two subtests, `sparse-write-and-read-back` and `hole-punch`, so
 the half that can run on a busybox image reports its own result and only the
 half that cannot reports blocked.
 
-### What it says about the harness, not the system under test
+### What it means for the system under test
 
 Nothing about NFS. It says that "the case passed" and "the case measured
 something" are different claims, and that the suite had no way to tell them
@@ -81,7 +87,7 @@ A case that asserts over a set it produced has to state how large that set must
 be to carry its conclusion, and fail below it. Only the durability pair does
 that today.
 
-### What the run settled
+#### What the run settled
 
 Four things the design had left open, recorded here because they are facts about
 a real image and a real cluster rather than decisions:

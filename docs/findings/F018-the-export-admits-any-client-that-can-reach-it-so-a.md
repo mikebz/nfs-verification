@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-14
-Updated: 2026-09-14
+Updated: 2026-10-01
 
 
 **Found:** 2026-09-13, `make test-sec` run `20260913-171950`, SEC-05, GKE cluster
@@ -10,7 +10,8 @@ Updated: 2026-09-14
 OS, kernel 6.12.94+, StorageClass `nfs` backed by `nfs-server-provisioner`
 v4.0.8, profile `default` (lease 60s, grace 90s).
 
-**Severity:** every other security case in the suite describes what a client the
+**Severity:** none for the cluster, none for the suite, high for the
+deployment. Every other security case in the suite describes what a client the
 export admits may do. This one says the export admits everything.
 
 ### What happened

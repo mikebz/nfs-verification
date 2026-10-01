@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-14
-Updated: 2026-09-14
+Updated: 2026-10-01
 
 
 **Found:** 2026-09-12, GKE cluster `gke-w1`, Kubernetes v1.37.0-gke.2941000,
@@ -11,7 +11,8 @@ backed by `nfs-server-provisioner` as a single-replica StatefulSet, profile
 `default` (lease 60s, grace 90s). Runs `pr39-chaos-20260912` and
 `pr39v2-chaos-20260912`, `make test-chaos`.
 
-**Severity:** every recovery number the chaos cases have ever reported is
+**Severity:** none for the cluster, critical for the suite, none for the
+deployment. Every recovery number the chaos cases have ever reported is
 suspect, and the SLO comparison that uses it could not fail.
 
 ### What happened

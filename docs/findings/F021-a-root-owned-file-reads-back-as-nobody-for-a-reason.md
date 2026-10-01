@@ -2,13 +2,14 @@
 
 Author: mikebz@
 Created: 2026-09-14
-Updated: 2026-09-14
+Updated: 2026-10-01
 
 
 **Found:** 2026-09-13, hand probes against GKE cluster `gke-w1`, confirmed by
 `make test-sec` run `20260913-171950`.
 
-**Severity:** SEC-02 passed while printing a sentence about this deployment that
+**Severity:** none for the cluster, high for the suite, low for the
+deployment. SEC-02 passed while printing a sentence about this deployment that
 was wrong in a way that would send somebody to the export configuration. Fixed
 below; the failure mode is worth keeping because nothing in the run was red.
 
@@ -19,7 +20,9 @@ filesystem, read directly inside the server pod. The same file read from any
 client reports 65534:65534. A file written as uid 1234 reports 1234 on both
 sides.
 
-### What root squash is, and why an export would want it
+### Why
+
+#### What root squash is, and why an export would want it
 
 Root squash is a server-side rule: a request arriving as uid 0 is rewritten to an
 unprivileged identity, conventionally `nobody` (65534), before the server acts on
@@ -32,7 +35,7 @@ server for that reason, and it is turned off — `no_root_squash` — when a
 workload genuinely needs to own files as root, which on a shared RWX volume means
 accepting that every node that can mount it can do the same.
 
-### Why this is not that
+#### Why this is not that
 
 NFSv4 carries owners as strings, not as integers. This server answers with a name
 where one exists in its passwd database and with a numeric string where none

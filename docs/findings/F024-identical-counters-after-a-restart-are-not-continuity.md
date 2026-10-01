@@ -2,15 +2,23 @@
 
 Author: mikebz@
 Created: 2026-09-16
-Updated: 2026-09-16
+Updated: 2026-10-01
 
+
+> **Refined by [F-025](F025-a-metric-name-with-no-sample-yet-is-not-a-lost-one.md).**
+> The idle server here published its cold-start set on both sides of the
+> restart, which is why this run lost no name and reached the counter
+> comparison at all. Since the fix for #81, OBS-07 drives its own traffic either
+> side of the restart, and on `gke-w2` the counters reset: 62 reset, none
+> advanced. The counter behaviour this entry calls unmeasured is measured there.
 
 **Found:** 2026-09-15, the first end-to-end run of OBS-07 against `gke-w2` (run
 `20260915-233101`), immediately after
 [F-023](F023-neither-nfs-deployment-declares-a-metrics-endpoint.md) made a real
 metrics endpoint available to scrape.
 
-**Severity:** the case passed and said something false about the deployment.
+**Severity:** none for the cluster, high for the suite, none for the
+deployment. The case passed and said something false about the deployment.
 That is worse than the red it replaced.
 
 ### What happened
@@ -86,7 +94,7 @@ it is.
 Re-run on `gke-w2` afterwards: `resumed-indeterminate`, 0 reset, 0 advanced, 14
 unchanged. Still a pass, and now it says what it actually observed.
 
-### The same false pass had a second cause, found in review
+#### The same false pass had a second cause, found in review
 
 Fourteen counters out of 367 series is the number that should have been
 questioned at the time, and was not. Review asked why `MetricNames()`, then

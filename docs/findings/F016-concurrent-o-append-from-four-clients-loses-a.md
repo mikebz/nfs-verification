@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-14
-Updated: 2026-09-27
+Updated: 2026-10-01
 
 
 **Found:** 2026-09-13, GKE cluster `gke-w1`, Kubernetes v1.37.0-gke.2941000,
@@ -62,8 +62,10 @@ longer hold:
   is not established. The failure message does not name each appender's node,
   so the next red run cannot confirm it from the message alone.
 
-**Severity:** a property of this deployment, for the boundary discussion. It is
-not a protocol violation and must not be filed against the server as one.
+**Severity:** none for the cluster, none for the suite, high for the
+deployment. A property of this deployment, for the boundary discussion: records
+are lost and no writer is told. It is not a protocol violation and must not be
+filed against the server as one.
 
 ### What happened
 

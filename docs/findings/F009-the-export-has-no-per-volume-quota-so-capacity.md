@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-14
-Updated: 2026-09-14
+Updated: 2026-10-01
 
 
 **Found:** 2026-09-11, GKE cluster `gke-w1`, Kubernetes v1.37.0-gke.2941000,
@@ -10,9 +10,11 @@ three workers on Container-Optimized OS, StorageClass `nfs` backed by
 `cluster.local/nfs-provisioner-nfs-server-provisioner`, default profile (60s
 lease, 90s grace) from flags. First run of OBS-06.
 
-**Severity:** none for the data path, high for anyone who sets a capacity
-threshold on this deployment. Nothing is broken; a number an operator would
-reasonably monitor means something other than what its name suggests.
+**Severity:** none for the cluster, high for the suite, medium for the
+deployment. Nothing in the data path is broken; a number an operator would
+reasonably monitor means something other than what its name suggests. The
+suite's half is the agreement check above the quota check, which could not
+fail on this deployment until the run exposed it.
 
 ### What happened
 
@@ -36,20 +38,6 @@ This provisioner hands out an export per claim as a subdirectory of one
 filesystem, and its XFS quota option is off by default. There is no per-volume
 limit, so `statfs` on the mount answers with the filesystem behind it. Both
 sources read that same filesystem, which is why they agree so precisely.
-
-### What it means for the system under test
-
-Not a defect in the NFS server, and not a failing harness: it is a limitation of
-this deployment, which is the distinction the case exists to draw. An operator
-who sets an alert at 80% of the reported capacity is watching the provisioner's
-10 GiB volume rather than the 1 GiB their workload was promised. A claim can
-reach its own nominal size with the monitored number barely moving, and the
-first sign of trouble is the application getting ENOSPC with every dashboard
-reading healthy. Turning the quota option on is what changes the answer.
-
-The same run leaves the other half of Section 3.5 open: OBS-02 failed for an
-unrelated reason on this cluster and OBS-03 failed as F-008 predicts, neither of
-which OBS-06 touches.
 
 ### What changed
 
@@ -76,7 +64,7 @@ would pass unchanged on a deployment whose exports carry a quota. A run against
 this cluster reports OBS-06 as a failure naming the provisioner's
 configuration, with F-009 as the explanation.
 
-### What the second run settled
+#### What the second run settled
 
 Re-run the same day on the same cluster with the corrected tolerance, which is
 what it was there to check. The tolerance came out at 20.5 MiB, two percent of
@@ -89,3 +77,17 @@ OBS-02 passed on this run, having failed on the first with a record sweep that
 answered nothing. Nothing in this change reaches that case, so the first result
 was environmental; it is noted because two runs of the same target disagreeing
 is worth knowing when the next one is read.
+
+### What it means for the system under test
+
+Not a defect in the NFS server, and not a failing harness: it is a limitation of
+this deployment, which is the distinction the case exists to draw. An operator
+who sets an alert at 80% of the reported capacity is watching the provisioner's
+10 GiB volume rather than the 1 GiB their workload was promised. A claim can
+reach its own nominal size with the monitored number barely moving, and the
+first sign of trouble is the application getting ENOSPC with every dashboard
+reading healthy. Turning the quota option on is what changes the answer.
+
+The first run leaves the other half of Section 3.5 open: OBS-02 failed for an
+unrelated reason on this cluster and OBS-03 failed as F-008 predicts, neither of
+which OBS-06 touches.

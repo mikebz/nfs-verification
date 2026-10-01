@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-14
-Updated: 2026-09-14
+Updated: 2026-10-01
 
 
 **Found:** 2026-09-12, GKE cluster `gke-w1`, Kubernetes v1.37.0-gke.2941000,
@@ -11,7 +11,8 @@ three workers on Container-Optimized OS, StorageClass `nfs` backed by
 lease, 90s grace) from flags. CHAOS-06 and CHAOS-07, in run
 `pr36-chaos-20260912`.
 
-**Severity:** high, as a harness defect. It stops the durability assertion from
+**Severity:** none for the cluster, high for the suite, none for the
+deployment. It stops the durability assertion from
 reaching a verdict, and the message it stopped with pointed at the data rather
 than at the harness.
 
