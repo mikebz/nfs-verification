@@ -2,12 +2,12 @@
 
 Author: mikebz@
 Created: 2026-09-14
-Updated: 2026-09-27
+Updated: 2026-10-01
 
 
 **Found:** 2026-09-11, GKE cluster with e2-medium worker nodes, running PROV and DATA test suites.
 
-**Severity:** critical for the cluster, high for the suite. It exhausts kernel mount structures, driving worker nodes into uninterruptible D-state and requiring a hard compute instance reset.
+**Severity:** critical for the cluster, medium for the suite, high for the deployment. It exhausts kernel mount structures, driving worker nodes into uninterruptible D-state and requiring a hard compute instance reset. The suite's failures are real, and point at storage rather than at the node image.
 
 ### What happened
 
@@ -41,9 +41,9 @@ The bug is the combination of `--propagation shared` with `mount --bind` *before
 4. Each subsequent NFS mount starts with $2^N$ mounts on the host, duplicating all existing peer mounts on every execution: $1 \to 2 \to 4 \to 8 \to 16 \dots \to 8192$.
 5. By mount 13, the kernel mount table holds over 16,384 mounts. Every subsequent operation iterating mounts (container creation, exec, `cat /proc/mounts`, kubelet housekeeping) acquires `namespace_sem` and spends excessive CPU traversing stacked mounts. Worker threads enter uninterruptible D-state, container runtimes hang, and the node becomes unresponsive.
 
-### The fix applied to the nodes
+### What changed
 
-In `/home/kubernetes/bin/mount.nfs`:
+The fix was applied to the nodes, in `/home/kubernetes/bin/mount.nfs`:
 
 1. **Make directories slave before bind-mounting:**
 A slave mount receives propagation from its master (the host) but never propagates changes back. Making `/etc` and `/run` `rslave` before bind-mounting ensures bind mounts remain confined to the private namespace:
@@ -75,10 +75,18 @@ fi
 - Like F-003, this is an infrastructure defect in GKE's host mount wrapper, not an NFS protocol bug or harness failure. Any dynamic RWX workload on GKE that provisions and mounts volumes repeatedly will eventually wedge its worker nodes.
 - With the fix applied across worker nodes, mount table size remained stable at baseline (~80-84 lines) across hundreds of mounts throughout the full PROV, DATA, SEC, OBS, and CHAOS test suites.
 
-### Updated 2026-09-27
+### Open
 
-**The fix stopped the growth. It did not undo what had already stacked up, so
-"stable at baseline" above is true of some nodes and not others.** The
+The fix stops new mounts from stacking and removes none of those already
+stacked. The update below lists four nodes still above baseline, one of them at
+2,048 `/etc` mounts. Cleaning them is a reboot or an unmount loop on each node,
+a change for the cluster owner, and it has not been made.
+
+### What changed after this was written
+
+**2026-09-27. The fix stopped the growth. It did not undo what had already
+stacked up, so "stable at baseline" above is true of some nodes and not
+others.** The
 `/proc/mounts` the bundles collected during six whole-suite runs on 2026-09-25
 show the wrapper's leftovers still in the host namespace:
 

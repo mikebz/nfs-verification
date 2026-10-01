@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-14
-Updated: 2026-09-14
+Updated: 2026-10-01
 
 
 **Found:** 2026-09-12, GKE cluster `gke-w1`, Kubernetes v1.37.0-gke.2941000,
@@ -10,7 +10,8 @@ three workers on Container-Optimized OS, StorageClass `nfs` backed by
 `cluster.local/nfs-provisioner-nfs-server-provisioner`, default profile (60s
 lease, 90s grace) from flags. CHAOS-06, in the first full-suite run.
 
-**Severity:** high. This is a false accusation against the system under test,
+**Severity:** none for the cluster, high for the suite, none for the
+deployment. This is a false accusation against the system under test,
 produced by the case whose entire job is to tell reclaim from loss.
 
 ### What happened

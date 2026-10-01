@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-17
-Updated: 2026-09-28
+Updated: 2026-10-01
 
 
 **Found:** 2026-09-17, the first whole-suite runs against two clusters,
@@ -10,7 +10,8 @@ Updated: 2026-09-28
 run IDs named in local time. Reproduced deliberately the same day on `gke-w2`
 (run `w2-obs07-repro-20260917`).
 
-**Severity:** OBS-07 reports `never-resumed`, a failure naming the deployment,
+**Severity:** none for the cluster, high for the suite, low for the
+deployment. OBS-07 reports `never-resumed`, a failure naming the deployment,
 for a server whose telemetry came back intact. The verdict's size depends on how
 busy the server was before the fault, which is a property of the run rather than
 of the deployment.
@@ -195,10 +196,10 @@ by hand, per
 [F-023](F023-neither-nfs-deployment-declares-a-metrics-endpoint.md). On `gke-w1`
 OBS-07 still fails at discovery with `absent`, and nothing here applies to it.
 
-### Updated 2026-09-27
+### What changed after this was written
 
-**Reproduced three out of three, identically after the restart.** OBS-07 ran in
-three whole-suite runs on `gke-w2` on 2026-09-25
+**2026-09-27. Reproduced three out of three, identically after the restart.**
+OBS-07 ran in three whole-suite runs on `gke-w2` on 2026-09-25
 (`w2-e2e-run{1,2,3}-20260925-222955`), with the exposer and annotations still
 hand-enabled. Every run returned the same verdict and the same post-restart
 figures as this entry's first occurrence. Only the pre-restart series count

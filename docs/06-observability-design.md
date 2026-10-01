@@ -2,17 +2,16 @@
 
 Author: mikebz@
 Created: 2026-09-11
-Updated: 2026-09-30
-Status: **in progress.** Delivery step 7 (OBS-06 shipped in [PR #29](https://github.com/mikebz/nfs-verification/pull/29);
-OBS-07 shipped in step 7 and run against `gke-w1` and `gke-w2`, red on both as shipped ([F-023](findings.md)),
-briefly green with Ganesha's exposer enabled by hand and falsely so ([F-024](findings.md)), and red again
-on the whole-suite runs of 2026-09-17 for a reason of the harness's own making ([F-025](findings.md)), fixed for
-[issue #81](https://github.com/mikebz/nfs-verification/issues/81) and green with `resumed-reset` on `gke-w2` since;
-OBS-01 and OBS-05 designed). OBS-02 and OBS-03 shipped in
-Step 4 ([PR #8](https://github.com/mikebz/nfs-verification/pull/8));
-OBS-04 shipped in Step 2b ([PR #4](https://github.com/mikebz/nfs-verification/pull/4)). Consolidated here to serve
-the complete Observability [test group](storage_terms.md#step-phase-category-section-test-group-delivery-group).
-Serves: OBS-01 through OBS-07. Requirements in [`01-test-plan.md`](01-test-plan.md) Section 3.5.
+Updated: 2026-10-01
+Status: partly shipped. OBS-04 shipped in delivery step 2b
+([PR #4](https://github.com/mikebz/nfs-verification/pull/4)), OBS-02 and OBS-03
+in step 4 ([PR #8](https://github.com/mikebz/nfs-verification/pull/8)), and
+OBS-06 and OBS-07 in step 7 ([PR #29](https://github.com/mikebz/nfs-verification/pull/29),
+[PR #74](https://github.com/mikebz/nfs-verification/pull/74)). OBS-01 and OBS-05
+are designed, for step 7; OBS-01's behavioral half needs a fault from step 10.
+Serves: OBS-01 through OBS-07, the complete Observability
+[test group](storage_terms.md#step-phase-category-section-test-group-delivery-group).
+Requirements in [`01-test-plan.md`](01-test-plan.md) Section 3.5.
 Builds on [`03-chaos-operations-design.md`](03-chaos-operations-design.md),
 [`04-grace-and-lock-reclaim-design.md`](04-grace-and-lock-reclaim-design.md) and
 [`05-data-path-and-locktool-design.md`](05-data-path-and-locktool-design.md),

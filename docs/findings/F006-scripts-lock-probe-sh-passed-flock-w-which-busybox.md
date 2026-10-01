@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-14
-Updated: 2026-09-14
+Updated: 2026-10-01
 
 
 **Found:** 2026-09-11, by reading the applet sources while writing
@@ -10,8 +10,8 @@ Updated: 2026-09-14
 Not found by a run: on a workstation and on the default `alpine:3.20` tools
 image the probe works, because both carry the util-linux `flock`.
 
-**Severity:** high for the suite, none for the cluster. It makes a merged case
-pass while asserting nothing.
+**Severity:** none for the cluster, high for the suite, none for the
+deployment. It makes a merged case pass while asserting nothing.
 
 ### What happened
 
@@ -19,7 +19,7 @@ pass while asserting nothing.
 `hold-flock.sh`'s own comment two files away already said busybox `flock` has
 no timeout flag, and the probe contradicted it.
 
-### Why it matters
+### Why
 
 busybox `util-linux/flock.c` parses `-s`, `-x`, `-u` and `-n` and nothing else.
 On an image carrying the applet, every attempt exits on a usage error before a
@@ -44,7 +44,7 @@ could not catch this: they run against the workstation's `flock`, which accepts
 `-w`, so a portability defect has to be asserted against the option set rather
 than against behaviour.
 
-### What it says about the harness, not the system under test
+### What it means for the system under test
 
 Nothing about NFS. It says that "assume nothing beyond busybox" is a rule the
 repository states and had no check for. Every case that reports on grants can

@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-16
-Updated: 2026-09-17
+Updated: 2026-10-01
 
 
 **Found:** 2026-09-15, the first runs of OBS-07, against GKE clusters `gke-w1`
@@ -12,7 +12,8 @@ revised the same day after a review question asked why
 exists upstream if nothing is listening. It does, and the first version of this
 entry would have left the next person to rediscover that.
 
-**Severity:** as shipped, the channel that carries everything an operator could
+**Severity:** none for the cluster, low for the suite, medium for the
+deployment. As shipped, the channel that carries everything an operator could
 know about NFS itself is empty on both clusters. Unlike the first version of
 this entry implied, that is a configuration state on `gke-w2`, not a missing
 capability.
@@ -29,7 +30,7 @@ container ports, every one of them an NFS protocol port: `nfs` 2049, `nlockmgr`
 TCP and a UDP flavour. Nothing named for metrics, and no `prometheus.io/scrape`,
 `prometheus.io/port` or `prometheus.io/path`.
 
-### Why: two gates, and the clusters fail different ones
+### Why
 
 NFS-Ganesha has had a Prometheus exposer in tree since well before either of
 these images. It is gated twice.
@@ -60,7 +61,7 @@ The two clusters fail different gates:
 So `gke-w1` was built without monitoring and cannot publish without a rebuild.
 `gke-w2` **can**, and does not only because of a default.
 
-### Verified by turning it on
+#### Verified by turning it on
 
 Rather than reason about it, the switch was thrown on `gke-w2`. The generated
 config lives at `/export/vfs.conf` on the server's own backing volume, not in a
@@ -74,7 +75,7 @@ the chart section below), so the edit survived the restart. Port 9587 came up
 and served **39 metric families in 367 series**, read through the API server's
 pod proxy with no scraper deployed.
 
-#### What it publishes
+##### What it publishes
 
 The full family list, from the `# TYPE` lines of a scrape taken
 2026-09-15 on Ganesha `V15.3-mb`. This is recorded in full because the point of
@@ -136,7 +137,7 @@ the per-client and per-export labels. Ganesha's own documentation warns it
 "significantly reduces performance", so a deployment turning metrics on for
 production should decide about that separately.
 
-### The second gate nobody would guess
+#### The second gate nobody would guess
 
 Enabling the exposer is **not sufficient** to make the deployment monitorable.
 The chart templates no metrics port and no annotation, so with `Enable_Metrics`
@@ -146,7 +147,7 @@ only what the pod declares (doc 06 section 6), so it kept reporting `absent`
 until the StatefulSet's pod template was patched with
 `prometheus.io/port: "9587"`.
 
-### Neither gate is reachable from supported configuration
+#### Neither gate is reachable from supported configuration
 
 Both clusters run the upstream chart `nfs-server-provisioner-1.8.0` from
 kubernetes-sigs, with only the image overridden. Neither gate can be opened
@@ -231,12 +232,13 @@ inside the export, and metrics to an exposer that is never started.
 
 ### What changed after this was written
 
-**2026-09-17**: `gke-w2` no longer matches the description above. Its server pod
-now carries `prometheus.io/scrape`, `prometheus.io/port` and `prometheus.io/path`
-alongside the `Enable_Metrics` edit, both added by hand after this entry was
-written, so the endpoint is now discoverable as well as live. The sentence
-"as configured, this pod marks no scrape target a scraper could discover" was
-true of `gke-w2` when it was written and is not true of it today.
+**2026-09-17.** `gke-w2` no longer matches the description above. Its server pod
+now carries `prometheus.io/scrape`, `prometheus.io/port` and
+`prometheus.io/path` alongside the `Enable_Metrics` edit, both added by hand
+after this entry was written, so the endpoint is now discoverable as well as
+live. The sentence "as configured, this pod marks no scrape target a scraper
+could discover" was true of `gke-w2` when it was written and is not true of it
+today.
 
 Nothing here is retracted: both statements still describe the chart and the
 image, which is what the entry is about, and `gke-w1` is unchanged in every
