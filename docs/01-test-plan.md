@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-10
-Updated: 2026-09-30
+Updated: 2026-10-01
 Version: 1.0 (v1 scope)
 
 This is the requirements and delivery document: what gets verified, why, the
@@ -33,11 +33,11 @@ Preflight also records, and does not require as input:
 - Server implementation and version, read from the server pod image tag and, where exposed, from the server's own version endpoint.
 - CSI driver version, Kubernetes version, node kernel, container runtime, per node.
 - Actual mount options as the driver sets them, read from `/proc/mounts` on the node.
-- Server fan-out: number of server pods, and export-to-PVC mapping.
+- Server [fan-out](storage_terms.md#fan-out): number of server pods, and export-to-PVC mapping.
 - IP families present (single-stack vs dual-stack).
-- Lease and grace values in force, matched against the two profiles in Section 3.8. Unset or off-profile values fail preflight, because every timing assertion depends on them.
+- [Lease](storage_terms.md#lease) and [grace](storage_terms.md#grace-period) values in force, matched against the two [profiles](storage_terms.md#profile) in Section 3.8. Unset or off-profile values fail preflight, because every timing assertion depends on them.
 - Whether delegations are enabled. Gates CHAOS-18.
-- Whether the recovery state path is backed by persistent storage or ephemeral pod storage. **Recorded for triage only.** Lock survival is still measured empirically by CHAOS-02 and CHAOS-06, not inferred from this. The value exists so that a reclaim failure is diagnosed in one minute instead of one day.
+- Whether the [recovery store](storage_terms.md#recovery-store) is backed by persistent storage or ephemeral pod storage. **[Recorded](storage_terms.md#recorded-and-asserted) for triage only.** Lock survival is still measured empirically by CHAOS-02 and CHAOS-06, not inferred from this. The value exists so that a [reclaim](storage_terms.md#reclaim) failure is diagnosed in one minute instead of one day.
 - Mount propagation mode on the CSI node plugin. Recorded, not gated: if it were wrong, nothing would mount and the simultaneous-mount check above already catches it.
 
 These land in `artifacts/<run-id>/environment.json` and are attached to every failure report. Discovery over declaration: a plan that requires humans to type version numbers correctly will be wrong within one sprint.
@@ -56,7 +56,7 @@ These land in `artifacts/<run-id>/environment.json` and are attached to every fa
 | Portability rule | No distro-specific APIs. Kubernetes API plus portable Linux binaries (fio, dd, flock, stat) in test containers. |
 | Harness | Go, `client-go`, standard `testing` package. No Ginkgo. |
 | Execution | Local `make` targets with GitHub Actions CI for hermetic checks (fmt, vet, unit, build). |
-| Topology | >= 2 schedulable nodes. Either dedicated workers alongside 3 control plane, or 3 nodes that each serve the API and the workloads, which is what GDC ships. The suite counts nodes it can schedule on and does not read role labels. CNodes and DNodes colocated. No dedicated storage network. |
+| Topology | >= 2 [schedulable nodes](storage_terms.md#schedulable-node-and-worker). Either dedicated workers alongside 3 control plane, or 3 nodes that each serve the API and the workloads, which is what [GDC](storage_terms.md#gdc) ships. The suite counts nodes it can schedule on and does not read role labels. [CNodes and DNodes](storage_terms.md#cnode-dnode) colocated. No dedicated storage network. |
 | Upgrade testing | Out of scope, deferred to v2 |
 | Multi-cluster | Out of scope |
 | Rights | Destructive and chaos operations permitted; clusters are disposable |
@@ -67,7 +67,7 @@ Server version, CSI version, kernel, mount options, fan-out, IP families. See Se
 
 ### Deliberately not fixed
 
-HA mechanism is a black box. No case asserts how failover happens. Every failover case asserts only client-observable behavior derived from the protocol.
+HA mechanism is a black box. No case asserts how [failover](storage_terms.md#failover) happens. Every failover case asserts only client-observable behavior derived from the protocol.
 
 ---
 
@@ -81,13 +81,13 @@ A single 4KiB write from an application pod:
 |---|---|---|---|
 | Application `write(2)` | Pod, node A | Per-pod | Write never issued |
 | Client page cache | Node A kernel | Per-node | Unflushed data lost. Legal: not durable until COMMIT. |
-| Kernel NFS client (`nfs4`) | Node A kernel | Per-node | Hard mount blocks and retries indefinitely |
+| Kernel NFS [client](storage_terms.md#client-identity) (`nfs4`) | Node A kernel | Per-node | [Hard mount](storage_terms.md#hard-mount) [blocks](storage_terms.md#blocked-and-blocks) and retries indefinitely |
 | CNI, node network | Cluster | Per-node | Client blocks, retransmits, recovers when path returns |
 | Service or endpoint fronting the server | Cluster | Per-cluster | Client cannot reach server. Behavior depends on whether the endpoint IP is stable across failover. |
 | NFS server process | Server pod | **Singleton per export set** | In-flight uncommitted writes lost. Client retries. Server re-enters grace on restart. |
 | Server-side metadata cache | Server pod | Same singleton | Cache state lost. Not durable, so no data loss, but a known crash surface. |
 | Backing block volume (RWO) | One node | Per-volume, single-attach | Export unavailable until the volume re-attaches elsewhere |
-| Block replication | SDS | Per-volume | Depends on replica count |
+| Block replication | [SDS](storage_terms.md#sds) | Per-volume | Depends on replica count |
 
 Two things fall out of this table and drive the whole plan:
 
@@ -98,7 +98,7 @@ Two things fall out of this table and drive the whole plan:
 
 **Archetype A: sharing gateway over a single-writer volume.** A userspace server process exports a filesystem over NFS; the backing block volume is attached to exactly one node; clients reach the gateway over the pod or node network.
 
-Hybrid element from B: if the server is packaged and versioned independently of the CSI driver, cross-product version skew and defect routing apply. Preflight records both versions; if they come from different release trains, the SKEW cases in Section 3.7 are enabled.
+Hybrid element from [archetype B](storage_terms.md#archetypes-a-to-d): if the server is packaged and versioned independently of the CSI driver, cross-product version skew and defect routing apply. Preflight records both versions; if they come from different release trains, the SKEW cases in Section 3.7 are enabled.
 
 Explicitly **not** archetypes C or D. There is no distributed lock manager, no cluster filesystem, no split-brain surface between clients. Cases asserting POSIX coherence across nodes are out of scope by construction and any such case in a prior plan should be deleted, not rewritten.
 
@@ -107,10 +107,10 @@ Explicitly **not** archetypes C or D. There is no distributed lock manager, no c
 | Question | Answer |
 |---|---|
 | Coherence boundary | The single server process. All clients serialize through it. |
-| Consistency model | NFS protocol semantics: close-to-open for regular files, byte-range locks for finer coordination. Not POSIX across clients. |
+| Consistency model | NFS protocol semantics: [close-to-open](storage_terms.md#close-to-open) for regular files, byte-range locks for finer coordination. Not POSIX across clients. |
 | Single point of failure | The server process. Scope is per-export-set: if fan-out is 1, it is cluster-wide for all RWX volumes. Preflight determines which. |
-| Singleton in the data path | Yes, the server. Failover trigger is opaque by design. Recovery includes a grace period during which clients may reclaim state but may not acquire new state. |
-| Lock state ownership | The server. Survival across restart depends on the recovery backend and is treated as unknown. Cases assert reclaim succeeds, not how. |
+| Singleton in the data path | Yes, the server. Failover trigger is opaque by design. Recovery includes a [grace period](storage_terms.md#grace-period). |
+| Lock state ownership | The server. Survival across restart depends on the recovery store and is treated as unknown. Cases assert reclaim succeeds, not how. |
 | Lock semantics | Advisory. Visible across nodes only because all clients serialize through the one server. |
 | Client mount type | Kernel `nfs4`, hard mount. Blocks indefinitely rather than returning EIO. Verified in preflight, not assumed. |
 | Network path | Pod or node network, no dedicated storage network, no isolation from tenant traffic. NetworkPolicy or CNI restart interrupts the data path. |
@@ -133,7 +133,7 @@ Explicitly **not** archetypes C or D. There is no distributed lock manager, no c
 
 ## Section 3: Coverage
 
-Case ID scheme: `CATEGORY-NN`, matching the test category (`PROV`, `DATA`, `CHAOS`, `SCALE`, `OBS`, `SEC`, `SKEW`).
+Case ID scheme: `CATEGORY-NN`, matching the test [category](storage_terms.md#step-phase-category-section-test-group-delivery-group) (`PROV`, `DATA`, `CHAOS`, `SCALE`, `OBS`, `SEC`, `SKEW`).
 
 ### 3.1 Provisioning and lifecycle (PROV)
 
@@ -164,7 +164,7 @@ How data path consistency, locking, caching, and durability are verified is in
 | ID | Case | Expected |
 |---|---|---|
 | DATA-01 | ✅ N pods, N files, partitioned by file, checksummed | All checksums match; no cross-contamination |
-| DATA-02 | ✅ N pods append to one file with `O_APPEND` | No lost or interleaved records; byte count exact. **Carries a caveat**: NFSv4.1 has no append operation, so a client implements `O_APPEND` by writing at the offset it believes to be end of file. An exact count under concurrent appends from several clients is an implementation property, not a protocol guarantee, and the case says so in its failure message so a failure reaches the boundary discussion rather than the server owner. A torn record is corruption under any reading and is failed without a caveat. Still open: whether the count belongs in the fast gate at all. |
+| DATA-02 | ✅ N pods append to one file with `O_APPEND` | No lost or interleaved records; byte count exact. **Carries a caveat**: NFSv4.1 has no append operation, so a client implements `O_APPEND` by writing at the offset it believes to be end of file. An exact count under concurrent appends from several clients is an implementation property, not a protocol guarantee, and the case says so in its failure message so a failure reaches the boundary discussion rather than the server owner. A torn record is corruption under any reading and is failed without a caveat. Still open: whether the count belongs in the [fast gate](storage_terms.md#fast-gate-presubmit-gate) at all. |
 | DATA-03 | ✅ Close-to-open: pod A writes and closes, pod B opens and reads | B sees A's data |
 | DATA-04 | ✅ Negative: pod A writes without closing, pod B reads | B may see stale data. Test asserts this is **not a failure**. Documents the boundary. |
 | DATA-05 | ✅ `flock` and `fcntl` byte-range locks across pods on different nodes | Mutual exclusion holds; second acquirer blocks |
@@ -227,7 +227,7 @@ Every case in this section runs with active I/O and asserts against the SLO tabl
 | CHAOS-14 | **Colocation deadlock**: server pod scheduled on the same node as its clients, under memory pressure | No reclaim deadlock. Specific to hyperconverged CNode/DNode topology: the local client blocks in page reclaim waiting on a local server that needs memory to progress. |
 | CHAOS-15 | Client node OOM with dirty pages on the NFS mount | Bounded failure; no node-level hang |
 | CHAOS-16 | 24h chaos soak: randomized kills, partitions, evictions | Zero data corruption; zero unrecovered mounts; zero core dumps |
-| CHAOS-17 | Recovery state store lost or corrupted, then server restarts | Bounded, honest failure: clients fail to reclaim and locks are lost, but no file data corruption, no permanent client hang, and the loss is observable in metrics or logs. Silently granting conflicting locks after state loss is the failure being hunted. Needs `-recovery-state-path`: there is no portable way to find the recovery state directory, and the case skips without it rather than guessing at an implementation's layout. |
+| CHAOS-17 | Recovery store lost or corrupted, then server restarts | Bounded, honest failure: clients fail to reclaim and locks are lost, but no file data corruption, no permanent client hang, and the loss is observable in metrics or logs. Silently granting conflicting locks after state loss is the failure being hunted. Needs `-recovery-state-path`: there is no portable way to find the recovery store, and the case skips without it rather than guessing at an implementation's layout. |
 | CHAOS-18 | Delegation held by client A, client B opens the same file conflicting | Delegation recalled and returned within the recall timeout; B proceeds; A sees no corruption. **Skipped, not failed, when delegations are disabled**, which is a common default. Ties to a reported crash on the delegation return path. |
 
 Blanket rule: any core dump on any server pod fails the run. Cores are collected into run artifacts.
@@ -251,7 +251,7 @@ How chaos faults are injected, measured, and verified across failovers is in
 
 | ID | Case | Expected |
 |---|---|---|
-| OBS-01 | Server unavailable | The deployment provides an availability signal that can represent NFS reachability: a readiness probe targeting the NFS service, with the Service's endpoints following it. Fails when the only in-cluster signal is the container's lifecycle, which cannot represent a server that is wedged rather than dead. The behavioral half, that the signal moves when a running server stops answering, needs a fault that does not kill the container and lands in step 10. |
+| OBS-01 | Server unavailable | The deployment provides an availability signal that can represent NFS reachability: a readiness probe targeting the NFS service, with the Service's endpoints following it. Fails when the only in-cluster signal is the container's lifecycle, which cannot represent a server that is wedged rather than dead. The behavioral half, that the signal moves when a running server stops answering, needs a fault that does not kill the container and lands in [step](storage_terms.md#step-phase-category-section-test-group-delivery-group) 10. |
 | OBS-02 | ✅ Failover event | Event is observable in metrics or logs with a timestamp; measurable duration |
 | OBS-03 | ✅ Grace period entry and exit | Both observable; duration measurable. Required to make CHAOS-05 diagnosable. |
 | OBS-04 | ✅ Mount failure on a client | Surfaced as a Kubernetes Event on the pod with an actionable reason |
@@ -313,7 +313,7 @@ Failover SLOs are meaningless without pinned lease and grace values, because gra
 
 The `default` config is not a formality. It documents what a customer who changes nothing actually experiences, and it is the configuration most escalations will arrive on. Preflight reads the live values and fails if they are unset or outside both profiles, rather than letting a third value silently invalidate every timing assertion.
 
-Note on determinism: a server may lift grace early once it concludes no further clients will reclaim. CHAOS-07 therefore holds one client with outstanding un-reclaimed state so that grace is observably enforced when the probe runs. Without that, the case passes vacuously.
+Note on determinism: a server may [lift grace early](storage_terms.md#reclaim_complete-and-early-end-of-grace) once it concludes no further clients will reclaim. CHAOS-07 therefore holds one client with outstanding un-reclaimed state so that grace is observably enforced when the probe runs. Without that, the case passes vacuously.
 
 #### Targets
 
@@ -322,11 +322,11 @@ Note on determinism: a server may lift grace early once it concludes no further 
 | Server restart in place (process kill, pod delete) | Time to first successful I/O | **60s p99, fail above** | Ratified |
 | Server reschedule after graceful node drain | Time to first successful I/O | **60s p99, fail above** | Ratified |
 | Server reschedule after ungraceful node loss | Time to first successful I/O | **90s p99, fail above** | Ratified, subject to the floor note below |
-| Any failover | I/O errors on hard mounts | 0 | Protocol: hard mounts block, not fail |
+| Any failover | I/O errors on hard mounts | 0 | Linux client, not protocol: hard mounts block, not fail ([`nfs(5)`](https://man7.org/linux/man-pages/man5/nfs.5.html)) |
 | Any failover | Committed writes lost | 0 | Protocol: post-COMMIT durability |
 | Any failover | Locks reclaimed | 100% | Protocol: grace period exists for this |
-| Any failover | New lock granted during grace to a different client | 0 | Protocol: grace bars new state acquisition |
-| Any failover | Grace exit | within 2x lease, no re-entry loop | Convention: grace runs about two lease periods |
+| Any failover | New lock granted during grace to a different [client](storage_terms.md#client-and-client-pod) | 0 | Protocol: grace bars new state acquisition |
+| Any failover | Grace exit | within 2x lease, no re-entry loop | Implementation, not protocol: the ceiling Linux knfsd puts on extending grace. Both profiles pin grace at 1.5x lease, inside it ([why](storage_terms.md#reclaim_complete-and-early-end-of-grace)) |
 
 **Floor note: 90s for ungraceful node loss is not reachable on Kubernetes defaults.** Two platform defaults sit in front of the storage system and neither has anything to do with NFS:
 
@@ -355,22 +355,22 @@ If either is absent, CHAOS-03 is reported as **blocked on cluster configuration*
 - Every case is skippable by capability, never by platform name. `if !caps.CanStopNode { t.Skip() }`, never `if platform == "gke"`.
 
 **Conventions that hold for every case, whatever section it comes from.** These
-were settled while building the phases below and are stated here rather than in
+were settled while building the [phases](storage_terms.md#step-phase-category-section-test-group-delivery-group) below and are stated here rather than in
 any one design doc, because a convention that lives inside a phase is one the
 next phase has to rediscover:
 
-- **The suite counts nodes it can schedule on, never nodes with a role label.** `SchedulableNodes` returns exactly those: Ready, not cordoned, and carrying no taint a test pod would have to tolerate. A control-plane node that does not want workloads carries a `NoSchedule` taint and is excluded by that; one that does not is a node its operator runs workloads on, and a three-node cluster where every node serves both the API and the workloads is a supported topology, not a degraded one. Filtering on the label instead left such a cluster with nothing and stopped preflight for the wrong reason. Where a design document written before this still says "worker", read it as this: the term carries no role meaning anywhere in the suite.
+- **The suite counts nodes it can schedule on, never nodes with a role label.** `SchedulableNodes` returns exactly those: Ready, not cordoned, and carrying no taint a test pod would have to tolerate. A control-plane node that does not want workloads carries a `NoSchedule` taint and is excluded by that; one that does not is a node its operator runs workloads on, and a three-node cluster where every node serves both the API and the workloads is a supported topology, not a degraded one. Filtering on the label instead left such a cluster with nothing and stopped preflight for the wrong reason. Where a design document written before this still says "[worker](storage_terms.md#schedulable-node-and-worker)", read it as this: the term carries no role meaning anywhere in the suite.
 - **Fault operations live in `pkg/chaos`, not on the per-case fixture.** Faults are the one thing a reader should be able to enumerate in one file, and a fault that records itself cannot be forgotten by the case that injected it.
 - **Targets are resolved live, at case time, never from the cached environment record.** Preflight names the pod that was there when it ran; the chaos cases move pods around. A stale target either fails to act or acts on the wrong thing.
-- **A fault that was not injected is never measured.** An operation that cannot identify its target, or that matched nothing, is an error, and the case reports blocked. A recovery measured from a fault that never landed passes for the wrong reason. A kill of the server process is confirmed on both sides, by every case that injects one: before it, the process holding the listening socket must be the one the kill is aimed by, or the case reports blocked; after it, a different pid must hold that socket, or the case fails and stops there, rather than carrying on to verdicts about a fault nothing confirmed. CHAOS-01 made both checks and DATA-12 and DATA-13, injecting the same kill, made neither, so the two checks are one pair of helpers the cases share rather than lines in any one of them (#99).
+- **A fault that was not injected is never measured.** An operation that cannot identify its target, or that matched nothing, is an error, and the case reports blocked. A recovery measured from a fault that never landed passes for the wrong reason. A kill of the server process is confirmed on both sides, by every case that injects one: before it, the process holding the listening socket, the [serving process](storage_terms.md#serving-process-and-supervisor), must be the one the kill is aimed by, or the case reports blocked; after it, a different pid must hold that socket, or the case fails and stops there, rather than carrying on to verdicts about a fault nothing confirmed. CHAOS-01 made both checks and DATA-12 and DATA-13, injecting the same kill, made neither, so the two checks are one pair of helpers the cases share rather than lines in any one of them (#99).
 - **A node runs at most one NFS server process, and the suite assumes it.** A signal is delivered by matching the process name across the whole node, so a node carrying two servers would take one fault and lose both, and the case would attribute a two-server outage to a one-server fault. Nothing in Kubernetes prevents that arrangement: a server pod has its own network namespace, so two of them on one node would each bind 2049 without conflict. What makes the assumption safe against the deployment under test is the provisioner, which advertises a Service address and [refuses to provision at all](https://github.com/kubernetes-sigs/nfs-ganesha-server-and-external-provisioner/blob/master/pkg/volume/provision.go#L425-L444) when that Service resolves to more than one endpoint, capping its fan-out at one pod per cluster. A deployment that genuinely runs several servers needs the signal scoped to the pid discovery already records, and that is work for the case that needs it rather than ahead of it.
 - **A baseline that could not be read blocks the assertion that needs it, not the case that carries it.** A before-and-after reading whose "before" is unavailable returns an error, never a zero: two zeros compare equal and the assertion passes without having measured anything. The assertion reports blocked on its own, so that the rest of the case, which is usually about something else entirely, still returns a verdict. This is why the server restart count refuses to answer where discovery found no server pods, and where the pods it found have not reported a container yet.
 - **Both ends of any measurement come from one clock.** Times that will be compared are read from the same pod, never one from a pod and one from the workstation: a few seconds of skew is invisible and moves every number. Where two clocks are unavoidable, because the two ends are on different nodes by construction, the window is narrowed by a guard band in `pkg/slo` and only an unambiguous violation is reported.
 - **A case waits past its target rather than up to it.** Stopping at the SLO reports "timed out" where the case could report how long recovery actually took, and the second is what a defect report needs.
 - **A tool the image may not carry is probed before it is used**, and its absence reports blocked, naming the flag that fixes it. A missing tool is never a protocol finding.
 - **Timing and correctness bounds live in `pkg/slo`**, against the profile preflight pinned. No case carries a literal.
-- **What a case reports** (passed, failed, blocked, skipped) is defined in the repository `README.md`, and the same four words mean the same four things in every section.
-- **A case names the file it argues from, and the harness keeps a copy.** The two things every claim rests on are destroyed by teardown: the workload's record stream, which lives on the pod's own filesystem, and the file on the share a data case is about. Both are copied into the bundle before anything is deleted, on a pass as well as a failure, because a passing case's numbers are exactly the ones nobody can re-derive later. One named file per registration, capped, and nothing walks the share: a rule that collected a directory would try to bring DATA-10's hundred thousand entries home.
+- **What a case reports** (passed, failed, blocked, skipped) is defined in the repository `README.md`, and the same four words mean the same four things in every section. How each shows in `go test` output is in [`storage_terms.md`](storage_terms.md#passed-failed-blocked-skipped).
+- **A case names the file it argues from, and the harness keeps a copy.** The two things every claim rests on are destroyed by teardown: the workload's [record stream](storage_terms.md#record), which lives on the pod's own filesystem, and the file on the share a data case is about. Both are copied into the [bundle](storage_terms.md#bundle-and-evidence) before anything is deleted, on a pass as well as a failure, because a passing case's numbers are exactly the ones nobody can re-derive later. One named file per registration, capped, and nothing walks the share: a rule that collected a directory would try to bring DATA-10's hundred thousand entries home.
 - **One bundle directory holds one execution of one case.** A case claims `artifacts/<run-id>/<CASE-ID>/` before it creates anything, and a directory that already exists stops it: a run ID runs each case once. Two executions in one directory read as one bundle, with the second's evidence beside the first's failure and nothing to say which file belongs to which, and that happened to DATA-12 and DATA-13 before this rule (#71). Splitting a run across several invocations by case is unaffected; a re-run takes a new run ID. The run-level `environment.json` follows the same rule: the first invocation under a run ID writes it, from a fresh or a cached preflight, a later one against the same cluster leaves it alone, and one against another cluster stops before any case runs, because a run ID describes one cluster.
 
 ### 4.2 Execution by Category
