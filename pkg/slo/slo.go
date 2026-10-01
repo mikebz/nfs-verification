@@ -104,7 +104,13 @@ const (
 )
 
 // GraceExitBound is the deadline for grace to end after it is entered.
-// Convention: grace runs about two lease periods.
+//
+// Two lease periods. Not a protocol bound: RFC 8881 Section 8.4.2.1 sets a
+// floor on grace and no ceiling. It is the ceiling Linux knfsd puts on
+// extending grace for clients still reclaiming, so a lower bound would fail a
+// lawful extension. Both profiles pin grace at 1.5 lease periods, so a server
+// that honours its configured grace ends inside it. docs/storage_terms.md has
+// the reasoning.
 func GraceExitBound(p Profile) time.Duration { return 2 * p.Lease }
 
 // LockReleaseBound is the longest a lock held by a client that vanished may

@@ -7,7 +7,7 @@ Status: shipped, delivery steps 1 ([PR #1](https://github.com/mikebz/nfs-verific
 2 ([PR #3](https://github.com/mikebz/nfs-verification/pull/3)),
 and 5 ([PR #10](https://github.com/mikebz/nfs-verification/pull/10)).
 PROV-01 through PROV-11 shipped.
-Serves: PROV-01 through PROV-11 (complete Provisioning and Volume Lifecycle test group).
+Serves: PROV-01 through PROV-11 (complete Provisioning and Volume Lifecycle [test group](storage_terms.md#step-phase-category-section-test-group-delivery-group)).
 Requirements in [`01-test-plan.md`](01-test-plan.md) Section 3.1.
 Builds on [`01-test-plan.md`](01-test-plan.md).
 
@@ -23,9 +23,9 @@ standard Kubernetes API objects, CSI controller interactions, and pod-level file
 NFS RWX volumes present unique lifecycle challenges that do not exist for single-node (RWO) block storage:
 1. **Dynamic provisioning and multi-node attachment**: When a claim is created, the provisioner
    must mint an export, allocate backing storage, configure server-side export permissions, and
-   bind the volume. Because the volume is RWX, multiple pods on distinct worker nodes must mount
-   the identical export simultaneously and verify cross-node read-after-close data integrity (`PROV-01`).
-2. **Safe deletion and unmount ordering**: A `hard` NFSv4.1 mount blocks indefinitely if its backing
+   bind the volume. Because the volume is RWX, multiple pods on distinct [worker](storage_terms.md#schedulable-node-and-worker) nodes must mount
+   the identical export simultaneously and verify cross-node [read-after-close](storage_terms.md#close-to-open) data integrity (`PROV-01`).
+2. **Safe deletion and unmount ordering**: A [`hard`](storage_terms.md#hard-mount) NFSv4.1 mount blocks indefinitely if its backing
    export is destroyed while still mounted. Kubernetes Storage Object in Use Protection
    (`kubernetes.io/pvc-protection`) must prevent claim deletion while pods mount the volume (`PROV-03`),
    and teardown must never delete a claim until all mounting pods have departed the API ([F-001](findings.md)).
@@ -256,7 +256,7 @@ that builds paths out of claim names meets `NAME_MAX`, 255 bytes per path compon
 carrying dots and digits, because those are the characters a driver has to carry into a path, a config
 file or a command line. What both have to do is work.
 
-The export the provisioner mints is recorded as evidence and not asserted on: how a driver names an
+The export the provisioner mints is [recorded as evidence and not asserted on](storage_terms.md#recorded-and-asserted): how a driver names an
 export is its own business, a single volume cannot demonstrate a naming collision, and an export
 malformed enough to matter cannot be mounted, which the case already requires.
 

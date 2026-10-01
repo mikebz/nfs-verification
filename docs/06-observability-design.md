@@ -11,7 +11,7 @@ on the whole-suite runs of 2026-09-17 for a reason of the harness's own making (
 OBS-01 and OBS-05 designed). OBS-02 and OBS-03 shipped in
 Step 4 ([PR #8](https://github.com/mikebz/nfs-verification/pull/8));
 OBS-04 shipped in Step 2b ([PR #4](https://github.com/mikebz/nfs-verification/pull/4)). Consolidated here to serve
-the complete Observability test group.
+the complete Observability [test group](storage_terms.md#step-phase-category-section-test-group-delivery-group).
 Serves: OBS-01 through OBS-07. Requirements in [`01-test-plan.md`](01-test-plan.md) Section 3.5.
 Builds on [`03-chaos-operations-design.md`](03-chaos-operations-design.md),
 [`04-grace-and-lock-reclaim-design.md`](04-grace-and-lock-reclaim-design.md) and
@@ -41,9 +41,9 @@ when the deployment publishes nothing. That is F-008's rule applied uniformly.
 Done means an operator on this deployment can answer seven operational questions
 from telemetry data that actually exists:
 1. Does the availability signal represent NFS reachability rather than just container death? (OBS-01)
-2. Is a failover event observable with a timestamp and measurable duration? (OBS-02)
-3. Are grace period entry and exit observable and bounded? (OBS-03)
-4. Does an unmountable share surface an actionable warning on the client pod? (OBS-04)
+2. Is a [failover](storage_terms.md#failover) event observable with a timestamp and measurable duration? (OBS-02)
+3. Are [grace period](storage_terms.md#grace-period) entry and exit observable and bounded? (OBS-03)
+4. Does an unmountable share surface an actionable warning on the [client pod](storage_terms.md#client-and-client-pod)? (OBS-04)
 5. Is the server container's memory ceiling declared and its working set readable? (OBS-05)
 6. Does volume capacity and usage agree between the control plane and pod `df`, and does quota apply? (OBS-06)
 7. Do the server's own metrics survive a restart? (OBS-07)
@@ -122,7 +122,7 @@ An earlier draft mixed skip, fail, and block arbitrarily; the suite establishes 
 
 | What happened | Verdict | Rationale |
 |---|---|---|
-| The suite could not reach a source for its own reasons: the node proxy returned 403, the kubeconfig lacks `get nodes/proxy`, or static PVs are forbidden | **blocked**, naming what was refused | Harness access gap. Nothing was learned about the deployment under test |
+| The suite could not reach a source for its own reasons: the node proxy returned 403, the kubeconfig lacks `get nodes/proxy`, or static PVs are forbidden | **[blocked](storage_terms.md#blocked-and-blocks)**, naming what was refused | Harness access gap. Nothing was learned about the deployment under test |
 | The deployment does not publish, declare, or implement what the case verifies: no metrics endpoint, no memory limit, no volume stats, no quota, no readiness probe for NFS | **fail**, naming the deployment | Deployment defect or telemetry gap. An operator on this cluster has no data to alert on |
 | The case could not create its own precondition: the workload storm did not move the reading within budget | **blocked**, with the number reached | The case failed to set up its test condition; reporting pass would be vacuous |
 
@@ -145,7 +145,7 @@ specific to the Observability test group:
 |---|---|---|
 | **OBS-01** | The deployment declares an active readiness probe targeting the NFS service, and endpoints drop when NFS is unavailable | Kubernetes probes and Service endpoints. An active probe targeting port 2049 or an NFS health check is verified in configuration (Step 7); behavioral drop of endpoints when frozen is verified with a fault in Step 10 |
 | **OBS-02** | ✅ Failover leaves a timestamped trace an operator can find; duration is measurable | Container start status (`ServerStartedAfter`) and server log stream (`ServerLog`). Fails if neither provides a timestamped record after the fault |
-| **OBS-03** | ✅ Grace period entry and exit are observable with timestamps; duration is bounded by `2 * LeaseSeconds` | RFC 8881 Section 8.4.2. Read from runtime log timestamps; fails if unannounced (F-008) |
+| **OBS-03** | ✅ Grace period entry and exit are observable with timestamps; duration is bounded by `2 * LeaseSeconds` ([why](storage_terms.md#reclaim_complete-and-early-end-of-grace)) | RFC 8881 Section 8.4.2. Read from runtime log timestamps; fails if unannounced (F-008) |
 | **OBS-04** | ✅ A mount failure on a client pod surfaces as an actionable `Warning` Event naming the volume; pod does not report Ready | Kubelet mount logic. Fails if no mount failure event arrives within budget, if the event omits the volume name, or if container status reports Ready. Wording of the failure cause is logged as a diagnostic warning because kubelet controls event phrasing |
 | **OBS-05** | The server container declares a memory limit, and its working set is readable and moves under load | Kubelet Summary API. Fails if no limit is declared; never manufactures an OOMKill |
 | **OBS-06** | ✅ Kubelet volume usage agrees with pod `df` within tolerance, both move with writes, and quota applies | CSI `NodeGetVolumeStats` capability. Kubelet stats summary (`pkg/framework/kubeletstats.go`) compared against pod `df -P -k` (`pkg/framework/volumeusage.go`). Fails if unannounced or if reported total is backing disk (F-009) |
@@ -154,7 +154,7 @@ specific to the Observability test group:
 ## 6. Detailed case walkthroughs
 
 ### OBS-01: Server unavailable (NFS readiness vs. container lifecycle)
-- **Problem**: In-cluster clients access NFS via a Kubernetes Service. If the server process
+- **Problem**: In-cluster clients access NFS via a Kubernetes Service. If the [server process](storage_terms.md#serving-process-and-supervisor)
   wedges in kernel `D` state or deadlocks, the container stays running, Kubernetes reports the pod
   `Ready`, and the Service continues routing new client connections to a dead export.
 - **Design**:
@@ -313,7 +313,7 @@ specific to the Observability test group:
       the rest of the lost series, which on a busy server is mostly history: statuses only a failover
       produces, such as `NFS4ERR_GRACE`, and clients and exports from earlier cases. Neither group is
       asserted. Whether a read in a pod reaches the server at all is the Linux client's decision,
-      made from its cache under close-to-open ([`nfs(5)`](https://man7.org/linux/man-pages/man5/nfs.5.html)),
+      made from its cache under [close-to-open](storage_terms.md#close-to-open) ([`nfs(5)`](https://man7.org/linux/man-pages/man5/nfs.5.html)),
       so a touched series can be absent after the restart with nothing lost.
     - **Rejected**, per F-025: comparing only the names present in both cold-start sets. It would
       exclude the traffic counters an operator most depends on.
@@ -327,7 +327,7 @@ specific to the Observability test group:
     is the group a `# TYPE` line declares. They differ for histograms and summaries, whose `_bucket`,
     `_sum` and `_count` are three names under one family, and the difference is not small: the
     deployment in [F-023](findings.md) publishes 39 families under 66 names. Both were once called
-    families, so the artifact bundle reported 66 of something the finding counted 39 of, from the
+    families, so the artifact [bundle](storage_terms.md#bundle-and-evidence) reported 66 of something the finding counted 39 of, from the
     same scrape. The comparison is by name and says so; only the direction check goes by family.
   - **A histogram's components are compared as separate names but typed through their parent.**
     `_bucket`, `_sum` and `_count` are what a PromQL query names, so each is checked for presence in
