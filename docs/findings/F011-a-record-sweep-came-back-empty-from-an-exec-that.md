@@ -104,3 +104,10 @@ loss, and should not take the pass of the other chaos case as covering it.
 The general rule: **a sweep that answered for nothing is not a sweep that found
 nothing.** Any check that reads a verdict out of a pod has to be able to tell
 those apart, and has to file what the pod actually said.
+
+### Open
+
+The mechanism: whether the exec returned success with an empty stdout for a
+command that did run, or for one that never started. The next short sweep files
+`record-sweep-raw.txt` and both stream lengths, which is the evidence this entry
+is waiting on.

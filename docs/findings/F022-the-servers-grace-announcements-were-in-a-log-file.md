@@ -55,6 +55,12 @@ OBS-03 fails and CHAOS-07 reports blocked because of a logging configuration,
 not because the server keeps its grace period secret. An operator who wants grace visible can point the
 daemon's log at stdout; nothing about the server itself has to change.
 
+### Open
+
+How a case may read a file inside the export, which is where this server writes
+its grace lines. That is the decision to settle before implementing, it is
+#123, and #21 depends on it.
+
 ### What changed after this was written
 
 **2026-09-27. Confirmed on both deployments.** Six whole-suite runs on

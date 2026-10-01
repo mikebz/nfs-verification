@@ -122,6 +122,11 @@ run did not exercise that part. Meanwhile another client can take the same
 range, which is the outcome locking exists to prevent.
 
 For a platform owner, the lever is the grace period against the clients'
-reclaim latency, not the server's lock table. Open: whether the tuned profile
-(20s/30s) keeps the same margin in proportion, and whether a longer grace
-would have saved this one or only moved the tail.
+reclaim latency, not the server's lock table.
+
+### Open
+
+- Why the verifier's client reclaimed late. Why above says what is known, and
+  it does not settle it.
+- Whether the tuned profile (20s/30s) keeps the same margin in proportion, and
+  whether a longer grace would have saved this one or only moved the tail.

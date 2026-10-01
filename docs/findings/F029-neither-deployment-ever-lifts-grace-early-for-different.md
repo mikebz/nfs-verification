@@ -93,9 +93,14 @@ complete: on this server, "every client reclaimed" is never true.
   early buys nothing on either build as deployed.
 - **Replacing a node leaves `gke-w2`'s server waiting for it forever.** The
   recovery store is on the export PVC and outlives the pod. Nothing prunes a
-  record for a client that will never return. Open: whether `gke-w2` ends grace
-  early once the stale directory is removed. That is a change to the
-  deployment, and it has not been made.
+  record for a client that will never return.
 - For the harness: a grace period that ends early and one that runs out look the
   same from the client. Only the server's log tells them apart, which is one
   more reason to settle how cases may read it (F-022, #21).
+
+### Open
+
+- Whether `gke-w2` ends grace early once the stale directory is removed. That
+  is a change to the deployment, and it has not been made.
+- Where the other 15s went in the two 107s kills. A passing case keeps no fault
+  timeline (#101).

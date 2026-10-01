@@ -75,6 +75,13 @@ fi
 - Like F-003, this is an infrastructure defect in GKE's host mount wrapper, not an NFS protocol bug or harness failure. Any dynamic RWX workload on GKE that provisions and mounts volumes repeatedly will eventually wedge its worker nodes.
 - With the fix applied across worker nodes, mount table size remained stable at baseline (~80-84 lines) across hundreds of mounts throughout the full PROV, DATA, SEC, OBS, and CHAOS test suites.
 
+### Open
+
+The fix stops new mounts from stacking and removes none of those already
+stacked. The update below lists four nodes still above baseline, one of them at
+2,048 `/etc` mounts. Cleaning them is a reboot or an unmount loop on each node,
+a change for the cluster owner, and it has not been made.
+
 ### What changed after this was written
 
 **2026-09-27. The fix stopped the growth. It did not undo what had already

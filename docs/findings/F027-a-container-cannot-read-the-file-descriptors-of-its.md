@@ -116,6 +116,12 @@ their own credentials, and the upstream v4.0.8 build does it while holding the
 full capability set, so it is not even a property of the local build. The
 lesson is about where the harness looks, not about what the server does.
 
+### Open
+
+What makes a server's file descriptors unreadable from inside its pod, and when.
+The four observations under Why do not separate the candidates. Discovery no
+longer depends on the answer, since it reads the process from the node.
+
 ### What changed after this was written
 
 **2026-09-27. The node-side read works in the condition that broke the in-pod

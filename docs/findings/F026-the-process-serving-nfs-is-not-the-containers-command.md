@@ -162,6 +162,12 @@ recovery here is 1m33s rather than a pod restart. The cases that were blocked
 were blocked by the harness, not by the server, and the test plan's record of
 them as a deployment property was wrong.
 
+### Open
+
+Two of the three places the 2026-09-27 update below lists still assume the
+container is the server: the `server-did-not-restart` subtests (#97) and SEC-09's
+capability read (#98). The third was closed on 2026-09-28 (#99).
+
 ### What changed after this was written
 
 **2026-09-27. The fix held on both deployments.** In six whole-suite runs on

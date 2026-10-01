@@ -102,3 +102,10 @@ is producible without anything going wrong at the exec layer at all.
 
 **A pipeline is not a chain of assertions. Only its last command can fail it,
 so nothing that matters may be followed by something that does not care.**
+
+### Open
+
+Why `sha256sum` failed on the share right after the server pod was replaced,
+which What it means for the system under test describes as a suspicion and no
+more. Since `sumCmd`, a failed checksum arrives as a failure with its stderr
+attached, so the next occurrence keeps what this one discarded.

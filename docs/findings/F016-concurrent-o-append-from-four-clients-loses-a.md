@@ -185,13 +185,15 @@ contiguous, and the message printed it the first time it went red after being
 added. The diagnostic did its job, which is the only reason this entry can say
 "one client out of step" rather than "fifty records short".
 
-Still open: what makes the difference between a run that loses fifty records and
-a run that loses none, and why the client that falls out of step is the one it
-is. The run-shape hypothesis this paragraph proposed testing has since failed
-(see the 2026-09-27 update above). The one pattern left is placement: every
-named loser shared its node with another pod on the share. The next thing to
-try is the same case with one pod per node, which needs five nodes, or with
-`appender3` moved to a node of its own.
-
 **A count that the protocol does not promise is still worth asserting, as long
 as the failure says who it belongs to.**
+
+### Open
+
+What makes the difference between a run that loses fifty records and a run that
+loses none, and why the client that falls out of step is the one it is. The
+run-shape hypothesis this entry proposed testing has since failed (see the
+2026-09-27 update above). The one pattern left is placement: every named loser
+shared its node with another pod on the share. The next thing to try is the same
+case with one pod per node, which needs five nodes, or with `appender3` moved to
+a node of its own. #16 tracks the placement question.
