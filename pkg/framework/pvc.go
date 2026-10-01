@@ -251,17 +251,30 @@ func describeResizeConditions(pvc *corev1.PersistentVolumeClaim) string {
 	if len(resize) > 0 {
 		return " [" + strings.Join(resize, " ") + "]"
 	}
-	out := "no resize condition was ever posted on the claim: nothing acted on the request. " +
+	const msg1 = "no resize condition was ever posted on the claim: nothing acted on the request. " +
 		"The StorageClass advertises allowVolumeExpansion, so check whether its provisioner supports " +
 		"expansion at all and whether an external-resizer sidecar is running alongside the CSI driver"
+	const msg2 = ". The claim does carry conditions that say nothing about expansion: "
+
+	var b strings.Builder
+	var joinedOther string
+	needed := len(" [") + len(msg1) + len("]")
+	if len(other) > 0 {
+		joinedOther = strings.Join(other, ", ")
+		needed += len(msg2) + len(joinedOther)
+	}
+	b.Grow(needed)
+	b.WriteString(" [")
+	b.WriteString(msg1)
 	if len(other) > 0 {
 		// Named, but kept apart from the verdict: a reader who sees a condition
 		// listed next to a timeout assumes it is the reason for it. Phrased to
 		// read correctly for one condition as well as several.
-		out += ". The claim does carry conditions that say nothing about expansion: " +
-			strings.Join(other, ", ")
+		b.WriteString(msg2)
+		b.WriteString(joinedOther)
 	}
-	return " [" + out + "]"
+	b.WriteString("]")
+	return b.String()
 }
 
 // isResizeCondition reports whether a claim condition is about expansion.

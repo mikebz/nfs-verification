@@ -2,15 +2,16 @@
 
 Author: mikebz@
 Created: 2026-09-11
-Updated: 2026-09-17
+Updated: 2026-09-30
 Status: **in progress.** Delivery step 7 (OBS-06 shipped in [PR #29](https://github.com/mikebz/nfs-verification/pull/29);
 OBS-07 shipped in step 7 and run against `gke-w1` and `gke-w2`, red on both as shipped ([F-023](findings.md)),
 briefly green with Ganesha's exposer enabled by hand and falsely so ([F-024](findings.md)), and red again
-on the whole-suite runs of 2026-09-17 for a reason of the harness's own making ([F-025](findings.md));
+on the whole-suite runs of 2026-09-17 for a reason of the harness's own making ([F-025](findings.md)), fixed for
+[issue #81](https://github.com/mikebz/nfs-verification/issues/81) and green with `resumed-reset` on `gke-w2` since;
 OBS-01 and OBS-05 designed). OBS-02 and OBS-03 shipped in
 Step 4 ([PR #8](https://github.com/mikebz/nfs-verification/pull/8));
 OBS-04 shipped in Step 2b ([PR #4](https://github.com/mikebz/nfs-verification/pull/4)). Consolidated here to serve
-the complete Observability test group.
+the complete Observability [test group](storage_terms.md#step-phase-category-section-test-group-delivery-group).
 Serves: OBS-01 through OBS-07. Requirements in [`01-test-plan.md`](01-test-plan.md) Section 3.5.
 Builds on [`03-chaos-operations-design.md`](03-chaos-operations-design.md),
 [`04-grace-and-lock-reclaim-design.md`](04-grace-and-lock-reclaim-design.md) and
@@ -25,7 +26,7 @@ documenting OBS-04.
 
 **The suite verifies what the deployment publishes, never the alert rules.**
 
-Test plan Section 3.5 words several of its cases as "an alert fires". An alert is a
+Test plan Section 3.5 once worded several of its cases as "an alert fires". An alert is a
 rule somebody wrote: a threshold, a duration, a severity, and a routing policy,
 all organization-specific. A suite asserting on them would fail a healthy storage
 system for a threshold set differently, and would have to find or install a
@@ -40,9 +41,9 @@ when the deployment publishes nothing. That is F-008's rule applied uniformly.
 Done means an operator on this deployment can answer seven operational questions
 from telemetry data that actually exists:
 1. Does the availability signal represent NFS reachability rather than just container death? (OBS-01)
-2. Is a failover event observable with a timestamp and measurable duration? (OBS-02)
-3. Are grace period entry and exit observable and bounded? (OBS-03)
-4. Does an unmountable share surface an actionable warning on the client pod? (OBS-04)
+2. Is a [failover](storage_terms.md#failover) event observable with a timestamp and measurable duration? (OBS-02)
+3. Are [grace period](storage_terms.md#grace-period) entry and exit observable and bounded? (OBS-03)
+4. Does an unmountable share surface an actionable warning on the [client pod](storage_terms.md#client-and-client-pod)? (OBS-04)
 5. Is the server container's memory ceiling declared and its working set readable? (OBS-05)
 6. Does volume capacity and usage agree between the control plane and pod `df`, and does quota apply? (OBS-06)
 7. Do the server's own metrics survive a restart? (OBS-07)
@@ -121,7 +122,7 @@ An earlier draft mixed skip, fail, and block arbitrarily; the suite establishes 
 
 | What happened | Verdict | Rationale |
 |---|---|---|
-| The suite could not reach a source for its own reasons: the node proxy returned 403, the kubeconfig lacks `get nodes/proxy`, or static PVs are forbidden | **blocked**, naming what was refused | Harness access gap. Nothing was learned about the deployment under test |
+| The suite could not reach a source for its own reasons: the node proxy returned 403, the kubeconfig lacks `get nodes/proxy`, or static PVs are forbidden | **[blocked](storage_terms.md#blocked-and-blocks)**, naming what was refused | Harness access gap. Nothing was learned about the deployment under test |
 | The deployment does not publish, declare, or implement what the case verifies: no metrics endpoint, no memory limit, no volume stats, no quota, no readiness probe for NFS | **fail**, naming the deployment | Deployment defect or telemetry gap. An operator on this cluster has no data to alert on |
 | The case could not create its own precondition: the workload storm did not move the reading within budget | **blocked**, with the number reached | The case failed to set up its test condition; reporting pass would be vacuous |
 
@@ -144,7 +145,7 @@ specific to the Observability test group:
 |---|---|---|
 | **OBS-01** | The deployment declares an active readiness probe targeting the NFS service, and endpoints drop when NFS is unavailable | Kubernetes probes and Service endpoints. An active probe targeting port 2049 or an NFS health check is verified in configuration (Step 7); behavioral drop of endpoints when frozen is verified with a fault in Step 10 |
 | **OBS-02** | ✅ Failover leaves a timestamped trace an operator can find; duration is measurable | Container start status (`ServerStartedAfter`) and server log stream (`ServerLog`). Fails if neither provides a timestamped record after the fault |
-| **OBS-03** | ✅ Grace period entry and exit are observable with timestamps; duration is bounded by `2 * LeaseSeconds` | RFC 8881 Section 8.4.2. Read from runtime log timestamps; fails if unannounced (F-008) |
+| **OBS-03** | ✅ Grace period entry and exit are observable with timestamps; duration is bounded by `2 * LeaseSeconds` ([why](storage_terms.md#reclaim_complete-and-early-end-of-grace)) | RFC 8881 Section 8.4.2. Read from runtime log timestamps; fails if unannounced (F-008) |
 | **OBS-04** | ✅ A mount failure on a client pod surfaces as an actionable `Warning` Event naming the volume; pod does not report Ready | Kubelet mount logic. Fails if no mount failure event arrives within budget, if the event omits the volume name, or if container status reports Ready. Wording of the failure cause is logged as a diagnostic warning because kubelet controls event phrasing |
 | **OBS-05** | The server container declares a memory limit, and its working set is readable and moves under load | Kubelet Summary API. Fails if no limit is declared; never manufactures an OOMKill |
 | **OBS-06** | ✅ Kubelet volume usage agrees with pod `df` within tolerance, both move with writes, and quota applies | CSI `NodeGetVolumeStats` capability. Kubelet stats summary (`pkg/framework/kubeletstats.go`) compared against pod `df -P -k` (`pkg/framework/volumeusage.go`). Fails if unannounced or if reported total is backing disk (F-009) |
@@ -153,7 +154,7 @@ specific to the Observability test group:
 ## 6. Detailed case walkthroughs
 
 ### OBS-01: Server unavailable (NFS readiness vs. container lifecycle)
-- **Problem**: In-cluster clients access NFS via a Kubernetes Service. If the server process
+- **Problem**: In-cluster clients access NFS via a Kubernetes Service. If the [server process](storage_terms.md#serving-process-and-supervisor)
   wedges in kernel `D` state or deadlocks, the container stays running, Kubernetes reports the pod
   `Ready`, and the Service continues routing new client connections to a dead export.
 - **Design**:
@@ -210,7 +211,7 @@ specific to the Observability test group:
   - Reads `container.memory.workingSetBytes` from the Kubelet Stats Summary via `nodes/proxy` (`pkg/framework/kubeletstats.go`).
   - Applies a bounded metadata workload (creating 1,000 files) and asserts that the working set gauge moves.
   - **Never manufactures an OOMKill**: deliberately exhausting memory would crash cluster storage and
-    take down unrelated workloads (Rule 7).
+    take down unrelated workloads.
 
 ### OBS-06: Volume near capacity (Control plane agreement and quota check)
 - **Problem**: Storage alerts rely on the CSI driver publishing accurate volume usage to the kubelet.
@@ -232,7 +233,8 @@ specific to the Observability test group:
 - **Problem**: Server-side metrics (NFS RPC counts, active clients, lock counts) must survive server
   restarts or reset predictably so monitoring pipelines do not break during failover.
 - **Design**:
-  - Scrapes the server's metrics endpoint before a pod deletion and again after the server recovers.
+  - Drives I/O through a claim of its own and scrapes before a pod deletion, then scrapes the
+    replacement's first answer, then drives the same I/O through it and scrapes again.
   - Categorizes the series behavior into five mutually exclusive verdicts:
     - `resumed-reset`: series present before and after, counter reset lower (passes).
     - `resumed-continuous`: series present before and after, at least one counter strictly higher
@@ -280,16 +282,52 @@ specific to the Observability test group:
     scheme. Both would otherwise fail a working deployment.
   - **The restart is not timed here.** The case waits past the restart budget from `pkg/slo` for the
     endpoint to come back, and asserts only that it does. How long a restart takes belongs to CHAOS.
-  - **No workload.** Nothing here writes through the export: the case asserts survival and counter
+  - **No workload.** *Reversed 2026-09-28 by the fix for [F-025](findings.md)
+    ([issue #81](https://github.com/mikebz/nfs-verification/issues/81)); the next bullet is what
+    replaced it.* Nothing here writes through the export: the case asserts survival and counter
     direction, not movement, and the movement cases are OBS-05 and OBS-06. A counter equal on both
     sides is therefore the expected reading on an idle server, and it is reported as claiming
     nothing rather than as continuity, which is [F-024](findings.md).
+  - **Traffic on both sides of the restart, and each question read off its own scrape.** A name
+    cannot be judged against a process that has served nothing: Ganesha creates a family on its first
+    sample, so the replacement's first answer is a cold-start set and F-025's 21 byte, size and cache
+    names read as lost. Counters cannot be judged against a process the case has since driven I/O
+    through, because that I/O moves them upward and a restarted process on a quiet server would read
+    as `resumed-continuous`, the F-024 false claim from the other side. So the case provisions a claim
+    and a pod of its own and takes four scrapes: idle, then one round of traffic (write and sync a
+    file, stat it, read it back, sized by `slo.MetricsTrafficBytes`), then before; the replacement's
+    first answer, which counters are read from; and exercised, after the same traffic through the
+    same mount. A name is lost only when neither post-restart scrape publishes it. Driving traffic
+    before the fault as well puts both ends under the case's control, which F-025 found neither was.
+    - **How long**: rounds repeat until every name from before is back, or until a round brings back
+      no name the round before it had not, inside the restart budget plus
+      `slo.ObservationMargin` counted from the replacement's first answer: a bound of its own, the
+      same length the replacement and its first answer were each given, not what is left of
+      theirs. One round should do, since Ganesha records a sample as it serves the
+      request, and the second covers a scrape that races the update. Stopping on no growth rather
+      than at the bound is safe in the direction that matters: no extra round can make a name the
+      server does not publish appear. The first round meets grace, so the bound cannot be shorter
+      than grace.
+    - **Which label sets are expected back**: the series the case's own traffic touched before the
+      fault, meaning absent from idle or a counter advanced since it. They are reported apart from
+      the rest of the lost series, which on a busy server is mostly history: statuses only a failover
+      produces, such as `NFS4ERR_GRACE`, and clients and exports from earlier cases. Neither group is
+      asserted. Whether a read in a pod reaches the server at all is the Linux client's decision,
+      made from its cache under [close-to-open](storage_terms.md#close-to-open) ([`nfs(5)`](https://man7.org/linux/man-pages/man5/nfs.5.html)),
+      so a touched series can be absent after the restart with nothing lost.
+    - **Rejected**, per F-025: comparing only the names present in both cold-start sets. It would
+      exclude the traffic counters an operator most depends on.
+    - **What the failure says**: a name missing after the rounds settled is named with the number of
+      rounds, the claim, pod and node that drove them, and the two readings left: the server stopped
+      publishing it, or it is fed only by requests this traffic does not make, such as locks or
+      failover recovery. A run whose traffic never completes records no verdict, since judging names
+      without it is the comparison F-025 showed to be wrong.
   - **"Metric name" and "family" are not the same word here, and the harness says which it means.**
     A name is a series key with its labels stripped, which is what a PromQL query selects. A family
     is the group a `# TYPE` line declares. They differ for histograms and summaries, whose `_bucket`,
     `_sum` and `_count` are three names under one family, and the difference is not small: the
     deployment in [F-023](findings.md) publishes 39 families under 66 names. Both were once called
-    families, so the artifact bundle reported 66 of something the finding counted 39 of, from the
+    families, so the artifact [bundle](storage_terms.md#bundle-and-evidence) reported 66 of something the finding counted 39 of, from the
     same scrape. The comparison is by name and says so; only the direction check goes by family.
   - **A histogram's components are compared as separate names but typed through their parent.**
     `_bucket`, `_sum` and `_count` are what a PromQL query names, so each is checked for presence in
@@ -375,10 +413,15 @@ specific to the Observability test group:
   a family on its first sample, so a scrape taken seconds after the restart, before any client traffic,
   finds them missing; all 21 were back on the same process once traffic resumed, and the post-restart
   scrape returns the same 367 series under 66 names every time regardless of what preceded it. That is
-  also what F-024's idle server published on both sides, which is why it saw no loss. The open item
-  ([issue #81](https://github.com/mikebz/nfs-verification/issues/81)) is for the case to drive I/O after
-  the restart before the second scrape, so that a name still missing is one the server really lost;
-  until then the assertion is right and its timing is not.
+  also what F-024's idle server published on both sides, which is why it saw no loss. The fix for
+  [issue #81](https://github.com/mikebz/nfs-verification/issues/81) drives the case's own I/O through
+  the export on both sides of the restart, judges names only after it, and still reads counters off
+  the replacement's first answer (section 6, OBS-07). Four runs on `gke-w2` since then returned
+  `resumed-reset`: 0 names lost after one round of traffic, 62 counters reset, none advanced. The
+  series the case's own traffic touched and did not bring back were `CREATE` in the first run, from
+  a directory only the pre-fault round made (fixed in the harness), `LOOKUP` in the second, which is
+  the client's cache deciding, and none in the third and fourth. That is why label sets are reported
+  and not asserted.
 
 ## 10. Sources
 

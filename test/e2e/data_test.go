@@ -426,11 +426,11 @@ const appendCaveat = "\n\nNote before filing: NFSv4.1 has no append operation. A
 // assertion the plan flags as stronger than the protocol, so it fails with the
 // caveat above rather than as a bare mismatch.
 //
-// This case is intermittent on the deployment it was written against: three
-// whole-suite runs lost fifty of two hundred records with none torn, and two
-// data-only runs in between lost nothing (F-016). A green run here does not
-// clear a storage system, it means the race did not fire, so do not read one
-// pass as an answer either way.
+// This case is intermittent on both deployments it has run against: when it
+// fails, one appender loses its whole contribution and nothing is torn. The run
+// counts live in F-016 rather than here, where they go stale. A green run here
+// does not clear a storage system, it means the race did not fire, so do not
+// read one pass as an answer either way.
 //
 // Steps:
 //  1. Put four pods on the available schedulable nodes, round robin, on one claim,
@@ -1382,8 +1382,9 @@ func TestDataSparseFileAndHolePunch(t *testing.T) {
 		punch := f.Sh(ctx, pod, fmt.Sprintf("fallocate -p -o %d -l %d %s 2>&1",
 			holeBlock*block, block, framework.Quote(path)))
 		if punch.Err != nil {
-			// Rule 9: an operation the protocol does not define is recorded,
-			// not failed. On a 4.1 mount this is the expected branch, and it is
+			// An operation the protocol does not define is recorded, not
+			// failed: DEALLOCATE is NFSv4.2 (RFC 7862) and preflight pins
+			// vers=4.1. On a 4.1 mount this is the expected branch, and it is
 			// the refusal of the operation rather than of the flag, because the
 			// probe above established that -p parses.
 			t.Logf("the hole punch was refused on this %s mount, which is the documented answer: "+
@@ -1539,10 +1540,11 @@ func requireDurabilitySet(t *testing.T, n int, what string) {
 // the server under the load, and assert every record the server acknowledged
 // before the fault is still there and still says what it said.
 //
-// It asserts durability and nothing else. CHAOS-01 owns the recovery number for
-// this same fault, and two cases reporting it is two numbers to reconcile when
-// they disagree. This waits for recovery because it has to read the share
-// afterwards, and does not assert the SLO.
+// It asserts durability, and that the fault it is asserted across happened,
+// and nothing else. CHAOS-01 owns the recovery number for this same fault, and
+// two cases reporting it is two numbers to reconcile when they disagree. This
+// waits for recovery because it has to read the share afterwards, and does not
+// assert the SLO.
 //
 // It is a TestData case, not a TestChaos one, even though it kills the server.
 // The suite sorts strictly by category, and the precedent is already in the
@@ -1552,11 +1554,17 @@ func requireDurabilitySet(t *testing.T, n int, what string) {
 //
 // Steps:
 //  1. Start a record workload that commits every record, and let it run.
-//  2. SIGKILL the server process on its node.
-//  3. Wait for I/O to resume, without asserting the recovery SLO.
-//  4. Sweep every record committed before the fault, from a pod on the other
+//  2. Observe which process is serving NFS. Report blocked if it cannot be
+//     named, or is not the one the kill is aimed by, rather than asserting
+//     durability across a kill that may land on something else.
+//  3. SIGKILL the server process on its node.
+//  4. Wait for I/O to resume, without asserting the recovery SLO.
+//  5. Confirm a different process is serving now, and stop, failed, if not:
+//     a durability verdict across a kill that missed the server is a verdict
+//     about nothing, and is not reported.
+//  6. Sweep every record committed before the fault, from a pod on the other
 //     node, by content.
-//  5. Fail on any verdict but correct: absent is data loss, short is a record
+//  7. Fail on any verdict but correct: absent is data loss, short is a record
 //     the server acknowledged and then truncated, wrong is corruption.
 func TestDataFsyncDurabilityAcrossServerKill(t *testing.T) {
 	f := framework.New(t, "DATA-12")
@@ -1566,6 +1574,10 @@ func TestDataFsyncDurabilityAcrossServerKill(t *testing.T) {
 
 	s := startChaosCase(ctx, t, f, "data12")
 	awaitRecords(ctx, t, s.load, durabilityRecords)
+	// Before the fault clock is read, as in CHAOS-01. After it, the records
+	// committed while the node agent looks would fall between the clock and
+	// the kill, outside the set the sweep asserts over.
+	serving := confirmKillAimedAtServer(ctx, t, f, s.target)
 
 	faultAt, err := f.PodNow(ctx, s.writer)
 	if err != nil {
@@ -1589,6 +1601,7 @@ func TestDataFsyncDurabilityAcrossServerKill(t *testing.T) {
 
 	// Waited out, not asserted. CHAOS-01 owns this number for this fault.
 	waitRecovered(ctx, t, s, faultAt)
+	confirmServerProcessReplaced(ctx, t, f, s.target, serving)
 	final, err := s.load.Stop(ctx)
 	if err != nil {
 		t.Fatalf("stopping the workload: %v", err)
@@ -1624,10 +1637,15 @@ func TestDataFsyncDurabilityAcrossServerKill(t *testing.T) {
 //
 // Steps:
 //  1. Start a record workload with no fsync, and let it run.
-//  2. SIGKILL the server process on its node.
-//  3. Wait for I/O to resume.
-//  4. Sweep every record the workload attempted, from a pod on the other node.
-//  5. Record how many were absent or short, and fail only on wrong.
+//  2. Observe which process is serving NFS. Report blocked if it cannot be
+//     named, or is not the one the kill is aimed by.
+//  3. SIGKILL the server process on its node.
+//  4. Wait for I/O to resume.
+//  5. Confirm a different process is serving now, and stop, failed, if not.
+//     What this case documents is what a server crash does to un-fsynced
+//     data, and a kill that missed the server documents nothing.
+//  6. Sweep every record the workload attempted, from a pod on the other node.
+//  7. Record how many were absent or short, and fail only on wrong.
 func TestDataDurabilityWithoutFsync(t *testing.T) {
 	f := framework.New(t, "DATA-13")
 	requireCap(t, f.Caps.NodeAgent, "signalling the server process on a node needs the privileged node agent")
@@ -1636,6 +1654,8 @@ func TestDataDurabilityWithoutFsync(t *testing.T) {
 
 	s := startChaosCaseWith(ctx, t, f, "data13", framework.WriteLoadSpec{NoFsync: true})
 	awaitRecords(ctx, t, s.load, durabilityRecords)
+	// Before the fault clock is read, as in CHAOS-01 and DATA-12.
+	serving := confirmKillAimedAtServer(ctx, t, f, s.target)
 
 	faultAt, err := f.PodNow(ctx, s.writer)
 	if err != nil {
@@ -1660,6 +1680,7 @@ func TestDataDurabilityWithoutFsync(t *testing.T) {
 		killed, s.target.Pod, s.target.Node, len(attempted))
 
 	waitRecovered(ctx, t, s, faultAt)
+	confirmServerProcessReplaced(ctx, t, f, s.target, serving)
 	if _, err := s.load.Stop(ctx); err != nil {
 		t.Fatalf("stopping the workload: %v", err)
 	}

@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-10
-Updated: 2026-09-21
+Updated: 2026-10-01
 
 End-to-end verification of NFS RWX persistent volumes on Kubernetes.
 
@@ -17,8 +17,9 @@ finding about that deployment, never a reason to relax the assertion.
 
 **The direction.** v1 covers provisioning, data integrity, chaos, observability
 and security, with scale and version skew after them and the conditional
-categories gated on what preflight discovers. Cases land one vector at a time,
-each with the harness it needs and nothing more.
+[categories](docs/storage_terms.md#step-phase-category-section-test-group-delivery-group)
+gated on what preflight discovers. Cases land one vector at a time, each with
+the harness it needs and nothing more.
 
 This repository holds the harness, preflight, the fault injection package, grace
 observability, `locktool`, the kubelet stats reader, and the cases themselves.
@@ -38,11 +39,14 @@ prerequisites.
 |---|---|
 | [`docs/01-test-plan.md`](docs/01-test-plan.md) | What gets verified and why: the architecture under test, every case ID, the SLO table, and delivery order with shipped/remaining progress |
 | [`docs/findings.md`](docs/findings.md) | What running against a real cluster taught, `F-001` upward: the index, with one file per finding in [`docs/findings/`](docs/findings/). **Read it before touching teardown, deletion, or anything that unmounts** |
+| [`docs/storage_terms.md`](docs/storage_terms.md) | What a term means: lease, grace, reclaim and the rest of the protocol vocabulary, the test plan's abbreviations, and the harness words that carry two meanings. Each is defined once, with its source |
 | [`AGENTS.md`](AGENTS.md) | How to work here: change size, case conventions, the sources every assertion cites, what to claim when you are done |
 
-One design doc per delivery group, in `docs/`. Each opens with a header saying
-which cases it serves and whether it is designed, shipped or superseded, so both
-the scope and the status are read there rather than mirrored here:
+One design doc per [delivery
+group](docs/storage_terms.md#step-phase-category-section-test-group-delivery-group),
+in `docs/`. Each opens with a header saying which cases it serves and whether it
+is designed, shipped or superseded, so both the scope and the status are read
+there rather than mirrored here:
 
 | Design doc | Delivery group |
 |---|---|
@@ -56,17 +60,20 @@ the scope and the status are read there rather than mirrored here:
 
 Every fact has one home: what a case must verify and how far delivery has got
 are the test plan's, how the harness works and how to run it are this file's,
-why a phase is shaped the way it is belongs to its design doc, and what a real
-run taught is `findings.md`'s. A copy anywhere else is how these documents
-drifted the first time, and **a result from a particular run is never this
-file's**: it is out of date by the next merge.
+why a phase is shaped the way it is belongs to its design doc, what a real run
+taught is `findings.md`'s, and what a term means is `storage_terms.md`'s. A copy
+anywhere else is how these documents drifted the first time, and **a result from
+a particular run is never this file's**: it is out of date by the next merge.
 
 A case reports one of four things. **Passed**: the assertion held. **Failed**:
 the deployment did not do what the protocol, the Kubernetes API or the CSI spec
 requires, which is a finding about the deployment. **Blocked**: the case could
 not run, because the cluster or the tools image gave it nothing to assert on,
 and the reason is itself the finding. **Skipped**: the cluster lacks a
-capability the case needs, discovered at preflight.
+capability the case needs, discovered at preflight. Blocked and skipped both
+print `SKIP` in `go test` output;
+[`storage_terms.md`](docs/storage_terms.md#passed-failed-blocked-skipped) says
+how to tell them apart.
 
 ## Layout
 
@@ -107,7 +114,18 @@ make clean                                                # remove artifacts/ an
 Everything goes through `make`. The targets carry the flags, the timeouts and
 the run ID, so a result reported from a target is one anyone else can reproduce.
 `FLAGS` passes cluster-specific values through to the binary; `RUN_ID` overrides
-the generated run ID. `make unit` needs no cluster, no network and no
+the generated run ID. A run ID runs each case once: a case whose
+`artifacts/<run-id>/<CASE-ID>/` already exists stops before it starts, because
+a second execution would mix its bundle with the first's (#71). Splitting one
+run across several targets under one `RUN_ID` works, since each case gets its
+own directory; a re-run of a case needs a new ID, and so does each cluster:
+the first invocation under a run ID writes `environment.json` at the top of the
+run, nothing rewrites it, and an invocation against a different context under
+the same ID stops before any case runs. The
+default ID is a UTC timestamp to the second, so two invocations of one case
+started in the same second, such as the same case on two clusters at once,
+share it and the second is refused: give parallel runs their own `RUN_ID`.
+`make unit` needs no cluster, no network and no
 kubeconfig, and unit tests must stay that way: a test under `pkg/` that needs a
 cluster belongs in `test/e2e` behind a capability check.
 
@@ -184,14 +202,14 @@ reused by later runs for `-preflight-max-age` (8h by default). A relative
 from the package directory. Pass `-refresh-preflight`
 to redo it, or `-env-file` to point at a specific record.
 
-Among what it records is the name of the process serving NFS in each server
-pod: whatever holds the listening socket on 2049, which is the one fact that
-identifies a server without reference to any implementation. It is read from
-two places, because neither answers alone. The pod names the socket, since
-which socket is the server's is a question about its network namespace. The
-node agent names the process holding it, since inside the pod the server's file
-descriptors are unreadable without a capability a container does not have, and
-since the node's is the process namespace a kill is matched in
+Among what it records is the name of the [serving
+process](docs/storage_terms.md#serving-process-and-supervisor) in each server
+pod: the process holding the listening socket on 2049. It is read from two
+places, because neither answers alone. The pod names the socket, since which
+socket is the server's is a question about its network namespace. The node agent
+names the process holding it, since inside the pod the server's file descriptors
+are unreadable without a capability a container does not have, and since the
+node's is the process namespace a kill is matched in
 ([F-027](docs/findings.md)). That name is the only thing CHAOS-01, DATA-12 and
 DATA-13 will signal: there is no flag to state it and no fallback to the
 container's declared command, because on a supervised server the command names
@@ -199,22 +217,25 @@ the supervisor and killing that measures a container restart
 ([F-026](docs/findings.md)). A server preflight cannot read leaves the name
 empty, preflight says so in a note, and those three cases report blocked.
 
-Nothing runs until preflight passes. Preflight writes
-`artifacts/<run-id>/environment.json`; a failed case writes its own bundle under
+Nothing runs until preflight passes. The first invocation under a run ID
+writes `artifacts/<run-id>/environment.json`, from a fresh or a cached preflight; a failed case writes its own bundle under
 `artifacts/<run-id>/<CASE-ID>/` with pod logs, Kubernetes Events, `/proc/mounts`
 and dmesg from every involved node, and the injected-fault timeline.
+`artifacts.txt` lists every one of those the collector tried, including the ones
+it could not get and why, so a log that could not be fetched is not mistaken for
+a pod that logged nothing, nor a dmesg that timed out for a quiet kernel.
 
 Two things a case argues from do not survive to that point on their own: the
-workload's record stream, which lives on the writer pod's filesystem so the
-measurement never crosses the filesystem under test, and the file on the share a
-data case is making a claim about. Both go with the pod and the claim at
-teardown. A case therefore **names** what it argues from, and the harness copies
-it into the same directory before anything is deleted, **whether the case passed
-or failed** — a passing chaos case's five recovery numbers are precisely the ones
-nobody can re-derive afterwards. One named file per registration, capped at 1MiB
-each, and nothing walks the share: `evidence.txt` lists what arrived, where it
-came from, and what was cut off at the cap, because a truncated file and a whole
-one look the same from the bytes.
+workload's [record stream](docs/storage_terms.md#record), which lives on the
+writer pod's filesystem so the measurement never crosses the filesystem under
+test, and the file on the share a data case is making a claim about. Both go
+with the pod and the claim at teardown. A case therefore **names** what it
+argues from, and the harness copies it into the same directory before anything
+is deleted, **whether the case passed or failed** — a passing chaos case's five
+recovery numbers are precisely the ones nobody can re-derive afterwards. One
+named file per registration, capped at 1MiB each, and nothing walks the share:
+`evidence.txt` lists what arrived, where it came from, and what was cut off at
+the cap, because a truncated file and a whole one look the same from the bytes.
 
 ## Timeouts and budgets
 
@@ -260,17 +281,24 @@ charged to every case eats the `go test -timeout` budget for the package.
 
 ## How a failover is measured
 
-Every chaos case runs a workload in a client pod that writes one 4KiB record per
-second with `conv=fsync` and logs the outcome and time of every attempt on the
-pod's own filesystem, never on the share. That log is copied into the case's
-bundle at teardown, pass or fail, since it is the input to all three assertions
-below and it dies with the pod. One log gives all three:
+Every chaos case runs a workload in a [client
+pod](docs/storage_terms.md#client-and-client-pod) that writes one 4KiB
+[record](docs/storage_terms.md#record) per second with `conv=fsync` and logs the
+outcome and time of every attempt on the pod's own filesystem, never on the
+share. That log is copied into the case's bundle at teardown, pass or fail,
+since it is the input to all three assertions below and it dies with the pod.
+One log gives all three:
 
-- **Recovery**: time from the fault to the first write committed after it,
-  against `pkg/slo` for the profile preflight pinned. Never a literal.
-- **Errors**: zero, because a hard NFSv4.1 mount is specified to block and retry
-  rather than to return an error. An error is a protocol violation, not a slow
-  recovery, so it is asserted separately from the timing.
+- **Recovery**: time from the fault to the committed write that ends the first
+  silence after it longer than `slo.LoadStallFloor`, against `pkg/slo` for the
+  profile preflight pinned. Never a literal. Not the first write stamped after
+  the fault: that one can have committed before service was lost
+  ([F-014](docs/findings.md)).
+- **Errors**: zero, because a [hard](docs/storage_terms.md#hard-mount) NFSv4.1
+  mount is specified to block and retry rather than to return an error
+  ([`nfs(5)`](https://man7.org/linux/man-pages/man5/nfs.5.html)). An error
+  breaks that contract rather than recovering slowly, so it is asserted
+  separately from the timing.
 - **Durability**: every write the server acknowledged before the fault must
   still be there afterwards, read from a pod on another node so the check
   crosses the server rather than the writer's own page cache.
@@ -280,11 +308,10 @@ never depends on the workstation and a node agreeing about the time.
 
 ## How grace is observed
 
-Grace is the interval after a restart in which the server accepts reclaims of
-state that existed before the crash and refuses everything new. It is the
-dominant term in every recovery number above, and a grace re-entry loop presents
-as a hung client in front of a healthy server, which the triage runbook calls
-the most common wrong diagnosis in this architecture.
+The [grace period](docs/storage_terms.md#grace-period) is the dominant term in
+every recovery number above, and a grace re-entry loop presents as a hung client
+in front of a healthy server, which the triage runbook calls the most common
+wrong diagnosis in this architecture.
 
 It is read from the server's own log stream through the Kubernetes API, with the
 timestamp the container runtime attached to each line rather than one parsed out
@@ -318,10 +345,11 @@ answer them:
 | `-refresh-preflight` | forcing rediscovery | the cached result is reused until it ages out |
 | `-tools-image` | client pods and the node agent | needs `dd`, `sha256sum`, `flock`, `stat` and `nsenter`; defaults to `alpine:3.20`, whose busybox carries all five. DATA-07 and DATA-11 probe two things this image may not have, `dd`'s `oflag=direct` and `fallocate`'s `-p`, and report blocked naming this flag rather than filing a tool gap as a protocol gap |
 | `-grace-enter-pattern`, `-grace-exit-pattern` | OBS-03, CHAOS-05, CHAOS-07 | nothing in the Kubernetes API states how a server words grace entry and exit; the built-in rule covers the common wordings, and these state it for a server it does not. Set both or neither: one alone would report every failover as a grace re-entry loop |
-| `-root-squash` | SEC-02 | nothing in the Kubernetes API states the export's squash setting; without it the case records what the export does instead of asserting a value nobody stated |
+| `-root-squash` | SEC-02 | nothing in the Kubernetes API states the export's squash setting; without it the case [records what the export does instead of asserting](docs/storage_terms.md#recorded-and-asserted) a value nobody stated |
 
-Lease and grace must match one of the two profiles in `pkg/slo`: tuned (20s/30s)
-or default (60s/90s). A third value fails preflight rather than silently
+[Lease](docs/storage_terms.md#lease) and grace must match one of the two
+[profiles](docs/storage_terms.md#profile) in `pkg/slo`: `tuned` (20s/30s) or
+`default` (60s/90s). A third value fails preflight rather than silently
 invalidating every timing assertion.
 
 The rest are operational rather than descriptive of the deployment, and `-h`
@@ -330,12 +358,12 @@ prints all of them with their defaults:
 | Flag | Default | What it does |
 |---|---|---|
 | `-kubeconfig`, `-context` | `$KUBECONFIG` then `~/.kube/config`, current context | which cluster, resolved once by client-go |
-| `-artifacts-dir`, `-run-id` | `artifacts`, a UTC timestamp | where the bundle lands and what names the objects; a relative directory is anchored to the repository root |
+| `-artifacts-dir`, `-run-id` | `artifacts`, a UTC timestamp | where the bundle lands and what names the objects; a relative directory is anchored to the repository root, and a run ID that has already run a case refuses to run it again |
 | `-profile` | either accepted | require a lease/grace profile, `tuned` or `default` |
 | `-preflight-max-age`, `-env-file` | 8h, none | how long a cached preflight result stays usable, and a specific record to reuse instead |
 | `-delegations` | `auto` | whether delegations are enabled; gates CHAOS-18, which is not written yet |
 | `-keep-objects` | off | leave a case's objects behind for triage |
-| `-platform`, `-gcloud-project`, `-gcloud-zone`, `-node-power-cmd` | `auto`, empty | how a node would be powered off. Recorded in `environment.json` and read by the capability probe that gates CHAOS-03; the node power operations themselves land in step 10 |
+| `-platform`, `-gcloud-project`, `-gcloud-zone`, `-node-power-cmd` | `auto`, empty | how a node would be powered off. Recorded in `environment.json` and read by the capability probe that gates CHAOS-03; the node power operations themselves land in [step](docs/storage_terms.md#step-phase-category-section-test-group-delivery-group) 10 |
 
 ## Three details that bite on real clusters
 

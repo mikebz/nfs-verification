@@ -2,9 +2,9 @@ package framework
 
 import "testing"
 
-// TestLooksLikeAUsageError covers the discriminator behind rule 9: a tool that
-// does not understand a flag and a filesystem that refuses an operation are
-// different answers.
+// TestLooksLikeAUsageError covers the discriminator between blocked and
+// recorded: a tool that does not understand a flag and a filesystem that
+// refuses an operation are different answers.
 //
 // Getting this wrong files "NFSv4.1 does not support hole punching" on evidence
 // that is really "this image's applet has no -p", which is a finding nobody can

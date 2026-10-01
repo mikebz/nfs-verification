@@ -12,11 +12,11 @@ import (
 // The evidence registry decides what survives a case, and every way it can go
 // wrong is quiet: a name that escapes the bundle directory, a second
 // registration that overwrites the first, a read that returns success and no
-// bytes for a directory, a truncated capture that looks like a whole file, or a
-// previous run's file left sitting where this run's should be. None of those
-// fails a run, because collection is deliberately not allowed to fail a case.
-// They are found here or on the day someone opens the bundle and argues from
-// the wrong file.
+// bytes for a directory, or a truncated capture that looks like a whole file.
+// None of those fails a run, because collection is deliberately not allowed to
+// fail a case. They are found here or on the day someone opens the bundle and
+// argues from the wrong file. A previous run's file where this run's should be
+// is prevented earlier, by claimCaseDir, and tested beside it.
 
 // TestKeepPodFileRejectsUnusableNames covers the names that would write outside
 // the bundle or over the manifest that describes it.
@@ -28,9 +28,9 @@ func TestKeepPodFileRejectsUnusableNames(t *testing.T) {
 	for _, name := range []string{
 		"", "..", "../escape.log", "sub/dir.log", ".hidden", "has space.log",
 		"quote'.log", "$(whoami).log", strings.Repeat("x", 65),
-		// The manifest itself: a capture landing on it would leave the bundle
+		// The manifests: a capture landing on either would leave the bundle
 		// with no account of what the rest of it is.
-		evidenceManifest,
+		evidenceManifest, artifactManifest,
 	} {
 		f := &Framework{CaseID: "DATA-02", state: &caseState{}}
 		if err := f.KeepPodFile("reader", "/mnt/data/f", name); err == nil {
@@ -240,51 +240,6 @@ func TestClassifyCaptureKeepsTheRightBytes(t *testing.T) {
 	}
 	if !strings.Contains(problem, "not a regular file") {
 		t.Errorf("the problem does not carry what the pod said: %q", problem)
-	}
-}
-
-// TestClearStaleEvidenceRemovesAnEarlierRunsFile covers the stale artifact.
-// Reusing a run id is ordinary -- `-run-id` exists for it, and triage step 1 is
-// to run one case again -- and without this the previous run's file sits in the
-// case directory next to a manifest saying this run captured nothing. That does
-// not look like a gap, it looks like evidence, which is the worst failure this
-// code has available to it.
-//
-// Steps:
-//  1. Clear a destination that holds an earlier run's file, and assert it is
-//     gone and no error is reported.
-//  2. Clear a destination that holds nothing, and assert that is not an error.
-//  3. Clear a destination something else occupies and cannot be removed, and
-//     assert the error names the path, so the capture records why rather than
-//     writing over it.
-func TestClearStaleEvidenceRemovesAnEarlierRunsFile(t *testing.T) {
-	dir := t.TempDir()
-
-	dest := filepath.Join(dir, "data02.log")
-	if err := os.WriteFile(dest, []byte("records from a run that is not this one\n"), 0o644); err != nil {
-		t.Fatalf("seeding the earlier file: %v", err)
-	}
-	if err := clearStaleEvidence(dest); err != nil {
-		t.Fatalf("clearing an earlier run's file: %v", err)
-	}
-	if _, err := os.Stat(dest); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("the earlier run's file survived (%v), so triage would read it as this run's evidence", err)
-	}
-
-	if err := clearStaleEvidence(filepath.Join(dir, "never-captured.log")); err != nil {
-		t.Errorf("clearing a destination that holds nothing reported an error: %v", err)
-	}
-
-	occupied := filepath.Join(dir, "occupied.log")
-	if err := os.MkdirAll(filepath.Join(occupied, "child"), 0o755); err != nil {
-		t.Fatalf("seeding the occupied destination: %v", err)
-	}
-	err := clearStaleEvidence(occupied)
-	if err == nil {
-		t.Fatal("a destination that could not be cleared reported success")
-	}
-	if !strings.Contains(err.Error(), occupied) {
-		t.Errorf("the error does not name the path it could not clear: %v", err)
 	}
 }
 

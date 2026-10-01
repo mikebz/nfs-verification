@@ -2,8 +2,8 @@
 
 Author: mikebz@
 Created: 2026-09-10
-Updated: 2026-09-17
-Status: **in progress.** Serves the complete Resiliency and Chaos test group:
+Updated: 2026-10-01
+Status: **in progress.** Serves the complete Resiliency and Chaos [test group](storage_terms.md#step-phase-category-section-test-group-delivery-group):
 CHAOS-01, CHAOS-02, CHAOS-05, CHAOS-06, and CHAOS-07 shipped (Steps 3, 4, 6);
 CHAOS-03, CHAOS-04, and CHAOS-08 through CHAOS-18 planned for delivery step 10.
 Serves: CHAOS-01 through CHAOS-18. Requirements in [`01-test-plan.md`](01-test-plan.md)
@@ -16,23 +16,23 @@ across the repository, superseding the chaos sections of [`04-grace-and-lock-rec
 ## 1. Why this domain exists
 
 The NFS server is the singleton in the data path (test plan Section 2.1): every
-RWX client serializes through one server process, so what a client observes when that
+RWX client serializes through one [server process](storage_terms.md#serving-process-and-supervisor), so what a client observes when that
 process dies, stalls, or relocates is the heaviest-weighted question in the plan.
 Before this test group was built, the suite could assert steady state and nothing else:
 it had no mechanism to injure the system and no way to measure what happened next.
 
-Failover in this architecture is an opaque black box (test plan Section 2.3). No case
+[Failover](storage_terms.md#failover) in this architecture is an opaque black box (test plan Section 2.3). No case
 asserts *how* failover happens (e.g. Pacemaker, Kubernetes StatefulSet controller,
 cloud volume re-attachment). Every chaos case asserts only client-observable behavior
 derived from the protocol:
-1. **Recovery**: time until client I/O resumes, measured against the pinned `pkg/slo` profile.
-2. **Error behavior**: zero I/O errors across server failovers on `hard` NFSv4.1 mounts (storage/network faults such as CHAOS-13 surface bounded retryable errors).
+1. **Recovery**: time until client I/O resumes, measured against the pinned `pkg/slo` [profile](storage_terms.md#profile).
+2. **Error behavior**: zero I/O errors across server failovers on [`hard`](storage_terms.md#hard-mount) NFSv4.1 mounts (storage/network faults such as CHAOS-13 surface bounded retryable errors).
 3. **Durability**: zero loss of data acknowledged as committed before the fault.
-4. **State preservation**: all advisory locks held before failover successfully reclaimed given a healthy recovery store (with CHAOS-17 verifying an honest, non-conflicting failure when the store is corrupted).
+4. **State preservation**: all advisory locks held before failover successfully [reclaimed](storage_terms.md#reclaim) given a healthy [recovery store](storage_terms.md#recovery-store) (with CHAOS-17 verifying an honest, non-conflicting failure when the store is corrupted).
 5. **Grace period enforcement**: new locks refused during grace, preventing state corruption.
 
 Done means eighteen repeatable resiliency cases that drive real cluster and storage
-faults, with every recovery verified from client pods on independent worker nodes.
+faults, with every recovery verified from [client pods](storage_terms.md#client-and-client-pod) on independent [worker](storage_terms.md#schedulable-node-and-worker) nodes.
 
 ## 2. The fault injection framework (`pkg/chaos`)
 
@@ -55,9 +55,9 @@ every fault is explicitly enumerated, safe-guarded, and tracked:
 - **Fault timeline recording**: The framework records a timestamped `FaultEvent` for each
   successful fault operation. On test failure, `CollectArtifacts` bundles the recorded faults
   and cluster state into the run's artifact directory (`artifacts/<run-id>/`) for post-failure triage.
-- **The record stream is kept**: the workload's log is the input to every recovery number
+- **The [record stream](storage_terms.md#record) is kept**: the workload's log is the input to every recovery number
   here, and it lives on the writer pod's own filesystem, so it used to go with the pod at
-  teardown. The workload now registers it as case evidence, which is copied into the bundle
+  teardown. The workload now registers it as case [evidence](storage_terms.md#bundle-and-evidence), which is copied into the bundle
   on a pass as well as a failure. A passing CHAOS-05 carries five recovery measurements, and
   without the log none of them can be re-derived: F-017 is a run whose durations had to be
   re-checked after the fact, and it could only be settled because the numbers measured inside
@@ -75,7 +75,7 @@ The remaining operations close out the CHAOS matrix in Step 10:
   evicts the CSI node plugin daemonset pod, or restarts the CNI plugin while NFS mounts are active.
 - **Deadlock and resource exhaustion (`CHAOS-14`, `CHAOS-15`, `CHAOS-17`)**: Hyperconverged
   colocation deadlock under memory pressure, client node OOM with dirty NFS pages, and recovery
-  state directory loss (`-recovery-state-path`).
+  store loss (`-recovery-state-path`).
 
 ## 3. The measurement path and silence detection
 
@@ -108,17 +108,10 @@ Every chaos case runs a dedicated workload in a client pod while the fault is in
 
 ## 4. Grace and lock reclaim across failover
 
-Grace is the interval after a restart in which the server accepts reclaims of state that
-existed before the crash and refuses all new state acquisitions (RFC 8881 Section 8.4.2):
-
-```
-Fault Injected
-     │
-     ▼
-Server Down ──► Server Restart ──► Grace Window Starts ──► Grace Window Ends ──► Normal Operation
-(RPCs block)    (Grace Entry)     (Reclaims allowed;      (Grace Exit)          (New state allowed)
-                                   new locks rejected)
-```
+What the [grace period](storage_terms.md#grace-period) is, and where it falls in
+a failover, is defined in [`storage_terms.md`](storage_terms.md), with
+[reclaim](storage_terms.md#reclaim) and [early end of
+grace](storage_terms.md#reclaim_complete-and-early-end-of-grace).
 
 - **Why grace matters**: It is the dominant term in every recovery target. If an NFS server enters
   grace repeatedly during address takeover, clients stall for hours—the single most common false
@@ -126,7 +119,7 @@ Server Down ──► Server Restart ──► Grace Window Starts ──► Gra
 - **Grace observation (`pkg/framework/grace.go`)**:
   - Read from the server pod's container log stream using container runtime timestamps.
   - Uses an exit-first keyword classification to avoid mistaking negative exit phrases for entries.
-  - If the server announces no grace in logs, `CHAOS-07` reports blocked and `OBS-03` fails (F-008).
+  - If the server announces no grace in logs, `CHAOS-07` reports [blocked](storage_terms.md#blocked-and-blocks) and `OBS-03` fails (F-008).
 - **Lock reclaim verification (`CHAOS-06`)**:
   - *Whole-file locks*: Taken using `flock -x`. The Linux kernel simulates `flock` via whole-file
     POSIX locks on the wire (RFC 8881 Section 9).
@@ -139,7 +132,7 @@ Server Down ──► Server Restart ──► Grace Window Starts ──► Gra
   - A probe client attempts a new lock once per second during failover.
   - RFC 8881 bars new state acquisition during grace: any grant inside the grace window is a
     protocol violation.
-  - *Un-reclaimed state requirement*: A server may lift grace early if no clients have state to
+  - *Un-reclaimed state requirement*: A server may [lift grace early](storage_terms.md#reclaim_complete-and-early-end-of-grace) if no clients have state to
     reclaim. CHAOS-07 deliberately holds one un-reclaimed lock across failover so that grace is
     actively enforced when the probe runs; otherwise, the case passes vacuously.
 - **Multi-cycle repeated failovers (`CHAOS-05`)**:
@@ -174,7 +167,7 @@ the core assertions across the Resiliency & Chaos test group:
 | **CHAOS-14** | Colocation deadlock: server pod scheduled on same node as clients under memory pressure | Hyperconverged topology page reclaim safety |
 | **CHAOS-15** | Client node OOM with dirty pages on NFS mount: bounded failure, no node-level hang | Linux VM dirty page throttling and OOM safety |
 | **CHAOS-16** | 24h chaos soak: randomized kills, partitions, evictions: 0 corruption, 0 unrecovered mounts | Systemic reliability under sustained chaos |
-| **CHAOS-17** | Recovery state store lost or corrupted: bounded honest failure, no conflicting locks | RFC 8881 recovery backend integrity |
+| **CHAOS-17** | Recovery store lost or corrupted: bounded honest failure, no conflicting locks | RFC 8881 Sec 8.4.2.1, recovery store integrity |
 | **CHAOS-18** | Delegation recall under conflicting open: delegation recalled within timeout | RFC 8881 Sec 10.4 (Delegations); skipped if disabled |
 
 ## 6. Detailed case walkthroughs (Shipped cases)
@@ -212,7 +205,7 @@ the core assertions across the Resiliency & Chaos test group:
 - **Steps**:
   1. Start active workload and take four whole-file locks (`flock`) across two clients on separate nodes (three held by writer, one by verifier).
   2. Subtest takes disjoint byte ranges on a separate file using `locktool`: `[0, 4096)` held by writer, `[8192, 12288)` held by verifier.
-  3. Verify cross-node exclusion for all whole-file locks and byte ranges before any fault is injected.
+  3. Verify cross-node exclusion for all whole-file locks and byte ranges before any fault is injected, then read both holder nodes' kernel ring buffers, so that a lock found free afterwards can be traced to a `lost N locks` line logged since (F-028). That line says the holder node's client had reclaims refused, not which locks and not why, and the failure message says no more than that.
   4. Delete server pod gracefully and assert recovery duration within restart SLO.
   5. Assert each whole-file lock holder still reports held, and cross-node probes are refused. Assert 100% reclaim fraction.
   6. Query the server with `F_GETLK` from the opposite client to assert each byte range is still held by its original owner with unmodified boundaries.

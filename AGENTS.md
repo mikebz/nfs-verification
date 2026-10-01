@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-10
-Updated: 2026-09-17
+Updated: 2026-10-01
 
 This repository is a test harness, not a product. It verifies NFS RWX
 persistent volumes on Kubernetes by driving a real cluster and asserting what a
@@ -331,6 +331,10 @@ Recurring review feedback, all of it from this repository:
   for a flag the code ignores is a bug.
 - Where a comment enforces a plan rule, say which rule, so the next reader knows
   it is not arbitrary.
+- **A term is defined once, in the glossary in `docs/`.** Link its entry rather
+  than defining the word again. Grace was defined word for word in three
+  documents before the glossary existed, and a word with two meanings, such as
+  blocked or client, says which one it means.
 
 ## Record what a real run teaches
 

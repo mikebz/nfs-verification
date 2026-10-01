@@ -2,9 +2,7 @@ package framework
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -122,10 +120,10 @@ func (f *Framework) KeepPodFile(pod, path, name string) error {
 }
 
 // checkEvidenceName rejects anything that is not a plain filename, and the
-// manifest's own name. The name becomes a path under the bundle directory and
-// the id of the script that fetches the file, so a separator or a leading dot
-// in it writes somewhere nobody asked for, and a capture landing on the
-// manifest would leave the bundle with no account of what is in it.
+// names of the two manifests. The name becomes a path under the bundle
+// directory and the id of the script that fetches the file, so a separator or a
+// leading dot in it writes somewhere nobody asked for, and a capture landing on
+// either manifest would leave the bundle with no account of what is in it.
 //
 // A helper that builds a name from a value a case chose validates it here
 // before it acts, not after: a registration refused halfway through a case
@@ -135,8 +133,8 @@ func checkEvidenceName(name string) error {
 		return fmt.Errorf("%q is not usable as an evidence name, since it becomes a filename in the "+
 			"bundle: %w", name, err)
 	}
-	if name == evidenceManifest {
-		return fmt.Errorf("%q is the name of the manifest that says what the bundle holds; choose another", name)
+	if name == evidenceManifest || name == artifactManifest {
+		return fmt.Errorf("%q is the name of a manifest that says what the bundle holds; choose another", name)
 	}
 	return nil
 }
@@ -194,10 +192,6 @@ func (f *Framework) collectEvidence(ctx context.Context) error {
 func (f *Framework) captureEvidence(ctx context.Context, dir string, it evidenceItem) evidenceRow {
 	row := evidenceRow{Name: it.name, Pod: it.pod, Path: it.path}
 	dest := filepath.Join(dir, it.name)
-	if err := clearStaleEvidence(dest); err != nil {
-		row.Problem = err.Error()
-		return row
-	}
 	// One byte past the cap, so that a file exactly at the cap is reported
 	// complete and one byte over it is reported truncated.
 	script, err := RunScript("read-evidence.sh", it.name, it.path, strconv.Itoa(EvidenceMaxBytes+1))
@@ -226,23 +220,6 @@ func (f *Framework) captureEvidence(ctx context.Context, dir string, it evidence
 		row.Bytes = 0
 	}
 	return row
-}
-
-// clearStaleEvidence removes whatever is already at a capture's destination.
-//
-// A run that reuses a run id is an ordinary thing to do: -run-id exists for it,
-// and triage step 1 is to run one case again. Without this, the previous run's
-// file stays in the case directory next to a manifest saying this run captured
-// nothing, which is the worst of the failure modes available here. It does not
-// look like a gap; it looks like evidence, and it is evidence of a different
-// run. A destination that cannot be cleared fails the capture rather than
-// letting the file be passed off as this run's.
-func clearStaleEvidence(dest string) error {
-	if err := os.Remove(dest); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("an earlier file at %s could not be removed, so nothing was captured rather "+
-			"than risk reporting it as this run's: %v", dest, err)
-	}
-	return nil
 }
 
 // classifyCapture decides what one read produced: the bytes worth keeping,

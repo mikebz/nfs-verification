@@ -2,8 +2,12 @@ package env
 
 import (
 	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -121,6 +125,95 @@ func TestEnvironmentWriteCreatesDirectory(t *testing.T) {
 	}
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("environment file not created at %q: %v", path, err)
+	}
+}
+
+// TestEnvironmentCreateOneWinner covers the run-level record's write-once
+// primitive. Two invocations of a split run started together on one cluster
+// both write the record; if the loser could read the winner's file while it was
+// still being written, it would find truncated JSON and stop a legitimate run.
+//
+// Steps:
+//  1. Start several writers at once, each creating the same path with a
+//     different context, while readers load the path in a loop.
+//  2. Assert exactly one writer succeeded and every other got fs.ErrExist.
+//  3. Assert no reader ever saw a record that failed to parse, and that the
+//     final record is the winner's.
+//  4. Assert no temporary file was left in the directory.
+func TestEnvironmentCreateOneWinner(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "environment.json")
+	const writers = 8
+
+	stop := make(chan struct{})
+	var partial atomic.Int32
+	var readers sync.WaitGroup
+	for range 4 {
+		readers.Add(1)
+		go func() {
+			defer readers.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				if _, err := Load(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+					partial.Add(1)
+				}
+			}
+		}()
+	}
+
+	errs := make([]error, writers)
+	var wg sync.WaitGroup
+	for i := range writers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			// A large record widens the window in which a partial file would show.
+			e := &Environment{Context: fmt.Sprintf("ctx-%d", i), Notes: make([]string, 2000)}
+			errs[i] = e.Create(path)
+		}()
+	}
+	wg.Wait()
+	close(stop)
+	readers.Wait()
+
+	winner := -1
+	for i, err := range errs {
+		switch {
+		case err == nil && winner == -1:
+			winner = i
+		case err == nil:
+			t.Errorf("writers %d and %d both created the record", winner, i)
+		case !errors.Is(err, fs.ErrExist):
+			t.Errorf("writer %d failed with %v, want fs.ErrExist", i, err)
+		}
+	}
+	if winner == -1 {
+		t.Fatal("no writer created the record")
+	}
+	if n := partial.Load(); n > 0 {
+		t.Errorf("readers saw an unparseable record %d times, so a concurrent invocation would stop for nothing", n)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("loading the final record: %v", err)
+	}
+	if want := fmt.Sprintf("ctx-%d", winner); got.Context != want {
+		t.Errorf("the record holds context %q, want the winner's %q", got.Context, want)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("listing %s: %v", dir, err)
+	}
+	if len(entries) != 1 {
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Errorf("the directory holds %v, want only environment.json", names)
 	}
 }
 

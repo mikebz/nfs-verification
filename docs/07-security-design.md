@@ -2,13 +2,13 @@
 
 Author: mikebz@
 Created: 2026-09-13
-Updated: 2026-09-17
-Status: **in review**, [PR #57](https://github.com/mikebz/nfs-verification/pull/57).
+Updated: 2026-10-01
+Status: shipped, [PR #57](https://github.com/mikebz/nfs-verification/pull/57).
 SEC-03 to SEC-09 landed in delivery step 8; SEC-01 shipped in Step 2
 ([PR #3](https://github.com/mikebz/nfs-verification/pull/3)) and SEC-02 in Step 2b
 ([PR #4](https://github.com/mikebz/nfs-verification/pull/4)), and both are
 documented here for the first time. Consolidated to serve the complete Security
-test group. Every case has been run against a live cluster; Section 10 is what
+[test group](storage_terms.md#step-phase-category-section-test-group-delivery-group). Every case has been run against a live cluster; Section 10 is what
 that run returned.
 Serves: SEC-01 through SEC-09. Requirements in
 [`01-test-plan.md`](01-test-plan.md) Section 3.6.
@@ -23,17 +23,15 @@ question.
 
 ## 1. The decision that shapes everything here
 
-**The client is the node, not the pod, and this phase measures identity rather
+**The client is the node, not the pod, and this [phase](storage_terms.md#step-phase-category-section-test-group-delivery-group) measures identity rather
 than asserting a policy.**
 
 Two facts decide every case below. The first is architectural: the NFS mount is
-made by the node's kernel, so every identity the server can see — the source
-address, the reserved source port, the NFSv4 client identifier — belongs to the
-node, and is shared by every pod and every mount on it
-([client-identifier](https://docs.kernel.org/filesystems/nfs/client-identifier.html)).
-A pod is invisible to the server. The second is that access control here is
-AUTH_SYS (plan Appendix B), which is an assertion of identity, not a proof of
-one.
+made by the node's kernel, so every identity the server can see belongs to the
+node and is shared by every pod and every mount on it ([client
+identity](storage_terms.md#client-identity)). A pod is invisible to the server.
+The second is that access control here is AUTH_SYS (plan Appendix B), which is
+an assertion of identity, not a proof of one.
 
 So a case in this section cannot assert that the right policy is configured:
 nobody told this suite what the export's policy is meant to be, and inventing one
@@ -64,7 +62,7 @@ that is kept honest rather than decorative.
 ## 2. What the probes already settled
 
 Seven hand-run probes against the cluster this project uses (GKE v1.37, three COS
-workers, `nfs-server-provisioner` v4.0.8 behind a ClusterIP Service, StorageClass
+[workers](storage_terms.md#schedulable-node-and-worker), `nfs-server-provisioner` v4.0.8 behind a ClusterIP Service, StorageClass
 `nfs`) were run before this document, because most of the design decisions below
 turn on answers the code could otherwise only guess at. These are probes, **not
 suite runs**; no case exists yet, and nothing here is a result.
@@ -113,7 +111,7 @@ Doc 06's rule, unchanged, plus one row this section adds:
 
 | What happened | Verdict |
 |---|---|
-| The suite could not reach a source for its own reasons: exec into the server pod refused, `/proc` unreadable, no binary for the node's architecture | **blocked**, naming what was refused |
+| The suite could not reach a source for its own reasons: exec into the server pod refused, `/proc` unreadable, no binary for the node's architecture | **[blocked](storage_terms.md#blocked-and-blocks)**, naming what was refused |
 | The deployment does not do what the case is about | **fail**, naming the deployment |
 | The case could not create its own precondition | **blocked**, with what it reached |
 | **The probe could not establish that its instrument works** | **blocked**, never a pass | 
@@ -335,7 +333,7 @@ is involved, and where anything left behind dies with the container rather than
 with the node. The agent is already the suite's one privileged component, so
 nothing new is deployed.
 
-**It is soft, and it is bounded.** Every other mount in this suite is `hard`,
+**It is soft, and it is bounded.** Every other mount in this suite is [`hard`](storage_terms.md#hard-mount),
 and preflight rejects `soft` for exactly the right reason. A probe mount is the
 exception and says so: a `hard` mount of an export that is about to be deleted is
 the F-001 wedge, and a probe whose whole purpose is to attempt something that may
@@ -447,7 +445,7 @@ here.
 
 `make test-sec FLAGS="-storage-class=nfs -lease-seconds=60 -grace-seconds=90"`,
 run `20260914-011748`, GKE cluster `gke-w1`, Kubernetes v1.37.0-gke.2941000,
-three `e2-standard` workers on Container-Optimized OS with kernel 6.12.94+,
+three `e2-medium` workers on Container-Optimized OS with kernel 6.12.94+,
 StorageClass `nfs` backed by `nfs-server-provisioner` v4.0.8, profile `default`
 (lease 60s, grace 90s). The whole category took 2m45s against a 30 minute budget.
 
@@ -507,7 +505,9 @@ Three things the run taught that the design did not anticipate:
 ## 12. Sources
 
 - [RFC 8881](https://www.rfc-editor.org/rfc/rfc8881.html) Section 2.4 for client
-  identity and the single lease per client, and Section 13 for AUTH_SYS.
+  identity, Section 8.3 for the single lease per client, Section 2.2.1.1 for
+  AUTH_SYS as an optional security flavor, and Section 21 for what it does not
+  authenticate.
 - Kernel
   [client-identifier](https://docs.kernel.org/filesystems/nfs/client-identifier.html):
   one lease per client per server, shared by every mount and every pod on the
