@@ -164,9 +164,10 @@ them as a deployment property was wrong.
 
 ### Open
 
-Two of the three places the 2026-09-27 update below lists still assume the
-container is the server: the `server-did-not-restart` subtests (#97) and SEC-09's
-capability read (#98). The third was closed on 2026-09-28 (#99).
+One of the three places the 2026-09-27 update below lists still assumes the
+container is the server: the `server-did-not-restart` subtests (#97). The other
+two are closed: DATA-12 and DATA-13's kill check on 2026-09-28 (#99), and SEC-09's
+capability read on 2026-09-30 (#98, PR #120).
 
 ### What changed after this was written
 
