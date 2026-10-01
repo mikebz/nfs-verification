@@ -17,11 +17,10 @@ Builds on [`03-chaos-operations-design.md`](03-chaos-operations-design.md).
 [Step](storage_terms.md#step-phase-category-section-test-group-delivery-group) 3 could injure the server and time the outage. It could not see grace.
 
 The [grace period](storage_terms.md#grace-period) is the dominant term in every
-recovery number this suite reports, and a grace re-entry loop presents as a hung
-client in front of a healthy server, which the triage runbook in test plan
-Section 4.3 calls the most common wrong diagnosis in this architecture. A suite
-that cannot see grace reports a slow client and cannot say whether the server
-was enforcing a protocol guarantee or had wedged.
+recovery number this suite reports, and a server re-entering it looks like a
+hung client (test plan [Section 4.3](01-test-plan.md#43-triage-runbook), step 3).
+A suite that cannot see grace reports a slow client and cannot say whether the
+server was enforcing a protocol guarantee or had wedged.
 
 Done means: entry and exit with timestamps or an honest statement that this
 server publishes neither; every lock held before a failover still held after it;
@@ -61,7 +60,7 @@ specific here:
 | 5 | A new lock granted during grace fails, whether the server granted it deliberately or lost the state that would have refused it | RFC 8881 Section 8.4.2 bars new state during grace. Neither reading is acceptable, and the case does not have to tell them apart to fail |
 | 6 | A refusal during an outage is not evidence that grace was enforced | Every attempt fails while the server is down, for the ordinary reason. The window is established from the server's own signal first, and only then is the probe read inside it |
 | 7 | Repeated failover is measured per cycle | A total that fits inside a wall clock proves nothing if one cycle inside it took four minutes |
-| 8 | Grace entered more than once per failover is a re-entry loop, and a finding about the server | It presents as a hung client in front of a healthy server, which the triage runbook calls the most common wrong diagnosis here. The count is per cycle, and the failure message says grace re-entry, not client stall |
+| 8 | Grace entered more than once per failover is a re-entry loop, and a finding about the server | It looks like a hung client ([triage step 3](01-test-plan.md#43-triage-runbook)). The count is per cycle, and the failure message says grace re-entry, not client stall |
 | 9 | No case asserts how grace is implemented | Every assertion reads a log line's existence, a lock outcome or a Kubernetes object |
 
 ## 4. What the observer and the probe produce

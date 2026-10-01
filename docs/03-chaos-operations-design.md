@@ -117,9 +117,8 @@ a failover, is defined in [`storage_terms.md`](storage_terms.md), with
 [reclaim](storage_terms.md#reclaim) and [early end of
 grace](storage_terms.md#reclaim_complete-and-early-end-of-grace).
 
-- **Why grace matters**: It is the dominant term in every recovery target. If an NFS server enters
-  grace repeatedly during address takeover, clients stall for hours—the single most common false
-  diagnosis in this architecture (triage runbook Section 4.3).
+- **Why grace matters**: It is the dominant term in every recovery target, and a server re-entering
+  it looks like a hung client (test plan [Section 4.3](01-test-plan.md#43-triage-runbook), step 3).
 - **Grace observation (`pkg/framework/grace.go`)**:
   - Read from the server pod's container log stream using container runtime timestamps.
   - Uses an exit-first keyword classification to avoid mistaking negative exit phrases for entries.
