@@ -2,14 +2,15 @@
 
 Author: mikebz@
 Created: 2026-09-14
-Updated: 2026-09-14
+Updated: 2026-10-01
 
 
 **Found:** 2026-09-10, GKE cluster with e2-medium worker nodes, running PROV-04 while reviewing
 [PR #3](https://github.com/mikebz/nfs-verification/pull/3).
 
-**Severity:** low for the cluster, medium for the suite. It makes one case fail
-for a reason that is not obvious from its failure.
+**Severity:** none for the cluster, medium for the suite, medium for the
+deployment. It makes one case fail for a reason that is not obvious from its
+failure, and the class advertises a capability its provisioner does not have.
 
 ### What happened
 
@@ -38,7 +39,7 @@ acted on the request, and the message now says so and names the two things to
 check: whether the provisioner supports expansion, and whether an
 external-resizer sidecar is running.
 
-### What it says about capability discovery
+### What it means for the system under test
 
 `Caps.CanExpand` is optimistic by construction, because the only thing the
 Kubernetes API offers is the class's own assertion. Every other capability in

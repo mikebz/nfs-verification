@@ -2,14 +2,21 @@
 
 Author: mikebz@
 Created: 2026-09-19
-Updated: 2026-09-28
+Updated: 2026-10-01
 
+
+> **Refined by [F-027](F027-a-container-cannot-read-the-file-descriptors-of-its.md).**
+> The join described under What changed read the server's file descriptors from
+> inside its pod, which fails on a server that has been up for more than a few
+> minutes. Discovery now reads the socket in the pod and the process holding it
+> on the node, through the node agent.
 
 **Found:** 2026-09-18, GKE cluster `gke-w2`, Kubernetes v1.37.0-gke.2941000,
 server `nfs-provisioner:15.3` (Ganesha V15.3-mb), while asking why CHAOS-01,
 DATA-12 and DATA-13 had been blocked on every run against this deployment.
 
-**Severity:** it is the difference between three cases that never run and three
+**Severity:** none for the cluster, high for the suite, none for the
+deployment. It is the difference between three cases that never run and three
 that do, and, taken the other way, between a SIGKILL aimed at the NFS server and
 one aimed at the supervisor that restarts it.
 
@@ -140,7 +147,7 @@ namespace, since naming the process needs the node agent
 ([F-027](F027-a-container-cannot-read-the-file-descriptors-of-its.md)), and a
 containerized process never has node pid 1.
 
-### What it implies
+### What it means for the system under test
 
 For the harness: a fact about the running system beats a field in a manifest
 whenever both are available, and the cost of not looking was three cases
@@ -155,14 +162,22 @@ recovery here is 1m33s rather than a pod restart. The cases that were blocked
 were blocked by the harness, not by the server, and the test plan's record of
 them as a deployment property was wrong.
 
-### Updated 2026-09-27
+### Open
 
-**The fix held on both deployments.** In six whole-suite runs on 2026-09-25,
-three on `gke-w1` and three on `gke-w2` (`w{1,2}-e2e-run{1,2,3}-20260925-*`),
-preflight named `ganesha.nfsd` as the process holding 2049 every time. CHAOS-01,
-DATA-12 and DATA-13 passed 18 of 18. CHAOS-01 recovered in 92s in four runs
-and 107s in two, and the DATA pair in 92 to 93s. That is grace plus a respawn
-(see [F-029](F029-neither-deployment-ever-lifts-grace-early-for-different.md)), not a pod restart.
+Two of the three places the 2026-09-27 update below lists still assume the
+container is the server: the `server-did-not-restart` subtests (#97) and SEC-09's
+capability read (#98). The third was closed on 2026-09-28 (#99).
+
+### What changed after this was written
+
+**2026-09-27. The fix held on both deployments.** In six whole-suite runs on
+2026-09-25, three on `gke-w1` and three on `gke-w2`
+(`w{1,2}-e2e-run{1,2,3}-20260925-*`), preflight named `ganesha.nfsd` as the
+process holding 2049 every time. CHAOS-01, DATA-12 and DATA-13 passed 18 of 18.
+CHAOS-01 recovered in 92s in four runs and 107s in two, and the DATA pair in 92
+to 93s. That is grace plus a respawn (see
+[F-029](F029-neither-deployment-ever-lifts-grace-early-for-different.md)), not a
+pod restart.
 
 **The lesson reached CHAOS-01 and not the rest of the harness.** The two things
 this entry says are wrong about a supervised server are still assumed in three
@@ -177,14 +192,12 @@ places:
 None of these changes a verdict today. They are greens that could not have been
 reds, which is the kind of result this suite is built not to report.
 
-### Updated 2026-09-28
-
-**The third row is closed.** The gap was in how the harness injects a kill, not
-in anything about this server: DATA-12 and DATA-13 signalled without confirming
-what they signalled. They now make CHAOS-01's before and after checks, through
-helpers the three cases share, so every case that kills the server process in
-place confirms the kill landed, whatever process serves NFS (#99). The rule is
-in the test plan's harness design section. Run twice each on `gke-w1` on
-2026-09-28 (`w1-pr99-*` and, after review made the after check stop the case,
-`w1-pr99r2-*`): all six passed, each observing the serving process before the
-kill and a new pid serving after it.
+**2026-09-28. The third row is closed.** The gap was in how the harness injects
+a kill, not in anything about this server: DATA-12 and DATA-13 signalled without
+confirming what they signalled. They now make CHAOS-01's before and after
+checks, through helpers the three cases share, so every case that kills the
+server process in place confirms the kill landed, whatever process serves NFS
+(#99). The rule is in the test plan's harness design section. Run twice each on
+`gke-w1` on 2026-09-28 (`w1-pr99-*` and, after review made the after check stop
+the case, `w1-pr99r2-*`): all six passed, each observing the serving process
+before the kill and a new pid serving after it.

@@ -2,16 +2,18 @@
 
 Author: mikebz@
 Created: 2026-09-21
-Updated: 2026-09-27
+Updated: 2026-10-01
 
 
 **Found:** 2026-09-20, GKE cluster `gke-w2`, Kubernetes v1.37.0-gke.3165000,
 server `nfs-provisioner:15.3` (Ganesha V15.3-mb), when CHAOS-01 reported blocked
 on a mechanism that had worked every time it was tried the day before.
 
-**Severity:** the mechanism it breaks is the one F-026 introduced to unblock
-three cases, and it breaks it in the worst available way: it works on a cluster
-the suite has already run against and fails on a fresh one.
+**Severity:** none for the cluster, medium for the suite, none for the
+deployment. The mechanism it breaks is the one F-026 introduced to unblock
+three cases, and it breaks it in the worst available way: it works on a server
+the suite has just created and fails on one that has been up for a day, which is
+the state every real cluster is in.
 
 ### What happened
 
@@ -44,7 +46,7 @@ pid 1  nfs-provisioner  CapEff a90425ff
 pid 20 ganesha.nfsd     CapEff a80425ff
 ```
 
-### Which server it happens to
+### Why
 
 Four observations, and the first explanation they suggest is wrong:
 
@@ -99,7 +101,7 @@ in the container's. The two were never the same number and were never compared.
 The pid now recorded is the node's, which is the one CHAOS-01's before-and-after
 check is about.
 
-### What it implies
+### What it means for the system under test
 
 For the harness: a mechanism that reads another process's `/proc` is not
 verified by one that worked. This one failed only on servers that had been up
@@ -114,15 +116,22 @@ their own credentials, and the upstream v4.0.8 build does it while holding the
 full capability set, so it is not even a property of the local build. The
 lesson is about where the harness looks, not about what the server does.
 
-### Updated 2026-09-27
+### Open
 
-**The node-side read works in the condition that broke the in-pod one.** When the
-2026-09-25 whole-suite runs started, both server pods had been up for about four
-days: `gke-w1` for 4d1h and `gke-w2` for 4d8h. That is exactly the long-lived
-server this entry found unreadable from inside the pod. Preflight discovery
-through the node agent named `ganesha.nfsd` and its node pid on both, and again
-after every one of the suite's restarts. In six runs, CHAOS-01's before-and-after
-check confirmed a replaced process six times. No discovery reported blocked.
+What makes a server's file descriptors unreadable from inside its pod, and when.
+The four observations under Why do not separate the candidates. Discovery no
+longer depends on the answer, since it reads the process from the node.
+
+### What changed after this was written
+
+**2026-09-27. The node-side read works in the condition that broke the in-pod
+one.** When the 2026-09-25 whole-suite runs started, both server pods had been
+up for about four days: `gke-w1` for 4d1h and `gke-w2` for 4d8h. That is exactly
+the long-lived server this entry found unreadable from inside the pod. Preflight
+discovery through the node agent named `ganesha.nfsd` and its node pid on both,
+and again after every one of the suite's restarts. In six runs, CHAOS-01's
+before-and-after check confirmed a replaced process six times. No discovery
+reported blocked.
 
 The capability difference in the table above shows up in the server's own log
 on `gke-w2`, at every start: `lower_my_caps … CAP_SYS_RESOURCE was successfully

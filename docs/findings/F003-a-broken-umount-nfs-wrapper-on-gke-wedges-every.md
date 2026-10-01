@@ -2,16 +2,16 @@
 
 Author: mikebz@
 Created: 2026-09-14
-Updated: 2026-09-14
+Updated: 2026-10-01
 
 
 **Found:** 2026-09-10, GKE worker nodes, reviewing
 [PR #3](https://github.com/mikebz/nfs-verification/pull/3) against a live
 cluster.
 
-**Severity:** high, and it is not the harness. Every pod holding an NFS mount
-stays `Terminating` forever, on any workload, whether or not this suite is
-running.
+**Severity:** high for the cluster, medium for the suite, high for the
+deployment, and it is not the harness. Every pod holding an NFS mount stays
+`Terminating` forever, on any workload, whether or not this suite is running.
 
 ### What happened
 
@@ -40,10 +40,11 @@ mount mode no matter how it was invoked, so `umount.nfs <mountpoint>` was read
 as a mount with no mount point, and failed. Nothing on the unmount path could
 ever succeed.
 
-### The fix applied to the nodes
+### What changed
 
-Handle the unmount case before the wrapper's mount logic, preserving `argv[0]`
-with `exec -a`:
+Nothing in this repository. The fix was applied to the nodes: handle the
+unmount case before the wrapper's mount logic, preserving `argv[0]` with
+`exec -a`:
 
 ```sh
 if [[ "$(basename "$0")" == *"umount"* ]]; then
@@ -61,11 +62,11 @@ Exit status 16 and "not mounted" are treated as success on purpose: an unmount
 of something already gone is the outcome the caller wanted. With this in place
 kubelet unmounts finished in under two seconds.
 
-### What it means for the suite
+### What it means for the system under test
 
-Nothing in this repository changed. The value of the finding is that the
-symptom is indistinguishable, from inside a case, from the failures this plan
-is actually hunting:
+The defect is in a node image's mount helper, not in NFS. The value of the
+finding is that the symptom is indistinguishable, from inside a case, from the
+failures this plan is actually hunting:
 
 - Pods stuck `Terminating` are what teardown treats as "the node has stopped
   answering" (F-001), so a run against an affected cluster reports leaked
