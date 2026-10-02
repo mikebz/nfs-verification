@@ -48,7 +48,11 @@ the identity machinery works as the deployment must rely on it working:
 - that a client the export never named is refused, or, if it is not, that the
   suite says so in the strongest terms and proves it by reading the bytes
   (SEC-05),
-- that one client's state is not confused with another's (SEC-06, SEC-07),
+- that the server records a node under that node's own address in each address
+  family (SEC-06), because that address is what an export rule is matched
+  against,
+- that two pods sharing one client identity do not take each other's state
+  (SEC-07),
 - that the identity Kubernetes thinks it is granting is the one the volume
   actually honours (SEC-03),
 - and that the capability set the server runs with is the one it declared
@@ -68,7 +72,7 @@ suite runs**; no case existed yet, and nothing here is a result.
 | Probe | What came back | What it decides |
 |---|---|---|
 | The server's socket table while a pod held the share | The peer is the **node's** address on a reserved port, never the pod's | The client is the node, shared by every pod on it. That fact underlies SEC-04 and SEC-07, though neither reads it: it is why a node is the unit whose state can be lost. Recorded as F-019 |
-| The same table, address family | The listener is IPv6 and an IPv4 client arrives **IPv4-mapped** | SEC-06 has a subject even on a single-stack cluster, and it is a record rather than an assertion there |
+| The same table, address family | The listener is IPv6 and an IPv4 client arrives **IPv4-mapped** | Every IPv4 client of this server already arrives in the form SEC-06 is about. On a single-stack cluster SEC-06 skips, so there the mapped form is a record: F-019, and what SEC-08 reads |
 | An unrelated pod, no claim, mounting another claim's export | **Granted**, read-write, and the other tenant's bytes came back | SEC-05 has an outcome to report and the report is red |
 | The same mount with `CAP_SYS_ADMIN` only | Refused with `EACCES`, for a **client-side** reason | The trap this phase most needs to avoid: a probe that cannot mount reports a refusal that never happened |
 | Ownership of a root-written file, server side and client side | uid 0 on the server, **nobody** on the client | The export does not squash; the client cannot map the owner *name*. SEC-02 read this as squash, which was a finding against this suite; it now asks whether a `chown` is permitted, which the idmapper cannot answer wrongly. F-021 |
@@ -162,12 +166,12 @@ group:
 
 | Case | Assertion | Source & Basis |
 |---|---|---|
-| **SEC-01** | ✅ A file written as an ordinary uid reads back with that uid on the writer's own client and on a second node; wrong on both is the server, wrong only on the reader is that node's idmapper | NFSv4 owner strings and the client idmapper; [F-021](findings.md) |
+| **SEC-01** | ✅ A file written as an ordinary uid and gid reads back with both on the writer's own client and on a second node; wrong on both is the server, wrong only on the reader is that node's idmapper | NFSv4 owner strings and the client idmapper; [F-021](findings.md) |
 | **SEC-02** | ✅ An owner is refused a `chown` of its own file after a `chmod` control succeeds; root's `chown` gets the same answer on every client, asserted against `-root-squash` where stated and recorded otherwise | [`chown(2)`](https://man7.org/linux/man-pages/man2/chown.2.html); [F-021](findings.md) |
 | **SEC-03** | ✅ A non-root pod declaring `fsGroup` writes behind a 0770 directory owned by the gid where an identical pod without it is refused; files already on the share keep their ownership; startup overhead against that control pod within `slo.FSGroupStartOverhead` | Kubernetes [security context](https://kubernetes.io/docs/tasks/configure-pod-container/security-context/) (`fsGroup`); [F-020](findings.md) |
 | **SEC-04** | ✅ When node B's pod leaves gracefully and its mount goes, node B's lock is freed, node A's is still held, and node A still reads and writes, all asked from a third node | RFC 8881 Section 8 (state per client) and Section 9 (locking); [`fcntl(2)`](https://man7.org/linux/man-pages/man2/fcntl.2.html) |
 | **SEC-05** | ✅ A node with no claim on an export is refused a mount of it, attributably by the server; granted fails with the owner's checksum as evidence; an unproven instrument reports blocked | Plan Section 3.6, "rejected, not silently granted"; [F-018](findings.md) |
-| **SEC-06** | ✅ On a dual-stack cluster, the peer the server records over each family is the node's own address in that family, and whether the IPv4 client arrived mapped is recorded; skips on a single-stack cluster | Kernel [client-identifier](https://docs.kernel.org/filesystems/nfs/client-identifier.html); [F-019](findings.md) |
+| **SEC-06** | ✅ On a dual-stack cluster, the peer the server records over each family is the node's own address in that family, and whether the IPv4 client arrived mapped is recorded; skips on a single-stack cluster | Plan Appendix A, the IPv4 and IPv4-mapped normalization report; [F-019](findings.md) |
 | **SEC-07** | ✅ Two pods on one node hold disjoint ranges and one is force-deleted: its range frees within the lease bound, the survivor's stays held and writable, and a replacement is granted the freed range | Kernel [client-identifier](https://docs.kernel.org/filesystems/nfs/client-identifier.html); RFC 8881 Section 9; [F-001](findings.md) |
 | **SEC-08** | ✅ Records the mount's security flavour and transport, whether a transport-secured port is offered, whether a pod with no claim reaches 2049, and the NetworkPolicies in the server's namespace; fails only if none could be read | Plan Appendix B; [`nfs(5)`](https://man7.org/linux/man-pages/man5/nfs.5.html) `sec=`, `xprtsec=`; [F-018](findings.md) |
 | **SEC-09** | ✅ Every declared capability reached the server's container: fails on one neither the server process nor PID 1 holds, and on a privileged container; records one the server gave up; judged from the preflight record | [`capabilities(7)`](https://man7.org/linux/man-pages/man7/capabilities.html), [`open_by_handle_at(2)`](https://man7.org/linux/man-pages/man2/open_by_handle_at.2.html); [F-026](findings.md), [F-027](findings.md) |
@@ -176,13 +180,13 @@ group:
 
 ### SEC-01: Ownership preserved across pods
 
-A pod running as an ordinary uid writes a file on one node; a pod on another
-node reads the ownership back. The point is not that `stat` agrees with itself,
-it is that permissions on an RWX share mean the same thing to every consumer of
-it: an ownership that changes between clients makes every mode bit on the volume
-a function of where the pod was scheduled. NFSv4 carries owners as strings rather
-than integers, so the crossing is a real translation and not a copy, and the
-classic failure is a client whose idmapper substitutes nobody.
+A pod running as an ordinary uid and gid writes a file on one node; a pod on
+another node reads the ownership back. The point is not that `stat` agrees with
+itself, it is that permissions on an RWX share mean the same thing to every
+consumer of it: an ownership that changes between clients makes every mode bit
+on the volume a function of where the pod was scheduled. NFSv4 carries owners as
+strings rather than integers, so the crossing is a real translation and not a
+copy, and the classic failure is a client whose idmapper substitutes nobody.
 
 The case separates the two failures it can see, because they belong to different
 people. Ownership is read first **on the writer's own client**, where a wrong id
@@ -191,12 +195,13 @@ second client. Wrong on both is the server; wrong only on the reader is that
 node's idmapper.
 
 - **Steps**:
-  1. Pin a writer running as an ordinary uid to node A and a root reader to
-     node B, on one claim.
+  1. Pin a writer running as an ordinary uid and gid to node A and a root
+     reader to node B, on one claim.
   2. From the reader, make a directory the ordinary user can write to. If root
      cannot, report blocked: that is export configuration.
-  3. Write a file there as the ordinary uid. If that is refused, report blocked.
-  4. Read ownership on the writer's own client.
+  3. Write a file there as the ordinary user. If that is refused, report
+     blocked.
+  4. Read the uid and gid on the writer's own client.
   5. Read it again on node B, and attribute a wrong id to the server or to
      node B's idmapper as above.
 
@@ -728,7 +733,12 @@ behind each lesson are in its finding. What the design took from them:
   be one client, not two. The case as shipped in PR #57 asserts that the peer the
   server records over each family is the node's own address in that family, and
   says why it cannot assert one identity from a client (SEC-06 in Section 7).
-  The description was corrected; the case did not change.
+  The description was corrected, and so were Sections 1, 2 and 6, which said
+  the same thing or that the case records on a single-stack cluster, where it
+  skips. Test plan Section 3.6's SEC-06 row said "client identity consistent"
+  and was amended to name what the case verifies and what it does not, since
+  what a case verifies belongs there, as DATA-11's narrowing did (doc 05). The
+  case did not change.
 
 ## 12. Open
 
@@ -747,7 +757,8 @@ behind each lesson are in its finding. What the design took from them:
 - Kernel
   [client-identifier](https://docs.kernel.org/filesystems/nfs/client-identifier.html):
   one lease per client per server, shared by every mount and every pod on the
-  node. SEC-06 and SEC-07 are written around it.
+  node. SEC-07 is written around it, and SEC-06 says why it cannot assert one
+  client ID across address families.
 - [`nfs(5)`](https://man7.org/linux/man-pages/man5/nfs.5.html) for `sec=`,
   `xprtsec=`, `soft` and the reserved source port, which is the identity the
   server sees.
