@@ -1,20 +1,25 @@
-# 04: Grace, lock reclaim, and making a failover observable (Historical Step 4 Design)
+# 04: Grace and lock reclaim: making a failover observable
 
 Author: mikebz@
 Created: 2026-09-10
 Updated: 2026-10-02
-Status: **superseded.** Serves as the historical record of delivery step 4 ([PR #8](https://github.com/mikebz/nfs-verification/pull/8)).
-Its ongoing design ownership has been consolidated: CHAOS-05, CHAOS-06, and CHAOS-07
-are maintained in [`03-chaos-operations-design.md`](03-chaos-operations-design.md),
-and OBS-03, which OBS-02 was folded into, is maintained in [`06-observability-design.md`](06-observability-design.md).
-Serves: Step 4 historical record. Requirements in [`01-test-plan.md`](01-test-plan.md) Sections 3.3, 3.5 and 3.8.
+Status: superseded. CHAOS-05, CHAOS-06, CHAOS-07, OBS-02 and OBS-03 shipped in
+delivery step 4 ([PR #8](https://github.com/mikebz/nfs-verification/pull/8)).
+CHAOS-05 through CHAOS-07 are now designed in
+[`03-chaos-operations-design.md`](03-chaos-operations-design.md), and OBS-03,
+which OBS-02 was folded into, in
+[`06-observability-design.md`](06-observability-design.md). This document is
+kept as the record of step 4's decisions.
+Serves: CHAOS-05, CHAOS-06, CHAOS-07, OBS-02 and OBS-03, delivery
+[step](storage_terms.md#step-phase-category-section-test-group-delivery-group) 4.
+Requirements in [`01-test-plan.md`](01-test-plan.md) Sections 3.3, 3.5 and 3.8.
 Builds on [`03-chaos-operations-design.md`](03-chaos-operations-design.md).
 
 ---
 
 ## 1. Why this phase exists
 
-[Step](storage_terms.md#step-phase-category-section-test-group-delivery-group) 3 could injure the server and time the outage. It could not see grace.
+Step 3 could injure the server and time the outage. It could not see grace.
 
 The [grace period](storage_terms.md#grace-period) is the dominant term in every
 recovery number this suite reports, and a server re-entering it looks like a
@@ -24,50 +29,38 @@ server was enforcing a protocol guarantee or had wedged.
 
 Done means: entry and exit with timestamps or an honest statement that this
 server publishes neither; every lock held before a failover still held after it;
-no new lock granted while grace is in force; five [failovers](storage_terms.md#failover) each recovering on
-their own; and a failover that reaches an operator with a timestamp and a
-duration.
+no new lock granted while grace is in force; five
+[failovers](storage_terms.md#failover) each recovering on their own; and a
+failover that reaches an operator with a timestamp and a duration.
 
-## 2. What shipped
+## 2. The five cases
 
-- **The grace observer**: reads the server pod's log stream through the
+All five shipped in step 4. Their walkthroughs, with steps, are in the documents
+that own them now and are not repeated here.
+
+| Case | Assertion | Designed now in |
+|---|---|---|
+| **CHAOS-05** | ✅ Five failovers in a row: each recovers on its own, no grace re-entry loop | [Doc 03](03-chaos-operations-design.md#chaos-05-repeated-failovers-5-cycles) |
+| **CHAOS-06** | ✅ Locks across a failover: every lock held before is held after, read from both ends | [Doc 03](03-chaos-operations-design.md#chaos-06-lock-reclaim-across-failover-whole-file-and-byte-range) |
+| **CHAOS-07** | ✅ A new lock attempted during grace: no grant inside the window, a grant after it | [Doc 03](03-chaos-operations-design.md#chaos-07-new-lock-attempted-during-grace) |
+| **OBS-02** | ✅ A failover an operator can see, with a timestamp and a duration | [Doc 06](06-observability-design.md#obs-02-failover-event-is-observable) |
+| **OBS-03** | ✅ Grace entry and exit are measurable | [Doc 06](06-observability-design.md#obs-03-grace-period-entry-and-exit) |
+
+## 3. The grace observer and the lock probe
+
+Step 4 added two pieces of harness. Their shapes are in
+`pkg/framework/grace.go` and `pkg/framework/probes.go`, with the bounds in
+`pkg/slo/slo.go`, and are not repeated here.
+
+- **The grace observer** reads the server pod's log stream through the
   Kubernetes API, with the timestamp the container runtime attached to each
   line, and classifies lines as grace entry or exit. Previous-container logs are
   read too, so a restart in place keeps its pre-fault half.
-- **The lock probe**: a second client attempting a new lock once per second,
+- **The lock probe** is a second client attempting a new lock once per second,
   logging outcomes in step 3's `OK|ERR <index> <epoch>` format on its own
   filesystem, so one parser serves both.
-- **Five cases originally shipped**: CHAOS-05 (five failovers, per-cycle assertions),
-  CHAOS-06 (locks across a failover, read from both ends), CHAOS-07 (a new lock attempted
-  during grace), OBS-02 (a failover an operator can see), and OBS-03 (grace entry and
-  exit measurable). *(Note: OBS-02 and OBS-03 design ownership is now consolidated in
-  [`06-observability-design.md`](06-observability-design.md)).*
-- **Gate naming**: the chaos prefix marks a case that injures the server whatever
-  plan section it comes from, which is why OBS-02 and OBS-03 carry it.
 
-## 3. What these five cases assert
-
-The conventions they share with every other case, including the guard band for
-two clocks, are in [`01-test-plan.md`](01-test-plan.md) Section 4.1. What is
-specific here:
-
-| # | Assertion | Where it comes from, and how it is checked |
-|---|---|---|
-| 1 | Grace is read from what the server publishes, never inferred from a stalled client | A stalled client is the symptom this phase exists to tell apart from grace. The observer's only input is the log stream |
-| 2 | A case that needs a window and has none reports [blocked](storage_terms.md#blocked-and-blocks) | Grace begins when the server restarts, which is later than the fault by an unknown amount, so a window derived from the configured value ends late and would report a lawful grant as a violation. CHAOS-07 reports blocked; OBS-03 is the case that fails for the missing signal ([F-008](findings.md)) |
-| 3 | [Reclaim](storage_terms.md#reclaim) is asserted from both ends: the holder still holds, and a second client is still refused | A client that has lost its lock does not find out until it uses it, so the holder alone proves nothing |
-| 4 | Every lock the case took, not one | The SLO row is 100%, and a case that checks one lock cannot report a fraction |
-| 5 | A new lock granted during grace fails, whether the server granted it deliberately or lost the state that would have refused it | RFC 8881 Section 8.4.2 bars new state during grace. Neither reading is acceptable, and the case does not have to tell them apart to fail |
-| 6 | A refusal during an outage is not evidence that grace was enforced | Every attempt fails while the server is down, for the ordinary reason. The window is established from the server's own signal first, and only then is the probe read inside it |
-| 7 | Repeated failover is measured per cycle | A total that fits inside a wall clock proves nothing if one cycle inside it took four minutes |
-| 8 | Grace entered more than once per failover is a re-entry loop, and a finding about the server | It looks like a hung client ([triage step 3](01-test-plan.md#43-triage-runbook)). The count is per cycle, and the failure message says grace re-entry, not client stall |
-| 9 | No case asserts how grace is implemented | Every assertion reads a log line's existence, a lock outcome or a Kubernetes object |
-
-## 4. What the observer and the probe produce
-
-The shapes are in `pkg/framework/grace.go` and `pkg/framework/probes.go`, with
-the bounds in `pkg/slo/slo.go`, and are not repeated here. What matters about
-them:
+What matters about what they produce:
 
 - **Entry and exit are two observations, not one interval with a duration.** An
   entry with no exit is the re-entry symptom and has to be representable.
@@ -84,70 +77,104 @@ them:
 - **The per-cycle record attributes grace entries to one cycle.** The count
   means nothing summed over a run.
 
-The probe log reuses step 3's format, so one parser serves both.
+### Configuration and lifecycle
 
-## 5. Decisions
+- **Flags**: `-grace-enter-pattern` and `-grace-exit-pattern`, set together or
+  not at all; everything else is step 3's. A pattern that does not compile is a
+  startup failure, not a case that quietly observes nothing.
+- **Unreadable logs**: a server whose logs cannot be read is reported as such,
+  not as a server that never entered grace.
+- **Not configurable**: the probe rate, the guard band, the number of failover
+  cycles, and the grace exit bound of two [lease](storage_terms.md#lease)
+  periods.
+- **Nothing new is deployed and no new privilege is needed.** One lifecycle
+  addition: the probe and every lock holder are registered for stop before the
+  case can fail, so a failing case does not leave a lock held by a pod that
+  outlives it.
 
-**Grace is read from the log stream through the Kubernetes API.** It is the only
-channel guaranteed present, timestamped by something other than the process under
-test, and readable without knowing anything about the deployment beyond which
-pods it runs. The server's metrics endpoint was rejected for this phase: nothing
-in the Kubernetes API states which port serves metrics or what the metric is
-called, so it would need two flags and a convention, and the convention would be
-a guess in the middle of an observability assertion.
+## 4. What these cases assert
 
-**Timestamps come from the container runtime, not from the server's own
-wording.** Log formats differ per implementation and change between versions;
-runtime timestamps do not. A suite that parsed each server's format would be
-asserting on the thing it is least able to keep working.
+Conventions shared across the suite, including the guard band for two clocks,
+live in [`01-test-plan.md`](01-test-plan.md) Section 4.1. What is specific to
+these five cases:
 
-**Classification tests for exit first.** A line mentioning grace is an exit if it
-also carries a word that negates or ends it, and an entry otherwise. The ordering
-matters: common exit wordings are the entry wording with a negation in front, and
-a rule that tested for entry first would report a re-entry loop on a healthy
-server. `-grace-enter-pattern` and `-grace-exit-pattern` replace the rule for a
-server it does not cover, and are set together or not at all: one alone would
-observe every failover entering grace and never leaving it. A server that says
-nothing at all fails OBS-03, and that is a finding rather than a harness gap,
-because an operator on that deployment cannot see grace either. F-008 in
-[`findings.md`](findings.md) is exactly this, met in the field.
+| # | Assertion | Source & Basis |
+|---|---|---|
+| 1 | Grace is read from what the server publishes, never inferred from a stalled client | A stalled client is the symptom this phase exists to tell apart from grace. The observer's only input is the log stream |
+| 2 | A case that needs a window and has none reports [blocked](storage_terms.md#blocked-and-blocks) | Grace begins when the server restarts, which is later than the fault by an unknown amount, so a window derived from the configured value ends late and would report a lawful grant as a violation. CHAOS-07 reports blocked; OBS-03 is the case that fails for the missing signal ([F-008](findings.md)) |
+| 3 | [Reclaim](storage_terms.md#reclaim) is asserted from both ends: the holder still holds, and a second client is still refused | A client that has lost its lock does not find out until it uses it, so the holder alone proves nothing |
+| 4 | Every lock the case took, not one | The SLO row is 100%, and a case that checks one lock cannot report a fraction |
+| 5 | A new lock granted during grace fails, whether the server granted it deliberately or lost the state that would have refused it | RFC 8881 Section 8.4.2 bars new state during grace. Neither reading is acceptable, and the case does not have to tell them apart to fail |
+| 6 | A refusal during an outage is not evidence that grace was enforced | Every attempt fails while the server is down, for the ordinary reason. The window is established from the server's own signal first, and only then is the probe read inside it |
+| 7 | Repeated failover is measured per cycle | A total that fits inside a wall clock proves nothing if one cycle inside it took four minutes |
+| 8 | Grace entered more than once per failover is a re-entry loop, and a finding about the server | It looks like a hung client ([triage step 3](01-test-plan.md#43-triage-runbook)). The count is per cycle, and the failure message says grace re-entry, not client stall |
+| 9 | No case asserts how grace is implemented | Every assertion reads a log line's existence, a lock outcome or a Kubernetes object |
 
-**The two clocks here are unavoidable**, because the window is stamped by the
-kubelet on the server's node and the probe by a [client pod](storage_terms.md#client-and-client-pod), which is on a
-different node by construction. This is the case that produced the guard band
-convention in the test plan: the band narrows the window at both ends, a
-boundary grant is a note rather than a failure, and the direction is deliberate,
-missing a marginal violation rather than filing a lawful one. A measured offset
-was rejected as a number nobody checks, against a constant a reviewer can argue
-with.
+## 5. Key decisions
 
-**The probe asserts on grants, never on refusals.** During an outage every
-attempt fails for the ordinary reason that the server is not there. The
-protocol guarantee is that no *grant* lands inside the observed window and that a
-grant does land after it.
-
-**Un-reclaimed state is held through the window.** A server may [lift grace early](storage_terms.md#reclaim_complete-and-early-end-of-grace)
-once it concludes no further clients will reclaim (test plan Section 3.8), so
-CHAOS-07 holds a client with outstanding state across the whole case. Without
-that, the case passes vacuously.
-
-**Five cycles, each injected only after the previous recovered.** Injecting on a
-fixed cadence regardless of recovery measures overlapping failovers, which is a
-different case and not what the plan asks for here. The plan's phrase is five
-cycles inside ten minutes; on the `default` [profile](storage_terms.md#profile) grace alone is ninety seconds,
-so five lawful recoveries do not fit and a case asserting the wall clock would
-fail with no defect present. Per-cycle assertions replace it.
-
-**The re-entry check degrades rather than blocking the case.** Where grace is
-observable, more than one entry per cycle fails CHAOS-05. Where it is not, the
-case still asserts five recoveries and says the check was unavailable. One
-missing signal should produce one failure, not four.
-
-**OBS-02 was decided here (now authoritatively maintained in [`06-observability-design.md`](06-observability-design.md))**:
-it accepts any timestamped channel an operator can reach, and records which one answered.
-It fails on silence and on a pair of timestamps that cannot be turned into a duration.
-It does not fail when only Kubernetes answered, but it says so: a restart count tells
-an operator a pod restarted, not that NFS failed over.
+- **Grace is read from the log stream through the Kubernetes API**: It is the
+  only channel guaranteed present, timestamped by something other than the
+  process under test, and readable without knowing anything about the deployment
+  beyond which pods it runs. The server's metrics endpoint was rejected for this
+  phase: nothing in the Kubernetes API states which port serves metrics or what
+  the metric is called, so it would need two flags and a convention, and the
+  convention would be a guess in the middle of an observability assertion.
+- **Timestamps come from the container runtime, not from the server's own
+  wording**: Log formats differ per implementation and change between versions;
+  runtime timestamps do not. A suite that parsed each server's format would be
+  asserting on the thing it is least able to keep working.
+- **Classification tests for exit first**: A line mentioning grace is an exit if
+  it also carries a word that negates or ends it, and an entry otherwise. The
+  ordering matters: common exit wordings are the entry wording with a negation in
+  front, and a rule that tested for entry first would report a re-entry loop on a
+  healthy server. `-grace-enter-pattern` and `-grace-exit-pattern` replace the
+  rule for a server it does not cover, and are set together or not at all: one
+  alone would observe every failover entering grace and never leaving it. A
+  server that says nothing at all fails OBS-03, and that is a finding rather than
+  a harness gap, because an operator on that deployment cannot see grace either.
+  [F-008](findings.md) is exactly this, met in the field. *(**2026-10-02**:
+  [F-022](findings.md) narrowed F-008. That server does announce grace, in the
+  NFS daemon's own log file rather than the container log stream the observer
+  reads, so OBS-03 fails there for a logging configuration, not a silent server.
+  Reading that file is open,
+  [#123](https://github.com/mikebz/nfs-verification/issues/123).)*
+- **The two clocks here are unavoidable**: The window is stamped by the kubelet
+  on the server's node and the probe by a
+  [client pod](storage_terms.md#client-and-client-pod), which is on a different
+  node by construction. This is the case that produced the guard band convention
+  in the test plan: the band narrows the window at both ends, a boundary grant is
+  a note rather than a failure, and the direction is deliberate, missing a
+  marginal violation rather than filing a lawful one. A measured offset was
+  rejected as a number nobody checks, against a constant a reviewer can argue
+  with.
+- **The probe asserts on grants, never on refusals**: During an outage every
+  attempt fails for the ordinary reason that the server is not there. The
+  protocol guarantee is that no *grant* lands inside the observed window and that
+  a grant does land after it.
+- **Un-reclaimed state is held through the window**: A server may
+  [lift grace early](storage_terms.md#reclaim_complete-and-early-end-of-grace)
+  once it concludes no further clients will reclaim (test plan Section 3.8), so
+  CHAOS-07 holds a client with outstanding state across the whole case. Without
+  that, the case passes vacuously.
+- **Five cycles, each injected only after the previous recovered**: Injecting on
+  a fixed cadence regardless of recovery measures overlapping failovers, which is
+  a different case and not what the plan asks for here. The plan's phrase is five
+  cycles inside ten minutes; on the `default`
+  [profile](storage_terms.md#profile) grace alone is ninety seconds, so five
+  lawful recoveries do not fit and a case asserting the wall clock would fail
+  with no defect present. Per-cycle assertions replace it.
+- **The re-entry check degrades rather than blocking the case**: Where grace is
+  observable, more than one entry per cycle fails CHAOS-05. Where it is not, the
+  case still asserts five recoveries and says the check was unavailable. One
+  missing signal should produce one failure, not four.
+- **OBS-02 accepts any timestamped channel an operator can reach**: It records
+  which one answered. It fails on silence and on a pair of timestamps that cannot
+  be turned into a duration. It does not fail when only Kubernetes answered, but
+  it says so: a restart count tells an operator a pod restarted, not that NFS
+  failed over.
+- **The chaos prefix marks a case that injures the server**: whatever plan
+  section it comes from, which is why this phase gave OBS-02 and OBS-03 the
+  prefix. Since reversed; see Section 8.
 
 ## 6. Whole-file locks, and what was deferred
 
@@ -166,65 +193,66 @@ which also carries the byte-range half of DATA-05.
 Bringing `locktool` forward into this phase was rejected: it would have doubled a
 phase that already needed a design document.
 
-## 7. Configuration
+## 7. What real runs taught
 
-`-grace-enter-pattern` and `-grace-exit-pattern`, set together or not at all;
-everything else is step 3's. A pattern that does not compile is a startup
-failure, not a case that quietly observes nothing. A server whose logs are
-unreadable is reported as such rather than as a server that never entered grace.
-
-Not configurable: the probe rate, the guard band, the number of failover cycles,
-and the grace exit bound of two [lease](storage_terms.md#lease) periods.
-
-Nothing new is deployed and no new privilege is needed. One lifecycle addition:
-the probe and every lock holder are registered for stop before the case can fail,
-so a failing case does not leave a lock held by a pod that outlives it.
+- **[F-008](findings.md) (Grace unannounced)**: The provisioner this project runs
+  against announces no grace in its container log stream, so CHAOS-07 reports
+  blocked and OBS-03 fails on it. The design anticipated this (Section 5,
+  exit-first classification); the finding records what it costs a run.
+  [F-022](findings.md) refined it: the daemon's own log file carries the lines.
+  [F-030](findings.md) is the reader for that file. Since 2026-10-02, CHAOS-07
+  runs and OBS-03 passes on both reference deployments.
 
 ## 8. What changed after this was written
 
-- **Consolidation by test groups.** To align design documentation directly with the
-  test groups implemented in `test/e2e/`, the contents of this document have been
-  consolidated into single authoritative domain homes:
-  - The chaos cases (CHAOS-05, CHAOS-06, CHAOS-07) and lock reclaim architecture are
-    now authoritatively maintained in [`03-chaos-operations-design.md`](03-chaos-operations-design.md).
-  - The observability cases (OBS-02, OBS-03) and runtime grace log observation are
-    now authoritatively maintained in [`06-observability-design.md`](06-observability-design.md).
-  This document is preserved as the historical design record for delivery step 4.
-- **Observability design consolidated.** OBS-02 and OBS-03 were originally
-  designed here alongside grace and failover. Design ownership of all
-  observability cases (OBS-01 through OBS-07) was consolidated into
-  [`06-observability-design.md`](06-observability-design.md) so that all health,
-  telemetry and capacity verification is unified in one document.
-- **OBS-01's requirement moved.** This doc listed "asserting that an alert fired"
+- **Consolidation by test group (2026-09-14, [PR #59](https://github.com/mikebz/nfs-verification/pull/59))**:
+  design documentation was aligned with the test groups in `test/e2e/`. CHAOS-05,
+  CHAOS-06 and CHAOS-07, with the lock reclaim design, moved to
+  [`03-chaos-operations-design.md`](03-chaos-operations-design.md). OBS-02 and
+  OBS-03, with grace log observation, moved to
+  [`06-observability-design.md`](06-observability-design.md), which owns every
+  observability case, OBS-01 through OBS-07. This document stays as the record
+  of step 4.
+- **OBS-01's requirement moved**: this doc listed "asserting that an alert fired"
   as OBS-01's requirement, needing a monitoring stack the suite does not deploy.
   [`06-observability-design.md`](06-observability-design.md) replaced that: the
   suite verifies what the deployment publishes, never the alert rules.
-- **The metrics channel opened.** Left open here, taken up by OBS-07 in step 7.
-- **Node and network faults** were "step 5" here. After the delivery order was
-  resorted to close out one plan section at a time, they are step 10.
-- **F-008 happened.** The provisioner this project runs against announces no
-  grace at all, so CHAOS-07 reports blocked and OBS-03 fails on it. The design
-  anticipated this; the field entry records what it costs a run.
-- **2026-10-02: the log stream is no longer the only channel, and the runtime is
-  no longer the only clock** ([F-030](findings.md), [PR #135](https://github.com/mikebz/nfs-verification/pull/135)).
-  F-008's server did announce grace, in its own log file, so the observer now
-  reads that file through the node agent as well. A file carries no runtime
-  timestamp, which reverses the section 5 decision that timestamps come from
-  the container runtime: each line's own is read, and believed only once the
-  file's newest line agrees with its modification time. The classifier also
-  reads only the words near "grace" now, because the exit-first rule read whole
-  lines and misread the server's. OBS-02, decided in section 5, is folded into
-  OBS-03: it accepted any timestamped channel, and a pod delete always produced
-  one. [`06-observability-design.md`](06-observability-design.md) section 6,
-  OBS-03, has the decisions.
+- **The metrics channel opened**: left open here, taken up by OBS-07 in step 7.
+- **Node and network faults moved to step 10**: they were "step 5" here. After
+  the delivery order was resorted to close out one plan section at a time, they
+  are step 10.
+- **The chaos prefix rule was reversed**: the suite now sorts strictly by
+  category. OBS-02 and OBS-03 are `TestObsFailoverIsObservable` and
+  `TestObsGracePeriodIsObservable`, run under `make test-obs`, and that target
+  injects faults ([README](../README.md#running);
+  [`05-data-path-and-locktool-design.md`](05-data-path-and-locktool-design.md),
+  Section 7).
+- **The server's log file became a channel, and OBS-02 was folded into OBS-03
+  (2026-10-02, [PR #135](https://github.com/mikebz/nfs-verification/pull/135))**:
+  F-008's server did announce grace, in its own log file
+  ([F-022](findings.md), [F-030](findings.md)), so the observer now reads that
+  file through the node agent as well. A file has no runtime timestamp, which
+  reverses the Section 5 decision that timestamps come from the container
+  runtime. Each line's own timestamp is used, and only once the file's newest
+  line agrees with its modification time. The classifier now reads only the
+  words near "grace", because the exit-first rule read whole lines and misread
+  the server's. OBS-02, decided in Section 5, accepted any timestamped channel,
+  and a pod delete always produced one, so it was folded into OBS-03.
+  [`06-observability-design.md`](06-observability-design.md) Section 6, OBS-03,
+  has the decisions.
 
-Still open: a deployment that reports grace only through metrics fails OBS-03 for
-a reason that is half harness gap; the wording rule is the one
-implementation-specific part of an otherwise portable observer; and whether a
-sub-file range reclaims differently from a whole-file one on any real server.
-There is no protocol reason it should, and if it does, that is a finding.
+## 9. Open
 
-## 9. Sources
+- A deployment that reports grace only through metrics fails OBS-03 for a
+  reason that is half harness gap. (*2026-10-02*: a grace record kept only in a
+  log file, as [F-022](findings.md) found, is now read; see Section 8.)
+- The wording rule is the one implementation-specific part of an otherwise
+  portable observer.
+- Whether a sub-file range reclaims differently from a whole-file one on any real
+  server. There is no protocol reason it should, and if it does, that is a
+  finding.
+
+## 10. Sources
 
 - [RFC 8881](https://www.rfc-editor.org/rfc/rfc8881.html) Section 8.4.2, Server
   Failure and Recovery, for grace and reclaim, and Section 9, File Locking and
