@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-10
-Updated: 2026-10-01
+Updated: 2026-10-02
 Version: 1.0 (v1 scope)
 
 This is the requirements and delivery document: what gets verified, why, the
@@ -280,7 +280,7 @@ How the data is read, and what a green run does and does not establish, is in
 | SEC-03 | ✅ Pod `securityContext.fsGroup` interaction | Group access correct; no unexpected chown storm on large volumes |
 | SEC-04 | ✅ Client state isolation between nodes | One node losing its mount must not discard another node's locks, and the survivor must still be able to read and write. NFSv4.1 holds state per client, so if two nodes are one client to the server, either one's departure takes the other's state with it and the survivor is never told. Derived from an open report that connections carrying no client identity are treated as the proxy host; the access-control half of that report is measured end to end by SEC-05, which attempts the mount rather than inspecting addresses. **High priority: Kubernetes always inserts a Service.** |
 | SEC-05 | ✅ Denied client attempts mount | Rejected, not silently granted |
-| SEC-06 | ✅ Dual-stack client identity (**skipped unless both IP families present**) | Client identity consistent. Derived from an open report of inconsistent normalization between IPv4 and IPv4-mapped IPv6. |
+| SEC-06 | ✅ Dual-stack client identity (**skipped unless both IP families present**) | The server records one node under that node's own address in each family, and whether an IPv4 client arrives IPv4-mapped is recorded: that normalized address is what an export rule is matched against. Whether the server holds one NFSv4 client ID across the two families is **not asserted**: nothing a client can observe tells one ID from two, and the case says so rather than claiming it. Derived from an open report of inconsistent normalization between IPv4 and IPv4-mapped IPv6. |
 | SEC-07 | ✅ Two pods with identical client identity after restart | No state collision; no lost locks |
 | SEC-08 | ✅ Data path confidentiality, stated | Records whether NFS traffic on the shared pod network is cleartext, and whether any transport encryption is in effect. This is a **finding, not a pass/fail**: with no dedicated storage network, cleartext NFS shares a fabric with tenant traffic, and that fact belongs in the record whether or not it is acceptable. |
 | SEC-09 | ✅ Server pod under the platform's admission policy | Server runs with the capability set it actually needs and no more. A file-handle-based backend needs `CAP_DAC_READ_SEARCH` for `open_by_handle_at(2)`; if the policy strips it, file handle operations fail with EPERM. Conditional on the backend using that path. |
