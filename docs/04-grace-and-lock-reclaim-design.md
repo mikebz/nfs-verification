@@ -131,7 +131,12 @@ these five cases:
   alone would observe every failover entering grace and never leaving it. A
   server that says nothing at all fails OBS-03, and that is a finding rather than
   a harness gap, because an operator on that deployment cannot see grace either.
-  [F-008](findings.md) is exactly this, met in the field.
+  [F-008](findings.md) is exactly this, met in the field. *(**2026-10-02**:
+  [F-022](findings.md) narrowed F-008. That server does announce grace, in the
+  NFS daemon's own log file rather than the container log stream the observer
+  reads, so OBS-03 fails there for a logging configuration, not a silent server.
+  Reading that file is open,
+  [#123](https://github.com/mikebz/nfs-verification/issues/123).)*
 - **The two clocks here are unavoidable**: The window is stamped by the kubelet
   on the server's node and the probe by a
   [client pod](storage_terms.md#client-and-client-pod), which is on a different
@@ -222,8 +227,8 @@ phase that already needed a design document.
 
 ## 9. Open
 
-- A deployment that reports grace only through metrics fails OBS-03 for a reason
-  that is half harness gap.
+- A deployment that reports grace only through metrics, or only in a log file as
+  [F-022](findings.md) found, fails OBS-03 for a reason that is half harness gap.
 - The wording rule is the one implementation-specific part of an otherwise
   portable observer.
 - Whether a sub-file range reclaims differently from a whole-file one on any real
