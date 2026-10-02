@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-10
-Updated: 2026-10-01
+Updated: 2026-10-02
 
 End-to-end verification of NFS RWX persistent volumes on Kubernetes.
 
@@ -320,12 +320,16 @@ every recovery number above, and a server re-entering it looks like a hung
 client: step 3 of the test plan's [triage
 runbook](docs/01-test-plan.md#43-triage-runbook) says how to tell them apart.
 
-It is read from the server's own log stream through the Kubernetes API, with the
-timestamp the container runtime attached to each line rather than one parsed out
-of the server's wording: log formats differ per implementation and change
-between versions, runtime timestamps do not. Lines are classified as entry or
-exit by a word rule, and `-grace-enter-pattern` with `-grace-exit-pattern`
-states the wording for a server the rule does not cover.
+It is read from two places, both the server's own words. Its log stream through
+the Kubernetes API, with the timestamp the container runtime attached to each
+line. And the log file its serving process writes, found from the paths on that
+process's command line and read through the node agent, which is where both
+reference deployments announce grace ([F-030](docs/findings.md)); a file's lines
+carry the server's own timestamps, believed only once the file's newest line
+agrees with its modification time. Lines are classified as entry or exit by a
+word rule applied to the words near "grace", and `-grace-enter-pattern` with
+`-grace-exit-pattern` states the wording for a server the rule does not cover.
+What was read is kept in the case's bundle as `grace.txt`.
 
 Nothing infers grace from the fact that a client stalled, and no case derives a
 window from the configured grace value anchored at the fault: grace begins when
@@ -333,7 +337,7 @@ the server restarts, which is later than the fault by an unknown amount, so a
 derived window ends after the real one and would report a lawful lock grant as a
 protocol violation. A case that needs a window and has none reports **blocked**.
 
-The window is stamped by the kubelet on the server's node and a lock attempt by
+The window is stamped on the server's node and a lock attempt by
 the client pod that made it, so the two come from different clocks. The window is
 narrowed by `slo.ClockSkewGuard` at each end, and only a grant unambiguously
 inside it is reported as a violation.

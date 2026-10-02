@@ -2,14 +2,16 @@
 
 Author: mikebz@
 Created: 2026-09-11
-Updated: 2026-10-01
+Updated: 2026-10-02
 Status: partly shipped. OBS-04 shipped in delivery step 2b
-([PR #4](https://github.com/mikebz/nfs-verification/pull/4)), OBS-02 and OBS-03
-in step 4 ([PR #8](https://github.com/mikebz/nfs-verification/pull/8)), and
+([PR #4](https://github.com/mikebz/nfs-verification/pull/4)), OBS-03 in step 4
+([PR #8](https://github.com/mikebz/nfs-verification/pull/8)), and
 OBS-06 and OBS-07 in step 7 ([PR #29](https://github.com/mikebz/nfs-verification/pull/29),
-[PR #74](https://github.com/mikebz/nfs-verification/pull/74)). OBS-01 and OBS-05
-are designed, for step 7; OBS-01's behavioral half needs a fault from step 10.
-Serves: OBS-01 through OBS-07, the complete Observability
+[PR #74](https://github.com/mikebz/nfs-verification/pull/74)). OBS-02 is folded
+into OBS-03 ([PR #133](https://github.com/mikebz/nfs-verification/pull/133)).
+OBS-01 and OBS-05 are designed, for step 7; OBS-01's behavioral half needs a
+fault from step 10.
+Serves: OBS-01 and OBS-03 through OBS-07 (OBS-03 now carrying OBS-02), the complete Observability
 [test group](storage_terms.md#step-phase-category-section-test-group-delivery-group).
 Requirements in [`01-test-plan.md`](01-test-plan.md) Section 3.5.
 Builds on [`03-chaos-operations-design.md`](03-chaos-operations-design.md),
@@ -37,15 +39,16 @@ produces it for every workload is not evidence about NFS. So **no case passes on
 a signal its own fault produced**, and every case **fails rather than skipping**
 when the deployment publishes nothing. That is F-008's rule applied uniformly.
 
-Done means an operator on this deployment can answer seven operational questions
+Done means an operator on this deployment can answer six operational questions
 from telemetry data that actually exists:
 1. Does the availability signal represent NFS reachability rather than just container death? (OBS-01)
-2. Is a [failover](storage_terms.md#failover) event observable with a timestamp and measurable duration? (OBS-02)
-3. Are [grace period](storage_terms.md#grace-period) entry and exit observable and bounded? (OBS-03)
-4. Does an unmountable share surface an actionable warning on the [client pod](storage_terms.md#client-and-client-pod)? (OBS-04)
-5. Is the server container's memory ceiling declared and its working set readable? (OBS-05)
-6. Does volume capacity and usage agree between the control plane and pod `df`, and does quota apply? (OBS-06)
-7. Do the server's own metrics survive a restart? (OBS-07)
+2. Does a [failover](storage_terms.md#failover) leave a record the server wrote, with a timestamp and a
+   duration, and are [grace period](storage_terms.md#grace-period) entry and exit observable and bounded?
+   (OBS-03, which OBS-02 was folded into)
+3. Does an unmountable share surface an actionable warning on the [client pod](storage_terms.md#client-and-client-pod)? (OBS-04)
+4. Is the server container's memory ceiling declared and its working set readable? (OBS-05)
+5. Does volume capacity and usage agree between the control plane and pod `df`, and does quota apply? (OBS-06)
+6. Do the server's own metrics survive a restart? (OBS-07)
 
 ## 2. What the outside channel covers, and what it cannot
 
@@ -56,13 +59,13 @@ events and metrics suggests, and the boundary decides what these cases can hones
 
 | Question an operator asks | Answered from outside (control plane)? | Telemetry channel / condition |
 |---|---|---|
-| Is the process running; did it restart, and when | Yes | Container status (`ServerStartedAfter`) / Events (OBS-02) |
+| Is the process running; did it restart, and when | Yes | Container status and Events; evidence only, since a pod delete produces both on its own |
 | How much CPU and memory is it using | Yes | Kubelet stats summary (OBS-05) |
 | Was it OOMKilled | Yes, when a limit exists | Container termination reason |
 | Did a client fail to mount a volume, and why | Yes | Kubelet Events on client pod (OBS-04) |
 | How full is a volume | Yes, when driver implements stats | Kubelet stats summary (OBS-06) |
 | **Is the server answering NFS at all** | **No** (lifecycle only) | Service readiness probe targeting port 2049 / health probe (OBS-01) |
-| **Is it in grace, did reclaims succeed** | **No** (invisible to kubelet) | Container runtime log stream (OBS-03) |
+| **Is it in grace, did reclaims succeed** | **No** (invisible to kubelet) | The server's log stream, and the log file its serving process writes, read through the node agent (OBS-03) |
 | **NFS operation and error rates (READ, WRITE, LOCK)** | **No** (invisible to control plane) | Server metrics endpoint (OBS-07; conditional on server publishing series) |
 | **Clients holding state, locks held, open files** | **No** (invisible to control plane) | Server metrics endpoint (OBS-07; conditional on server publishing series) |
 | **Which export is busy or failing** | **No** | Server-side logs or per-export metrics |
@@ -90,16 +93,16 @@ requiring an in-cluster monitoring stack:
    Returns per-volume capacity, used bytes, and available bytes with the kubelet's own
    timestamp and PVC reference (`OBS-06`), and container memory working set from the same
    call (`OBS-05`). No node agent or scraper is needed: it is a standard `GET` using client-go.
-2. **The Grace Log Stream Observer** (`pkg/framework/grace.go`):
-   Streams server container logs via the Kubernetes Pod API (`PodLogOptions{Timestamps: true}`).
-   Crucially, timestamps come from the container runtime (RFC 3339 nano), not from the server's
-   own log formatting. It classifies lines into grace entry or exit using an exit-first heuristic,
-   reading previous-container logs across pod restarts (`OBS-03`).
-3. **The Event Poller and Container Status Reader** (`pkg/framework/events.go` and `pkg/framework/status.go`):
-   Polls Kubernetes `v1.Event` objects associated with client pods (`WaitPodEvent` in `events.go`)
-   for `Warning` events such as `FailedMount` and `FailedAttachVolume` (`OBS-04`). For failover traces
-   (`OBS-02`), reads container restart timestamps via `ServerStartedAfter` (`pkg/framework/status.go`)
-   and server logs (`ServerLog`).
+2. **The Grace Observer** (`pkg/framework/grace.go`, `pkg/framework/serverlogfile.go`):
+   Reads two channels and merges them. The server containers' log streams via the Kubernetes Pod
+   API (`PodLogOptions{Timestamps: true}`), stamped by the container runtime, including the previous
+   container's across a restart. And the log files the serving process writes, read through the
+   node agent and stamped by the server itself, which is where both reference deployments announce
+   grace (F-030). Section 6, OBS-03, has how the files are found and why their timestamps are
+   believed (`OBS-03`, and the window CHAOS-05 and CHAOS-07 read).
+3. **The Event Poller** (`pkg/framework/events.go`):
+   Polls Kubernetes `v1.Event` objects associated with client pods (`WaitPodEvent`)
+   for `Warning` events such as `FailedMount` and `FailedAttachVolume` (`OBS-04`).
 4. **The Server Metrics Pod Proxy Reader** (`pkg/framework/metrics.go`):
    Accessed via the API server's pod proxy (`/api/v1/namespaces/<ns>/pods/<pod>:<port>/proxy/metrics`).
    Implements a minimal text scanner for the Prometheus exposition format, checking series
@@ -112,7 +115,8 @@ requiring an in-cluster monitoring stack:
    rather than container lifecycle alone (`OBS-01`).
 
 Both proxy subresources (`nodes/proxy` and `pods/proxy`) represent direct control-plane
-access. Neither runs a scraper inside the cluster, and neither execs into nodes.
+access. Neither runs a scraper inside the cluster, and neither execs into nodes. The grace
+observer's file channel is the one exception, and section 6 says why it needs the node agent.
 
 ## 4. The uniform verdict contract
 
@@ -126,15 +130,13 @@ An earlier draft mixed skip, fail, and block arbitrarily; the suite establishes 
 | The case could not create its own precondition: the workload storm did not move the reading within budget | **blocked**, with the number reached | The case failed to set up its test condition; reporting pass would be vacuous |
 
 F-008 is the guiding precedent: when a server never announces grace, OBS-03 fails rather
-than skips, so the lack of visibility is highlighted as a deployment defect. Similarly,
-when an export reports the entire backing disk rather than the claim's provisioned size,
+than skips, so the lack of visibility is highlighted as a deployment defect. F-030 is its
+corollary: the reference server did announce grace, in a file the suite was not reading, so a
+channel the suite could not read is named in the failure message rather than read as silence.
+Similarly, when an export reports the entire backing disk rather than the claim's provisioned size,
 OBS-06 fails on its quota assertion (F-009).
 
-Where secondary channel errors occur during multi-channel discovery (e.g., `ServerLog` returning
-an error in OBS-02 while container start status is available), the harness logs the channel failure
-as a diagnostic while asserting that at least one primary operator channel recorded the event.
-
-## 5. What these seven cases assert
+## 5. What these six cases assert
 
 Shared conventions (one clock per measurement, waiting past the target, bounds from `pkg/slo`)
 live in [`01-test-plan.md`](01-test-plan.md) Section 4.1. The table below covers the assertions
@@ -143,8 +145,7 @@ specific to the Observability test group:
 | Case | Assertion | Source & Basis |
 |---|---|---|
 | **OBS-01** | The deployment declares an active readiness probe targeting the NFS service, and endpoints drop when NFS is unavailable | Kubernetes probes and Service endpoints. An active probe targeting port 2049 or an NFS health check is verified in configuration (Step 7); behavioral drop of endpoints when frozen is verified with a fault in Step 10 |
-| **OBS-02** | ✅ Failover leaves a timestamped trace an operator can find; duration is measurable | Container start status (`ServerStartedAfter`) and server log stream (`ServerLog`). Fails if neither provides a timestamped record after the fault |
-| **OBS-03** | ✅ Grace period entry and exit are observable with timestamps; duration is bounded by `2 * LeaseSeconds` ([why](storage_terms.md#reclaim_complete-and-early-end-of-grace)) | RFC 8881 Section 8.4.2. Read from runtime log timestamps; fails if unannounced (F-008) |
+| **OBS-03** | ✅ A failover leaves a record the server wrote: grace entry and exit after the fault, each timestamped, so the failover has a duration; that duration is bounded by `2 * LeaseSeconds` ([why](storage_terms.md#reclaim_complete-and-early-end-of-grace)), and grace is entered once. Carries OBS-02 | RFC 8881 Section 8.4.2. Read from the server's log stream and log file; fails if unannounced (F-008), naming any channel it could not read (F-030) |
 | **OBS-04** | ✅ A mount failure on a client pod surfaces as an actionable `Warning` Event naming the volume; pod does not report Ready | Kubelet mount logic. Fails if no mount failure event arrives within budget, if the event omits the volume name, or if container status reports Ready. Wording of the failure cause is logged as a diagnostic warning because kubelet controls event phrasing |
 | **OBS-05** | The server container declares a memory limit, and its working set is readable and moves under load | Kubelet Summary API. Fails if no limit is declared; never manufactures an OOMKill |
 | **OBS-06** | ✅ Kubelet volume usage agrees with pod `df` within tolerance, both move with writes, and quota applies | CSI `NodeGetVolumeStats` capability. Kubelet stats summary (`pkg/framework/kubeletstats.go`) compared against pod `df -P -k` (`pkg/framework/volumeusage.go`). Fails if unannounced or if reported total is backing disk (F-009) |
@@ -167,27 +168,51 @@ specific to the Observability test group:
     correctness. The configuration check verifies that an active probe exists to detach dead containers;
     the Step 10 fault verifies the drop behavior under process hang.
 
-### OBS-02: Failover event is observable
-- **Problem**: When a failover happens, an operator needs to see when it started, when it finished,
-  and how long it took, using standard operational tooling.
+### OBS-03: A failover leaves a record, and grace is bounded (OBS-02 folded in)
+- **Problem**: An operator who arrives after a failover needs to find when it happened and how long
+  it took, from something the server wrote. A server re-entering grace looks like a hung client (test
+  plan [Section 4.3](01-test-plan.md#43-triage-runbook), step 3), so the same record has to show
+  grace entered once and left.
 - **Design**:
-  - Monitors two timestamped channels: the server container's log stream (`ServerLog`) and container
-    restart status (`ServerStartedAfter`).
-  - Asserts that at least one channel provides timestamped evidence after the fault. Fails on complete silence.
-  - Records the client's measured outage duration against the time since the fault.
-  - Logs whether the trace came from Kubernetes container restart status or NFS daemon logs.
-
-### OBS-03: Grace period entry and exit
-- **Problem**: A server re-entering grace looks like a hung client (test plan
-  [Section 4.3](01-test-plan.md#43-triage-runbook), step 3). A suite cannot evaluate failover
-  correctness without observing grace.
-- **Design**:
-  - Uses `pkg/framework/grace.go` to stream logs via the Kubernetes Pod API.
-  - Evaluates lines using container runtime timestamps, bypassing unstandardized server log formats.
-  - Applies an **exit-first classification rule**: a line containing "grace" is checked for exit/lift
-    keywords first, because common exit phrases contain the entry phrase prefixed with a negation.
-  - Asserts grace entry is observed, followed by grace exit within `2 * LeaseSeconds`.
-  - Fails if the server announces no grace (F-008).
+  - Deletes the server pod with a lock held, so grace has state to reclaim, and asserts the ordinary
+    recovery.
+  - Polls the grace observer until grace has been entered and left after the fault. Entry is the
+    record that the server restarted (RFC 8881 Section 8.4.2.1 starts grace at restart), exit is it
+    accepting new state again, and the window between them is the failover's duration as the server
+    saw it.
+  - Asserts the window has a duration, is inside `2 * LeaseSeconds`, and that grace was entered once.
+    Reports where the record was found next to the outage the client saw.
+  - Fails if the server announces no grace (F-008), and says whether it was silence or an entry with
+    no exit, with every source read and every channel that could not be.
+  - Needs the node agent, by capability, because the file channel reads a node.
+- **Decisions taken while implementing it** (2026-10-02,
+  [issue #19](https://github.com/mikebz/nfs-verification/issues/19),
+  [issue #123](https://github.com/mikebz/nfs-verification/issues/123)):
+  - **OBS-02 is folded in.** As shipped, OBS-02 passed on any timestamped line in the container's
+    stream or on any container start after the fault, and the fault guaranteed both: on every run the
+    trace was the supervisor's start-up banner. It could not fail. What it asked for, a failover with a
+    timestamp and a duration, is the grace record OBS-03 already reads, so the two are one case.
+  - **Events and container start times are evidence, never the verdict.** A pod delete produces both
+    on its own, so they show the StatefulSet controller working rather than NFS failing over, and
+    Events are best effort and expire after an hour.
+  - **The server's log file is read, through the node agent, live.** Both reference deployments write
+    grace to `/export/ganesha.log` and nothing about it to the stream. The file is found from the
+    serving process's own command line: every absolute path it names is a candidate, and a candidate is
+    a log when its lines carry timestamps the suite reads. No implementation's option syntax is parsed.
+    It is read when the case observes, because its content is what the case's fault just changed.
+  - **Reversed while implementing: the files the process holds open for append.** That was the plan,
+    and Ganesha holds no descriptor on its log between writes, so it found nothing (F-030).
+  - **The server's own timestamps are believed only after a check.** This reverses doc 04 section 5,
+    which took timestamps from the container runtime because server formats differ. A file has no
+    runtime timestamp, so each line's own is read (RFC 3339, or Ganesha's day-first default), and the
+    file's newest line must agree with the file's modification time. A local time zone or a
+    month-first date fails that check and is named as a gap; it cannot shift the window silently.
+  - **The classifier reads only the words near "grace", per clause, without identifiers.** Read whole,
+    Ganesha's progress line during grace carries two exit words, and one grace period read as an
+    immediate exit and a re-entry (F-030). The real lines are a unit test.
+  - **One announcement seen on both channels counts once**, so a server that logs to a file and its
+    stream does not read as a re-entry loop.
+  - **What was read goes into the bundle on a pass as well as a failure**, as `grace.txt`.
 
 ### OBS-04: Client mount failure surfaces as actionable Event
 - **Problem**: When a client pod cannot mount an NFS volume, kubelet retries in the background while
@@ -364,6 +389,8 @@ specific to the Observability test group:
   keeps the harness cloud-agnostic.
 - **API server proxy subresources (`nodes/proxy`, `pods/proxy`)**: Allows the harness to remain an
   out-of-cluster client-go application. Avoids deploying in-cluster scrapers, daemonsets, or exec helpers.
+  OBS-03 is the exception: the file the server announces grace in is reachable only through the node
+  agent the chaos cases already use (F-027, F-030).
 - **Live movement over static presence**: A frozen counter or a hardcoded gauge looks healthy to a
   simple query. Every numerical case (OBS-05, OBS-06) proves the gauge actually moves in response to writes.
 - **No new Capabilities**: Missing telemetry or absent quotas must report `fail` or `blocked`. Adding
@@ -391,8 +418,11 @@ What these cases return is test plan
 behind each lesson are in its finding. What the design took from them:
 
 - **[F-008](findings.md) (Grace unannounced)**: The reference `nfs-server-provisioner` logs no grace
-  entry or exit messages in its container log stream, so OBS-03 fails rather than skipping, which is
-  Section 1's rule, and CHAOS-07 reports blocked rather than deriving a window of its own.
+  entry or exit messages in its container log stream, so OBS-03 failed rather than skipping, which is
+  Section 1's rule, and CHAOS-07 reported blocked rather than deriving a window of its own.
+- **[F-030](findings.md) (Grace was announced, in a file)**: the same servers write grace to
+  `/export/ganesha.log`, and the classifier misread their wording once it was read. The observer now
+  reads the file and the classifier reads phrases (section 6, OBS-03).
 - **[F-009](findings.md) (Missing per-volume quota)**: On shared exports without filesystem quotas,
   both kubelet and `df` report the backing filesystem rather than the claim, so OBS-06 fails its quota
   check there, and percentage-based capacity alerts on such a deployment would be alerting on the

@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-14
-Updated: 2026-10-01
+Updated: 2026-10-02
 
 
 > **Refined by [F-022](F022-the-servers-grace-announcements-were-in-a-log-file.md).**
@@ -15,6 +15,10 @@ Updated: 2026-10-01
 > unchanged: OBS-03 failed and CHAOS-07 reported blocked in all six runs, because
 > neither reads that file. Whether a case may read it is the open question in
 > F-022 and #21.
+>
+> **And by [F-030](F030-reading-the-servers-log-file-took-two-corrections.md),
+> 2026-10-02.** The harness now reads that file, so the verdicts above no longer
+> hold for current code: CHAOS-07 ran and passed on both deployments.
 
 **Found:** 2026-09-11, GKE cluster `gke-w1`, Kubernetes v1.37, StorageClass `nfs`
 backed by `cluster.local/nfs-provisioner-nfs-server-provisioner:v4.0.8`. First

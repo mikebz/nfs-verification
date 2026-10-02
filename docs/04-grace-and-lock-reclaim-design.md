@@ -2,11 +2,11 @@
 
 Author: mikebz@
 Created: 2026-09-10
-Updated: 2026-10-01
+Updated: 2026-10-02
 Status: **superseded.** Serves as the historical record of delivery step 4 ([PR #8](https://github.com/mikebz/nfs-verification/pull/8)).
 Its ongoing design ownership has been consolidated: CHAOS-05, CHAOS-06, and CHAOS-07
 are maintained in [`03-chaos-operations-design.md`](03-chaos-operations-design.md),
-and OBS-02 and OBS-03 are maintained in [`06-observability-design.md`](06-observability-design.md).
+and OBS-03, which OBS-02 was folded into, is maintained in [`06-observability-design.md`](06-observability-design.md).
 Serves: Step 4 historical record. Requirements in [`01-test-plan.md`](01-test-plan.md) Sections 3.3, 3.5 and 3.8.
 Builds on [`03-chaos-operations-design.md`](03-chaos-operations-design.md).
 
@@ -205,6 +205,18 @@ so a failing case does not leave a lock held by a pod that outlives it.
 - **F-008 happened.** The provisioner this project runs against announces no
   grace at all, so CHAOS-07 reports blocked and OBS-03 fails on it. The design
   anticipated this; the field entry records what it costs a run.
+- **2026-10-02: the log stream is no longer the only channel, and the runtime is
+  no longer the only clock** ([F-030](findings.md), [PR #133](https://github.com/mikebz/nfs-verification/pull/133)).
+  F-008's server did announce grace, in its own log file, so the observer now
+  reads that file through the node agent as well. A file carries no runtime
+  timestamp, which reverses the section 5 decision that timestamps come from
+  the container runtime: each line's own is read, and believed only once the
+  file's newest line agrees with its modification time. The classifier also
+  reads only the words near "grace" now, because the exit-first rule read whole
+  lines and misread the server's. OBS-02, decided in section 5, is folded into
+  OBS-03: it accepted any timestamped channel, and a pod delete always produced
+  one. [`06-observability-design.md`](06-observability-design.md) section 6,
+  OBS-03, has the decisions.
 
 Still open: a deployment that reports grace only through metrics fails OBS-03 for
 a reason that is half harness gap; the wording rule is the one

@@ -1548,8 +1548,8 @@ func requireDurabilitySet(t *testing.T, n int, what string) {
 //
 // It is a TestData case, not a TestChaos one, even though it kills the server.
 // The suite sorts strictly by category, and the precedent is already in the
-// tree: PROV-07 and PROV-08 take the server down under TestProv, OBS-02 and
-// OBS-03 inject a failover under TestObs. After this case `make test-data`
+// tree: PROV-07 and PROV-08 take the server down under TestProv, OBS-03 and
+// OBS-07 inject a failover under TestObs. After this case `make test-data`
 // injects faults, which a reader of the Makefile should not have to infer.
 //
 // Steps:

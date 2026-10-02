@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-13
-Updated: 2026-10-01
+Updated: 2026-10-02
 Status: shipped, [PR #57](https://github.com/mikebz/nfs-verification/pull/57).
 SEC-03 to SEC-09 landed in delivery step 8; SEC-01 shipped in Step 2
 ([PR #3](https://github.com/mikebz/nfs-verification/pull/3)) and SEC-02 in Step 2b
@@ -546,8 +546,9 @@ Three things the first runs taught that the design did not anticipate:
 - What bound a `fsGroup` mount should be held to when a chown storm *is*
   happening has no ratified value. The case measures against a control pod on the
   same claim rather than inventing one, and the number belongs in `pkg/slo`.
-- The grace log channel in Section 2's last row may unblock OBS-03 and CHAOS-07;
-  F-022 says where it is. That belongs to step 7 and step 10, not here.
+- ~~The grace log channel in Section 2's last row may unblock OBS-03 and
+  CHAOS-07.~~ **Settled 2026-10-02**: the harness reads that file now, through the
+  node agent ([F-030](findings.md)), and CHAOS-07 runs.
 
 ## 12. Sources
 
