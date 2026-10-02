@@ -26,6 +26,8 @@
 #                                 ==ENDFILE; size in bytes, mtime in seconds
 #                                 since the epoch, path as the process names it
 #   ==ENDFILE
+#   ==BADFILE <err>               in place of ==ENDFILE: the read failed after
+#                                 the header, and what came before is partial
 #   ==ERROR <what> <err>          something that could not be read
 #   ==END                         the reader ran to completion
 #
@@ -75,10 +77,20 @@ echo "$args" | while IFS= read -r arg; do
 			continue
 		fi
 		echo "==FILE $(echo "$size" | tr -d ' ') $mtime $p"
-		tail -c "$bytes" "$f"
+		# The header is already out, so a failed read cannot become an
+		# ==ERROR line: the caller would take it for the file's last line.
+		# It closes the file with ==BADFILE instead, which tells the caller
+		# to throw away what it has, since tail may have printed part of the
+		# file before it failed. Its message is dropped for the same reason.
+		tail -c "$bytes" "$f" 2>/dev/null
+		rc=$?
 		# A file that does not end in a newline would otherwise put the end
 		# marker on the end of its last line.
 		echo
+		if [ "$rc" -ne 0 ]; then
+			echo "==BADFILE tail exited $rc"
+			continue
+		fi
 		echo "==ENDFILE"
 	done
 done

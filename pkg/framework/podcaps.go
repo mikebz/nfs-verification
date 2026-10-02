@@ -283,7 +283,7 @@ func readServerPID(ctx context.Context, agent *Agent, pod *corev1.Pod, sp Server
 	readCtx, cancel := context.WithTimeout(ctx, procStatusTimeout)
 	defer cancel()
 	out, err := agent.RunScript(readCtx, sp.Node, "proc-status.sh",
-		"caps-"+strings.ToLower(Cfg().RunID), "/proc", strconv.Itoa(pid))
+		runScriptID("caps-"), "/proc", strconv.Itoa(pid))
 	if err != nil {
 		return ProcessCaps{}, fmt.Errorf("reading pid %d on %s: %w", pid, sp.Node, err)
 	}

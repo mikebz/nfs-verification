@@ -95,7 +95,7 @@ func ServerLogFiles(ctx context.Context, c *Client, agent *Agent, since time.Tim
 			continue
 		}
 		readCtx, cancel := context.WithTimeout(ctx, serverLogReadTimeout)
-		out, err := agent.RunScript(readCtx, sp.Node, "server-log.sh", "serverlog-"+strings.ToLower(Cfg().RunID),
+		out, err := agent.RunScript(readCtx, sp.Node, "server-log.sh", runScriptID("serverlog-"),
 			"/proc", strconv.Itoa(sp.PID), strconv.Itoa(serverLogTailBytes))
 		cancel()
 		if err != nil {
@@ -152,6 +152,12 @@ func parseServerLogRead(out string) serverLogRead {
 		case cur != nil && line == "==ENDFILE":
 			cur.body = strings.Join(body, "\n")
 			r.files = append(r.files, *cur)
+			cur, body = nil, nil
+		case cur != nil && strings.HasPrefix(line, "==BADFILE"):
+			// What was read is partial, and a partial log reads as a server
+			// that went quiet, so it is dropped rather than parsed.
+			r.errors = append(r.errors, fmt.Sprintf("%s: %s, so what was read of it is not used",
+				cur.path, strings.TrimSpace(strings.TrimPrefix(line, "==BADFILE"))))
 			cur, body = nil, nil
 		case cur != nil:
 			body = append(body, line)

@@ -82,8 +82,18 @@ In [PR #135](https://github.com/mikebz/nfs-verification/pull/135):
 The first OBS-03 runs (`w{1,2}-issue19-TestObsGracePeriodIsObservable-20261002-030639`)
 failed with the file unread and said why in the failure message: the run ID was
 long enough that `"listener-"` plus it exceeded the 64-character script id the
-process discovery builds. That limit predates this change and applies to every
-case that names the serving process. With shorter run IDs the reads succeed.
+process discovery builds. That limit predated this change and applied to every
+helper that names a node-side script copy after the run: process discovery, the
+log-file read, the capability read and the peer socket table. Those ids now come
+from `runScriptID` in `pkg/framework/scripts.go`, which uses the run ID as it is
+when it fits and a digest of it when it does not, so no valid run ID can stop a
+node read before it starts.
+
+The review of #135 found that and one more: the file reader ignored `tail`'s
+exit status. A read that failed after the header would have handed the parser
+part of a log, or none, as a complete file, which reads as a server that went
+quiet. A failed read now closes the file with `==BADFILE`, and the parser drops
+what it had and reports the file as a gap.
 
 ### What it means for the system under test
 

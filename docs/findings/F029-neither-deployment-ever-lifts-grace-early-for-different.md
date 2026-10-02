@@ -2,7 +2,13 @@
 
 Author: mikebz@
 Created: 2026-09-27
-Updated: 2026-10-01
+Updated: 2026-10-02
+
+> **2026-10-02:** narrowed by
+> [F-031](F031-a-chaos-05-cycle-went-over-the-recovery-budget-and-the-extra.md).
+> The first cycle over the budget to keep a timeline restarted in 3s. Its extra
+> time came after grace ended, before the client's next write, not in the
+> restart this entry blames for the 119s cycle below.
 
 
 **Found:** 2026-09-26, reading both servers' `/export/ganesha.log` after three

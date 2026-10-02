@@ -560,6 +560,24 @@ at a time per cluster:
   entry read per cycle, which is the first time its re-entry check has read
   anything (#21). Five cycles took 9m1s and 9m5s.
 
+After review of [#135](https://github.com/mikebz/nfs-verification/pull/135) made
+two changes, the same three cases ran again on both clusters. Script ids made
+from the run ID are now bounded, and a failed file read is reported instead of
+being parsed. The flags and the profile were unchanged.
+
+- **OBS-03** passed on both under the long run ID that had failed before
+  (`w1-issue19-TestObsGracePeriodIsObservable-20261002-033749`,
+  `w2-…-033751`): grace 1m30s on both, outage 1m45s and 1m43s.
+- **CHAOS-07** passed on both (`w1-issue19-TestChaosNewLockDuringGrace-20261002-033749`,
+  `w2-…-033751`): first new lock 5s after grace on both.
+- **CHAOS-05** passed on `gke-w1`
+  (`w1-issue19-TestChaosRepeatedFailover-20261002-033749`, 9m5s) and **failed**
+  on `gke-w2` (`w2-…-033751`): cycle 4 recovered in 2m1s against the 2m0s budget. The server
+  restarted in 3s and held grace for 90s, and the writer resumed 28s after
+  grace ended. F-029 had blamed the restart for overshoots like this, but here
+  the time came after grace (F-031). Grace was read once per cycle in all ten
+  cycles, and every committed record survived.
+
 ### 5.3 Delivery steps
 
 One step is one pull request, or a short run of them. Later steps depend only on

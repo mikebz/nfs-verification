@@ -95,6 +95,42 @@ func TestRunScriptRejectsABadID(t *testing.T) {
 	}
 }
 
+// TestRunScriptIDFitsAnyRunID exists because a run ID has no length limit and
+// a script id does. Built by concatenation, a long run ID failed every node
+// read in OBS-03 before any log was looked at, and the case reported a missing
+// server log rather than a naming problem.
+//
+// Steps:
+//  1. A short run ID is used as it is, lowercased, so the copy on the node
+//     names its run.
+//  2. A run ID too long to fit, or holding a character a script id cannot,
+//     still gives an id RunScript accepts.
+//  3. Two long run IDs that differ only past the point a truncation would cut
+//     give different ids, so two runs on one node do not share a copy.
+func TestRunScriptIDFitsAnyRunID(t *testing.T) {
+	restore := *Cfg()
+	t.Cleanup(func() { *Cfg() = restore })
+
+	Cfg().RunID = "W1-i19-obs03-032512"
+	if got := runScriptID("serverlog-"); got != "serverlog-w1-i19-obs03-032512" {
+		t.Errorf("a short run ID gave %q, want it used as it is", got)
+	}
+
+	long := "w1-issue19-TestObsGracePeriodIsObservable-20261002-030639"
+	ids := map[string]bool{}
+	for _, run := range []string{long + "-a", long + "-b", "run id with spaces"} {
+		Cfg().RunID = run
+		id := runScriptID("serverlog-")
+		if err := CheckScriptID(id); err != nil {
+			t.Errorf("run ID %q gave an id RunScript refuses: %v", run, err)
+		}
+		ids[id] = true
+	}
+	if len(ids) != 3 {
+		t.Errorf("three run IDs gave %d distinct ids: %v", len(ids), ids)
+	}
+}
+
 // busyboxFlockOptions is every option busybox's flock applet parses
 // (util-linux/flock.c). util-linux accepts a superset, which is why a
 // portability defect here cannot be caught by running the script: the

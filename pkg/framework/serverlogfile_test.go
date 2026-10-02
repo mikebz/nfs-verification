@@ -44,6 +44,9 @@ var ganeshaLogNewest = time.Date(2026, 10, 1, 20, 45, 11, 0, time.UTC)
 //     Grace_Period as the reference server's does, to be no log and no gap.
 //  5. Run it for a pid with no command line, and for one that is not a
 //     number, and require an error from each rather than an empty read.
+//  6. Run it with a tail that prints part of a file and fails, and require
+//     every file to be dropped and named in an error: a partial log would
+//     read as a server that went quiet.
 func TestServerLogScriptReadsTheFilesTheProcessNames(t *testing.T) {
 	restore := *Cfg()
 	t.Cleanup(func() { *Cfg() = restore })
@@ -118,6 +121,24 @@ func TestServerLogScriptReadsTheFilesTheProcessNames(t *testing.T) {
 		if r := parseServerLogRead(string(out)); len(r.errors) == 0 {
 			t.Errorf("pid %q read as %+v rather than an error\n%s", pid, r, out)
 		}
+	}
+
+	bin := t.TempDir()
+	fakeTail := "#!/bin/sh\necho '01/10/2026 20:43:40 [main] partial line'\necho 'tail: read error' >&2\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(bin, "tail"), []byte(fakeTail), 0o755); err != nil {
+		t.Fatalf("writing the failing tail: %v", err)
+	}
+	cmd := exec.Command("sh", script, root, "940409", "1048576")
+	cmd.Env = append(os.Environ(), "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	out, err = cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("running the reader with a failing tail: %v: %s", err, out)
+	}
+	failed := parseServerLogRead(string(out))
+	if !failed.complete || len(failed.files) != 0 || len(failed.errors) != 2 ||
+		!strings.Contains(strings.Join(failed.errors, "\n"), "/export/ganesha.log: tail exited 1") {
+		t.Errorf("a tail that failed partway read as complete=%v files=%v errors=%q, want both files "+
+			"dropped and reported, the log by name\n%s", failed.complete, failed.files, failed.errors, out)
 	}
 }
 
