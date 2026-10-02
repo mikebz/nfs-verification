@@ -206,7 +206,7 @@ so a failing case does not leave a lock held by a pod that outlives it.
   grace at all, so CHAOS-07 reports blocked and OBS-03 fails on it. The design
   anticipated this; the field entry records what it costs a run.
 - **2026-10-02: the log stream is no longer the only channel, and the runtime is
-  no longer the only clock** ([F-030](findings.md), [PR #133](https://github.com/mikebz/nfs-verification/pull/133)).
+  no longer the only clock** ([F-030](findings.md), [PR #135](https://github.com/mikebz/nfs-verification/pull/135)).
   F-008's server did announce grace, in its own log file, so the observer now
   reads that file through the node agent as well. A file carries no runtime
   timestamp, which reverses the section 5 decision that timestamps come from

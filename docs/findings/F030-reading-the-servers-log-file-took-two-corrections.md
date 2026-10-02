@@ -59,7 +59,7 @@ the message.
 
 ### What changed
 
-In [PR #133](https://github.com/mikebz/nfs-verification/pull/133):
+In [PR #135](https://github.com/mikebz/nfs-verification/pull/135):
 
 - The log is found from the serving process's command line instead. Every
   absolute path on it is a candidate, read through the process's root by the

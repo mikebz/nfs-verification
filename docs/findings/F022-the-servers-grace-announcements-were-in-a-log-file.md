@@ -95,7 +95,7 @@ Still nothing reads either. How a case may read a file inside the export is
 the decision to settle before implementing, and #21 depends on it.
 
 **2026-10-02. The file is read now** ([F-030](F030-reading-the-servers-log-file-took-two-corrections.md),
-[PR #133](https://github.com/mikebz/nfs-verification/pull/133)). The open
+[PR #135](https://github.com/mikebz/nfs-verification/pull/135)). The open
 question, #123, was settled by finding the file from the serving process's
 command line and reading it through the node agent at observe time, and #21
 with it: CHAOS-05's re-entry check now has something to count. The deployment

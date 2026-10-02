@@ -8,7 +8,7 @@ Status: partly shipped. OBS-04 shipped in delivery step 2b
 ([PR #8](https://github.com/mikebz/nfs-verification/pull/8)), and
 OBS-06 and OBS-07 in step 7 ([PR #29](https://github.com/mikebz/nfs-verification/pull/29),
 [PR #74](https://github.com/mikebz/nfs-verification/pull/74)). OBS-02 is folded
-into OBS-03 ([PR #133](https://github.com/mikebz/nfs-verification/pull/133)).
+into OBS-03 ([PR #135](https://github.com/mikebz/nfs-verification/pull/135)).
 OBS-01 and OBS-05 are designed, for step 7; OBS-01's behavioral half needs a
 fault from step 10.
 Serves: OBS-01 and OBS-03 through OBS-07 (OBS-03 now carrying OBS-02), the complete Observability
