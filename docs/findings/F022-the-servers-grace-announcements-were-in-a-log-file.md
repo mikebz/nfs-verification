@@ -2,8 +2,12 @@
 
 Author: mikebz@
 Created: 2026-09-14
-Updated: 2026-10-01
+Updated: 2026-10-02
 
+
+> **Refined by [F-030](F030-reading-the-servers-log-file-took-two-corrections.md).**
+> The open question below is settled: the harness reads this file now, through
+> the node agent, and OBS-03, CHAOS-05 and CHAOS-07 observe grace from it.
 
 **Found:** 2026-09-13, hand probes against GKE cluster `gke-w1` while designing
 the security cases, `nfs-server-provisioner` v4.0.8 in namespace
@@ -89,3 +93,10 @@ there.
 
 Still nothing reads either. How a case may read a file inside the export is
 the decision to settle before implementing, and #21 depends on it.
+
+**2026-10-02. The file is read now** ([F-030](F030-reading-the-servers-log-file-took-two-corrections.md),
+[PR #135](https://github.com/mikebz/nfs-verification/pull/135)). The open
+question, #123, was settled by finding the file from the serving process's
+command line and reading it through the node agent at observe time, and #21
+with it: CHAOS-05's re-entry check now has something to count. The deployment
+half of this entry stands: `kubectl logs` still carries none of it.

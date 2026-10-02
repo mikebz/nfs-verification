@@ -9,8 +9,8 @@ import (
 // Grace is the dominant term in every recovery number this suite reports, and
 // the classifier below is the one part of reading it that depends on how an
 // implementation words things. Getting it backwards does not fail loudly: it
-// reports a healthy server as looping through grace, which is the diagnosis the
-// triage runbook already calls the most common wrong one.
+// reports a healthy server as looping through grace, a hung client in front of
+// a healthy server, which test plan section 4.3 is there to tell apart.
 
 func stamp(sec int64) string { return time.Unix(sec, 0).UTC().Format(time.RFC3339Nano) }
 
@@ -231,47 +231,95 @@ func TestParseGraceLogSurvivesAnEnormousLine(t *testing.T) {
 	}
 }
 
-// TestFirstDated covers FirstDated finding the chronologically earliest dated log
-// line from a slice of log lines, ignoring lines without timestamps.
+// Lines as the reference servers wrote them, copied from /export/ganesha.log
+// on gke-w1 (nfs-provisioner v4.0.8) and gke-w2 (Ganesha 15.3) on 2026-10-01,
+// with the date and time Ganesha puts in front of each removed. They are
+// fixtures rather than a tool's output because no workstation runs Ganesha.
+const (
+	ganeshaEnter   = " : epoch 6abec5fc : nfs-provisioner-nfs-server-provisioner-0 : nfs-ganesha-19[main] nfs_start_grace :STATE :EVENT :NFS Server Now IN GRACE, duration 90"
+	ganeshaReload  = " : epoch 6abec5fc : nfs-provisioner-nfs-server-provisioner-0 : nfs-ganesha-19[main] nfs_start_grace :STATE :EVENT :grace reload client info completed from backend"
+	ganeshaCheck   = " : epoch 6abec5fc : nfs-provisioner-nfs-server-provisioner-0 : nfs-ganesha-19[reaper] nfs_try_lift_grace :STATE :EVENT :check grace:reclaim complete(0) clid count(2)"
+	ganeshaExit    = " : epoch 6abec5fc : nfs-provisioner-nfs-server-provisioner-0 : nfs-ganesha-19[reaper] nfs_lift_grace_locked :STATE :EVENT :NFS Server Now NOT IN GRACE"
+	ganesha15Enter = " : epoch 6abec5ff : nfs-provisioner-nfs-server-provisioner-0 : nfs-ganesha-20[main] nfs_start_grace :RECOVERY :EVENT :NFS Server Now IN GRACE, duration 90"
+	ganesha15Check = " : epoch 6abec5ff : nfs-provisioner-nfs-server-provisioner-0 : nfs-ganesha-20[reaper] nfs_try_lift_grace :RECOVERY :EVENT :check grace:reclaim complete(1) clid count(4)"
+	ganesha15Exit  = " : epoch 6abec5ff : nfs-provisioner-nfs-server-provisioner-0 : nfs-ganesha-20[reaper] nfs_lift_grace_locked :RECOVERY :EVENT :NFS Server Now NOT IN GRACE"
+)
+
+// TestClassifyGraceReadsGaneshaAsWritten covers the reference servers' own
+// lines, which a rule reading the whole line got wrong: the function names and
+// the progress line Ganesha prints every ten seconds in grace carry exit words,
+// so one grace period read as an exit at once and a re-entry loop (F-030).
 //
 // Steps:
-//  1. Assert an empty slice returns found=false.
-//  2. Assert a slice with only undated lines (zero time) returns found=false.
-//  3. Assert a slice with dated lines out of chronological order and undated lines
-//     returns the earliest dated line and found=true.
-func TestFirstDated(t *testing.T) {
-	// 1. Empty slice
-	if _, found := FirstDated(nil); found {
-		t.Error("FirstDated(nil) returned found=true, want false")
+//  1. Classify each server's entry and exit, and require them read as such.
+//  2. Classify the reload and progress lines, and require neither reading.
+//  3. Parse a whole failover from one server as a stream and require exactly
+//     one entry and one exit, ninety-one seconds apart.
+func TestClassifyGraceReadsGaneshaAsWritten(t *testing.T) {
+	restore := *Cfg()
+	t.Cleanup(func() { *Cfg() = restore })
+	Cfg().GraceEnterPattern, Cfg().GraceExitPattern = "", ""
+	if err := compileGracePatterns(); err != nil {
+		t.Fatalf("resetting the wording flags: %v", err)
 	}
 
-	// 2. Only zero-timestamp (undated) lines
-	undated := []LogLine{
-		{Text: "line 1"},
-		{Text: "line 2"},
+	for _, line := range []string{ganeshaEnter, ganesha15Enter} {
+		if exit, ok := classifyGrace(line); !ok || exit {
+			t.Errorf("%q was read as exit=%v (matched=%v), want an entry", line, exit, ok)
+		}
 	}
-	if _, found := FirstDated(undated); found {
-		t.Error("FirstDated with only undated lines returned found=true, want false")
+	for _, line := range []string{ganeshaExit, ganesha15Exit} {
+		if exit, ok := classifyGrace(line); !ok || !exit {
+			t.Errorf("%q was read as exit=%v (matched=%v), want an exit", line, exit, ok)
+		}
 	}
-
-	// 3. Mixed dated and undated lines out of order
-	t1 := time.Unix(1700000010, 0)
-	t2 := time.Unix(1700000005, 0) // earliest
-	t3 := time.Unix(1700000020, 0)
-
-	lines := []LogLine{
-		{Text: "undated 1"},
-		{At: t1, Text: "dated t1"},
-		{Text: "undated 2"},
-		{At: t2, Text: "dated t2 (earliest)"},
-		{At: t3, Text: "dated t3"},
+	for _, line := range []string{ganeshaReload, ganeshaCheck, ganesha15Check} {
+		if exit, ok := classifyGrace(line); ok {
+			t.Errorf("%q was read as exit=%v, but it announces neither; read as an exit it ends grace the "+
+				"moment it starts and makes the next entry a re-entry loop", line, exit)
+		}
 	}
 
-	best, found := FirstDated(lines)
-	if !found {
-		t.Fatal("FirstDated returned found=false for dated lines, want true")
+	raw := stamp(1790887420) + ganeshaEnter + "\n" +
+		stamp(1790887420) + ganeshaReload + "\n" +
+		stamp(1790887420) + ganeshaCheck + "\n" +
+		stamp(1790887430) + ganeshaCheck + "\n" +
+		stamp(1790887511) + ganeshaExit + "\n"
+	obs := parseGraceLog(raw, time.Time{})
+	w, ok := obs.Window()
+	if n := len(obs.Entries()); n != 1 || !ok || w.Duration() != 91*time.Second {
+		t.Errorf("one Ganesha failover read as %d entries, window %v (complete=%v), want one entry and a "+
+			"91s window: %s", n, w, ok, obs.Describe())
 	}
-	if !best.At.Equal(t2) || best.Text != "dated t2 (earliest)" {
-		t.Errorf("FirstDated returned line %+v, want earliest line with timestamp %v and text %q", best, t2, "dated t2 (earliest)")
+}
+
+// TestSameAnnouncementCountsOnce covers a server that writes its log to a file
+// and to its stream, which the observer reads both of. Counted twice, its one
+// grace period is a re-entry loop.
+//
+// Steps:
+//  1. Classify one entry seen in a file, and the same entry seen in the stream
+//     with the server's own date still in front of it and a runtime timestamp
+//     a second later.
+//  2. Require one entry.
+//  3. Require two entries where the second is from the same source, since a
+//     server that says it twice in one place said it twice.
+func TestSameAnnouncementCountsOnce(t *testing.T) {
+	restore := *Cfg()
+	t.Cleanup(func() { *Cfg() = restore })
+	Cfg().GraceEnterPattern, Cfg().GraceExitPattern = "", ""
+	if err := compileGracePatterns(); err != nil {
+		t.Fatalf("resetting the wording flags: %v", err)
+	}
+	at := time.Unix(1790887420, 0)
+	file := LogLine{At: at, Text: ganeshaEnter, Source: "server-0:/export/ganesha.log"}
+	stream := LogLine{At: at.Add(time.Second), Text: "01/10/2026 20:43:40" + ganeshaEnter, Source: "server-0/nfs"}
+	if n := len(classifyGraceLines([]LogLine{file, stream}).Entries()); n != 1 {
+		t.Errorf("one announcement read through two channels counted as %d entries", n)
+	}
+	again := file
+	again.At = at.Add(time.Second)
+	if n := len(classifyGraceLines([]LogLine{file, again}).Entries()); n != 2 {
+		t.Errorf("two announcements in one file counted as %d entries", n)
 	}
 }

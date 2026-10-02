@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-09-10
-Updated: 2026-10-01
+Updated: 2026-10-02
 Status: partly shipped. CHAOS-01 and CHAOS-02 shipped in delivery step 3
 ([PR #4](https://github.com/mikebz/nfs-verification/pull/4)), CHAOS-05, CHAOS-06
 and CHAOS-07 in step 4 ([PR #8](https://github.com/mikebz/nfs-verification/pull/8)),
@@ -120,9 +120,13 @@ grace](storage_terms.md#reclaim_complete-and-early-end-of-grace).
 - **Why grace matters**: It is the dominant term in every recovery target, and a server re-entering
   it looks like a hung client (test plan [Section 4.3](01-test-plan.md#43-triage-runbook), step 3).
 - **Grace observation (`pkg/framework/grace.go`)**:
-  - Read from the server pod's container log stream using container runtime timestamps.
-  - Uses an exit-first keyword classification to avoid mistaking negative exit phrases for entries.
-  - If the server announces no grace in logs, `CHAOS-07` reports [blocked](storage_terms.md#blocked-and-blocks) and `OBS-03` fails (F-008).
+  - Read from the server pod's container log stream, and from the log file the serving process
+    writes, through the node agent where the cluster has one (F-030). How the file is found and
+    why its timestamps are believed is in
+    [`06-observability-design.md`](06-observability-design.md) section 6, OBS-03.
+  - Classifies the words near "grace", exit first, to avoid mistaking negative exit phrases for entries.
+  - If grace is not observed entered and left, `CHAOS-07` reports [blocked](storage_terms.md#blocked-and-blocks)
+    with what was read and what could not be, and `OBS-03` fails (F-008).
 - **Lock reclaim verification (`CHAOS-06`)**:
   - *Whole-file locks*: Taken using `flock -x`. The Linux kernel simulates `flock` via whole-file
     POSIX locks on the wire (RFC 8881 Section 9).
@@ -199,7 +203,7 @@ the core assertions across the Resiliency & Chaos test group:
   2. For cycle = 1 to 5:
      a. Delete server pod gracefully.
      b. Wait for client workload to recover (`StallAfter` silence gap within restart SLO).
-     c. Read server container log stream through Kubernetes API to count grace entries.
+     c. Read the server's log stream and log file to count grace entries.
      d. Assert that grace was entered at most once during this cycle (no re-entry loops; OBS-03 owns the entry/exit assertion).
      e. Allow short stabilization before the next injection.
   3. Verify all records committed before the first fault survived on stable storage.
@@ -246,6 +250,9 @@ the core assertions across the Resiliency & Chaos test group:
 - **[F-008](findings.md) (Unannounced grace)**: Some userspace provisioners never log grace entry
   or exit. In that environment, `CHAOS-07` reports blocked because no window can be established,
   and `OBS-03` reports the missing signal.
+- **[F-030](findings.md) (Grace was announced, in a file)**: the reference server is not one of
+  them. It writes grace to its own log file, which the observer now reads, so CHAOS-05's re-entry
+  check and CHAOS-07's window have a signal on both reference deployments.
 - **[F-014](findings.md) (Silence measurement)**: Failover measurements must detect silence gaps
   (`StallAfter`), not first write timestamps.
 

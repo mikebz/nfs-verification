@@ -103,7 +103,7 @@ func ServerConns(ctx context.Context, c *Client, pod *corev1.Pod) ([]Conn, error
 	// IPv6 has no tcp6 file, and that is not the same as a container the suite
 	// cannot look inside. The script reports the two families separately
 	// because one exit status cannot say which of them it belongs to.
-	script, err := RunScript("socket-table.sh", "peers-"+strings.ToLower(Cfg().RunID))
+	script, err := RunScript("socket-table.sh", runScriptID("peers-"))
 	if err != nil {
 		return nil, err
 	}

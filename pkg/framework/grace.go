@@ -16,40 +16,46 @@ import (
 )
 
 // Grace is the interval after a restart in which the server accepts reclaims of
-// state that existed before the crash and refuses everything new. It is the
-// dominant term in every recovery number this suite reports, and a grace
-// re-entry loop presents as a hung client in front of a healthy server, which
-// the triage runbook calls the most common false diagnosis in this
-// architecture. A suite that cannot see grace cannot tell the two apart.
+// state that existed before the crash and refuses everything new (RFC 8881
+// section 8.4.2.1). It is the dominant term in every recovery number this suite
+// reports, and a grace re-entry loop presents as a hung client in front of a
+// healthy server; the triage runbook in test plan section 4.3 says why that
+// matters. A suite that cannot see grace cannot tell the two apart.
 //
 // Grace is read from what the server publishes, never inferred from the fact
 // that a client stalled: inferring it from a stall makes a case unable to tell
 // grace from the failure that mimics it.
 //
-// The channel is the server's log stream through the Kubernetes API, which is
-// the only one guaranteed present, timestamped by something other than the
-// process under test, and readable without knowing anything about the server's
-// deployment beyond which pods it runs. Metrics are the other channel the plan
-// allows, and OBS-07 reads them where the pod declares an endpoint; grace is
-// not read from there, because nothing in the Kubernetes API or in any metrics
-// convention states what a grace series would be called, and a name guessed at
-// here would report a server that publishes one under another name as a server
-// that never entered grace.
+// Two channels are read and merged. The server's log stream through the
+// Kubernetes API, which needs nothing beyond knowing which pods are the
+// server's and is timestamped by the container runtime rather than by the
+// process under test. And the log files the serving process writes, read
+// through the node agent and timestamped by the server itself, which is where
+// both reference deployments announce grace; ServerLogFiles says how those are
+// found and why their timestamps can be trusted. Metrics are the other channel
+// the plan allows, and OBS-07 reads them where the pod declares an endpoint;
+// grace is not read from there, because nothing in the Kubernetes API or in any
+// metrics convention states what a grace series would be called, and a name
+// guessed at here would report a server that publishes one under another name
+// as a server that never entered grace.
 
 // GraceSignal is one observed transition.
 type GraceSignal struct {
-	// At is the timestamp the container runtime attached to the line, not a
-	// time parsed out of the server's own wording. Log formats differ per
-	// implementation and change between versions; runtime timestamps do not.
+	// At is when the line was written: the container runtime's timestamp for
+	// a line from the log stream, and for a line from a file the server's own,
+	// read off the head of the line and believed only once ServerLogFiles has
+	// checked the file's newest line against its modification time.
 	At time.Time
 	// Exit is false for a line announcing entry into grace and true for one
 	// announcing the end of it.
 	Exit bool
 	// Line is the line itself, kept for the failure message.
 	Line string
+	// Source names the stream or file the line came from.
+	Source string
 }
 
-// GraceObservation is what the log stream said about grace over a window.
+// GraceObservation is what the server said about grace over a window.
 type GraceObservation struct {
 	// Signals are the transitions, oldest first.
 	Signals []GraceSignal
@@ -58,9 +64,12 @@ type GraceObservation struct {
 	// never observed" would be triaged as a server defect, so it is reported
 	// instead.
 	Unclassified []string
-	// Sources names every stream that was read, including the ones that said
-	// nothing, so a failure message can say where the suite looked.
+	// Sources names every stream and file that was read, including the ones
+	// that said nothing, so a failure message can say where the suite looked.
 	Sources []string
+	// Gaps names what could not be read. A server that announced grace in a
+	// file the suite could not reach must not read as one that said nothing.
+	Gaps []string
 }
 
 // Entries returns the signals announcing entry into grace, oldest first. Grace
@@ -78,17 +87,20 @@ func (o GraceObservation) Entries() []GraceSignal {
 
 // Describe renders an observation for a log line or a failure message.
 func (o GraceObservation) Describe() string {
-	if len(o.Signals) == 0 {
-		return fmt.Sprintf("no grace signal in %d server log stream(s): %s",
-			len(o.Sources), strings.Join(o.Sources, ", "))
-	}
 	var parts []string
+	if len(o.Signals) == 0 {
+		parts = append(parts, fmt.Sprintf("no grace signal in %d source(s): %s",
+			len(o.Sources), strings.Join(o.Sources, ", ")))
+	}
 	for _, s := range o.Signals {
 		word := "entered"
 		if s.Exit {
 			word = "left"
 		}
-		parts = append(parts, fmt.Sprintf("%s at %s (%q)", word, s.At.UTC().Format(time.RFC3339), s.Line))
+		parts = append(parts, fmt.Sprintf("%s at %s in %s (%q)", word, s.At.UTC().Format(time.RFC3339), s.Source, s.Line))
+	}
+	if len(o.Gaps) > 0 {
+		parts = append(parts, "not read: "+strings.Join(o.Gaps, "; "))
 	}
 	return strings.Join(parts, " | ")
 }
@@ -195,32 +207,27 @@ func ServerLog(ctx context.Context, c *Client, since time.Time) ([]LogLine, []st
 	return lines, sources, nil
 }
 
-// FirstDated returns the earliest line carrying a timestamp. Read against a
-// stream ServerLog already cut at a fault, it is the server's own answer to
-// whether anything happened, which is what OBS-02 asks of it.
-func FirstDated(lines []LogLine) (LogLine, bool) {
-	best := LogLine{}
-	found := false
-	for _, l := range lines {
-		if l.At.IsZero() {
-			continue
-		}
-		if !found || l.At.Before(best.At) {
-			best, found = l, true
-		}
-	}
-	return best, found
-}
-
-// ObserveGrace reads the server pods' log streams from since onwards and
-// classifies what they say about grace.
-func ObserveGrace(ctx context.Context, c *Client, since time.Time) (GraceObservation, error) {
+// ObserveGrace reads what the server said about grace from since onwards and
+// classifies it. The log streams are always read; the files the serving
+// process writes are read too where agent is not nil, and where it is nil the
+// observation says so in Gaps rather than reading a server that announces
+// grace in a file as one that is silent.
+func ObserveGrace(ctx context.Context, c *Client, agent *Agent, since time.Time) (GraceObservation, error) {
 	lines, sources, err := ServerLog(ctx, c, since)
 	if err != nil {
 		return GraceObservation{}, err
 	}
+	var gaps []string
+	if agent == nil {
+		gaps = append(gaps, "no node agent, so the files the server writes were not read")
+	} else {
+		fileLines, fileSources, fileGaps := ServerLogFiles(ctx, c, agent, since)
+		lines = append(lines, fileLines...)
+		sources = append(sources, fileSources...)
+		gaps = fileGaps
+	}
 	obs := classifyGraceLines(lines)
-	obs.Sources = sources
+	obs.Sources, obs.Gaps = sources, gaps
 	return obs, nil
 }
 
@@ -260,7 +267,7 @@ const logSinceMargin = 2 * time.Minute
 var graceLine = regexp.MustCompile(`(?i)grace`)
 
 // exitWords and enterWords are the wordings servers use. The rule is
-// positional: whichever word appears earliest in the line decides, and a tie
+// positional: whichever word appears earliest in the phrase decides, and a tie
 // goes to exit. That ordering is the whole point, because the common exit
 // wordings are the entry wording with a negation in front of it ("NOT IN
 // GRACE"), and a rule that tested for entry first would classify every exit as
@@ -275,11 +282,24 @@ var (
 	}
 )
 
+// graceContextWords is how many words either side of "grace" a phrase keeps.
+// Three is what separates "NFS Server Now NOT IN GRACE" from "grace reload
+// client info completed from backend" in Ganesha's own log; the real lines are
+// in TestClassifyGraceReadsGaneshaAsWritten.
+const graceContextWords = 3
+
 // classifyGrace decides what a line announces: exit is true for the end of
 // grace, false for entry into it, and the second return is false for a line
 // that announces neither. It is the one part of the observer that depends on
 // how an implementation words things, which is why the grace pattern flags
 // exist for a server it does not cover.
+//
+// The words are looked for only near "grace", within one clause, and not in
+// identifiers. A server's line carries a function name, a component and a
+// message, and read whole, Ganesha's says "nfs_try_lift_grace ... check
+// grace:reclaim complete(0)" every ten seconds while it is in grace: two exit
+// words, no exit. That reading reported a server in grace as having left it
+// at once and entered it again, which is F-030.
 func classifyGrace(line string) (exit, ok bool) {
 	if !graceLine.MatchString(line) {
 		return false, false
@@ -296,17 +316,43 @@ func classifyGrace(line string) (exit, ok bool) {
 		// left out.
 		return false, false
 	}
-	lower := strings.ToLower(line)
-	exitAt := earliest(lower, exitWords)
-	enterAt := earliest(lower, enterWords)
-	switch {
-	case exitAt < 0 && enterAt < 0:
-		return false, false
-	case enterAt < 0 || (exitAt >= 0 && exitAt <= enterAt):
-		return true, true
-	default:
-		return false, true
+	for _, phrase := range gracePhrases(strings.ToLower(line)) {
+		exitAt := earliest(phrase, exitWords)
+		enterAt := earliest(phrase, enterWords)
+		switch {
+		case exitAt < 0 && enterAt < 0:
+			continue
+		case enterAt < 0 || (exitAt >= 0 && exitAt <= enterAt):
+			return true, true
+		default:
+			return false, true
+		}
 	}
+	return false, false
+}
+
+// gracePhrases returns, for each mention of grace in a lowercased line, the
+// words around it within its clause. Clauses end at ':', ';' and ','; a word
+// containing '_' is an identifier, such as a function name, and is dropped.
+func gracePhrases(lower string) []string {
+	var out []string
+	clauses := strings.FieldsFunc(lower, func(r rune) bool { return r == ':' || r == ';' || r == ',' })
+	for _, clause := range clauses {
+		var words []string
+		for _, w := range strings.Fields(clause) {
+			if !strings.Contains(w, "_") {
+				words = append(words, w)
+			}
+		}
+		for i, w := range words {
+			if strings.Contains(w, "grace") {
+				lo := max(0, i-graceContextWords)
+				hi := min(len(words), i+graceContextWords+1)
+				out = append(out, strings.Join(words[lo:hi], " "))
+			}
+		}
+	}
+	return out
 }
 
 // earliest returns the index of the first of words to appear, or -1.
@@ -350,7 +396,7 @@ func parseLogStream(raw, source string, since time.Time) []LogLine {
 	return out
 }
 
-// classifyGraceLines turns a log stream into grace signals, keeping every line
+// classifyGraceLines turns log lines into grace signals, keeping every line
 // that mentions grace and matches nothing.
 func classifyGraceLines(lines []LogLine) GraceObservation {
 	var obs GraceObservation
@@ -364,10 +410,36 @@ func classifyGraceLines(lines []LogLine) GraceObservation {
 			}
 			continue
 		}
-		obs.Signals = append(obs.Signals, GraceSignal{At: l.At, Exit: exit, Line: strings.TrimSpace(l.Text)})
+		s := GraceSignal{At: l.At, Exit: exit, Line: strings.TrimSpace(l.Text), Source: l.Source}
+		if !sameAnnouncement(obs.Signals, s) {
+			obs.Signals = append(obs.Signals, s)
+		}
 	}
 	sortSignals(obs.Signals)
 	return obs
+}
+
+// sameAnnouncement reports whether s is a line already among signals, seen
+// through the other channel. A server that writes its log to a file and to
+// its stream says everything twice, and counting both would report one grace
+// period as a re-entry loop. The stream's copy carries the server's own date
+// in front of the text the file's copy is left with, so one is a suffix of the
+// other, and the two timestamps come from different clocks, so they are
+// compared within the guard band.
+func sameAnnouncement(signals []GraceSignal, s GraceSignal) bool {
+	for _, o := range signals {
+		if o.Exit != s.Exit || o.Source == s.Source {
+			continue
+		}
+		d := o.At.Sub(s.At)
+		if d > slo.ClockSkewGuard || d < -slo.ClockSkewGuard {
+			continue
+		}
+		if strings.HasSuffix(o.Line, s.Line) || strings.HasSuffix(s.Line, o.Line) {
+			return true
+		}
+	}
+	return false
 }
 
 // parseGraceLog is the whole path from a raw stream to grace signals, which is

@@ -745,8 +745,9 @@ behind each lesson are in its finding. What the design took from them:
 - What bound a `fsGroup` mount should be held to when a chown storm *is*
   happening has no ratified value. The case measures against a control pod on the
   same claim rather than inventing one, and the number belongs in `pkg/slo`.
-- The grace log channel in Section 2's last row may unblock OBS-03 and CHAOS-07;
-  F-022 says where it is. That belongs to step 7 and step 10, not here.
+- ~~The grace log channel in Section 2's last row may unblock OBS-03 and
+  CHAOS-07.~~ **Settled 2026-10-02**: the harness reads that file now, through the
+  node agent ([F-030](findings.md)), and CHAOS-07 runs.
 
 ## 13. Sources
 

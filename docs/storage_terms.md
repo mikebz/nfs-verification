@@ -2,7 +2,7 @@
 
 Author: mikebz@
 Created: 2026-10-01
-Updated: 2026-10-01
+Updated: 2026-10-02
 
 The one place a term used across this repository is defined. Every other
 document links here rather than restating a definition, so that a correction
@@ -76,11 +76,14 @@ the first write committed after the silence. The chaos workload writes each
 record to a new file (`pkg/framework/scripts/write-load.sh`), so each write
 needs a new `OPEN`, which is new state and waits for step 7. Neither reference
 deployment has ever ended grace early, so every recovery measured on them so far
-is the restart time plus the whole configured grace period
-([F-029](findings.md), which has the numbers). This is why recovery targets are
+is the restart time, plus the whole configured grace period
+([F-029](findings.md), which has the numbers), plus however long the client
+waits after grace ends before it tries again: 1 to 28 seconds across one
+CHAOS-05 run ([F-031](findings.md)). This is why recovery targets are
 set per [profile](#profile) in test plan Section 3.8.
 
-How the suite observes grace, from the server's log stream, is the README's
+How the suite observes grace, from the server's log stream and the log files
+its serving process writes, is the README's
 [How grace is observed](../README.md#how-grace-is-observed).
 
 ### Reclaim
@@ -496,7 +499,7 @@ profile, which is what SEC-09 and doc 07 mean by "restricted profile".
   [`fs/nfsd/nfs4state.c`][linux-nfsd-state] for knfsd's grace and
   [`fs/nfsd/nfs4recover.c`][linux-nfsd-recover] for its recovery store.
 - [`findings.md`](findings.md) for what the reference deployments do: F-001,
-  F-016, F-019, F-026 to F-029.
+  F-016, F-019, F-026 to F-029, F-031.
 
 [rfc-8881]: https://www.rfc-editor.org/rfc/rfc8881.html
 [rfc-8.3]: https://www.rfc-editor.org/rfc/rfc8881.html#section-8.3

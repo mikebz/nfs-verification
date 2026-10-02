@@ -6,9 +6,10 @@ Updated: 2026-10-02
 Status: superseded. CHAOS-05, CHAOS-06, CHAOS-07, OBS-02 and OBS-03 shipped in
 delivery step 4 ([PR #8](https://github.com/mikebz/nfs-verification/pull/8)).
 CHAOS-05 through CHAOS-07 are now designed in
-[`03-chaos-operations-design.md`](03-chaos-operations-design.md), OBS-02 and
-OBS-03 in [`06-observability-design.md`](06-observability-design.md). This
-document is kept as the record of step 4's decisions.
+[`03-chaos-operations-design.md`](03-chaos-operations-design.md), and OBS-03,
+which OBS-02 was folded into, in
+[`06-observability-design.md`](06-observability-design.md). This document is
+kept as the record of step 4's decisions.
 Serves: CHAOS-05, CHAOS-06, CHAOS-07, OBS-02 and OBS-03, delivery
 [step](storage_terms.md#step-phase-category-section-test-group-delivery-group) 4.
 Requirements in [`01-test-plan.md`](01-test-plan.md) Sections 3.3, 3.5 and 3.8.
@@ -199,6 +200,8 @@ phase that already needed a design document.
   blocked and OBS-03 fails on it. The design anticipated this (Section 5,
   exit-first classification); the finding records what it costs a run.
   [F-022](findings.md) refined it: the daemon's own log file carries the lines.
+  [F-030](findings.md) is the reader for that file. Since 2026-10-02, CHAOS-07
+  runs and OBS-03 passes on both reference deployments.
 
 ## 8. What changed after this was written
 
@@ -224,11 +227,25 @@ phase that already needed a design document.
   injects faults ([README](../README.md#running);
   [`05-data-path-and-locktool-design.md`](05-data-path-and-locktool-design.md),
   Section 7).
+- **The server's log file became a channel, and OBS-02 was folded into OBS-03
+  (2026-10-02, [PR #135](https://github.com/mikebz/nfs-verification/pull/135))**:
+  F-008's server did announce grace, in its own log file
+  ([F-022](findings.md), [F-030](findings.md)), so the observer now reads that
+  file through the node agent as well. A file has no runtime timestamp, which
+  reverses the Section 5 decision that timestamps come from the container
+  runtime. Each line's own timestamp is used, and only once the file's newest
+  line agrees with its modification time. The classifier now reads only the
+  words near "grace", because the exit-first rule read whole lines and misread
+  the server's. OBS-02, decided in Section 5, accepted any timestamped channel,
+  and a pod delete always produced one, so it was folded into OBS-03.
+  [`06-observability-design.md`](06-observability-design.md) Section 6, OBS-03,
+  has the decisions.
 
 ## 9. Open
 
-- A deployment that reports grace only through metrics, or only in a log file as
-  [F-022](findings.md) found, fails OBS-03 for a reason that is half harness gap.
+- A deployment that reports grace only through metrics fails OBS-03 for a
+  reason that is half harness gap. (*2026-10-02*: a grace record kept only in a
+  log file, as [F-022](findings.md) found, is now read; see Section 8.)
 - The wording rule is the one implementation-specific part of an otherwise
   portable observer.
 - Whether a sub-file range reclaims differently from a whole-file one on any real

@@ -252,8 +252,8 @@ How chaos faults are injected, measured, and verified across failovers is in
 | ID | Case | Expected |
 |---|---|---|
 | OBS-01 | Server unavailable | The deployment provides an availability signal that can represent NFS reachability: a readiness probe targeting the NFS service, with the Service's endpoints following it. Fails when the only in-cluster signal is the container's lifecycle, which cannot represent a server that is wedged rather than dead. The behavioral half, that the signal moves when a running server stops answering, needs a fault that does not kill the container and lands in [step](storage_terms.md#step-phase-category-section-test-group-delivery-group) 10. |
-| OBS-02 | ✅ Failover event | Event is observable in metrics or logs with a timestamp; measurable duration |
-| OBS-03 | ✅ Grace period entry and exit | Both observable; duration measurable. Required to make CHAOS-05 diagnosable. |
+| OBS-02 | Failover event | Folded into OBS-03 on 2026-10-02 ([#19](https://github.com/mikebz/nfs-verification/issues/19)): the record of a failover with a timestamp and a duration is the grace record OBS-03 reads. |
+| OBS-03 | ✅ Failover record, grace entry and exit | A failover leaves a record the server itself wrote, which an operator arriving afterwards can find: grace entered after the fault and left after that, each with a timestamp, so the failover has a measurable duration. The duration is within the grace exit bound, and grace is entered once. Kubernetes Events and container start times do not satisfy this: a pod delete produces both on its own. Required to make CHAOS-05 diagnosable. Carries OBS-02. |
 | OBS-04 | ✅ Mount failure on a client | Surfaced as a Kubernetes Event on the pod with an actionable reason |
 | OBS-05 | Server memory approaching ceiling | The server container declares a memory limit, its working set is readable against that limit with a timestamp, and the reading moves when the server is worked. An OOMKill, if one occurs, is visible with a timestamp. Fails when no limit is declared: an undeclared ceiling is one nobody can monitor against. **Not manufactured**: no case drives the server to its limit. |
 | OBS-06 | ✅ Volume near capacity | The control plane reports this volume's usage, it agrees with `df` inside the pod within a stated tolerance and freshness, and both move together when the workload writes. Fails when the CSI driver reports no usage for the volume, and fails when the reported total is not the claim's capacity: an export with no per-volume quota is measuring the backing filesystem, so no threshold on that number describes this claim. The agreement comparison is still run and recorded either way. |
@@ -366,6 +366,7 @@ next phase has to rediscover:
 - **A fault that was not injected is never measured.** An operation that cannot identify its target, or that matched nothing, is an error, and the case reports blocked. A recovery measured from a fault that never landed passes for the wrong reason. A kill of the server process is confirmed on both sides, by every case that injects one: before it, the process holding the listening socket, the [serving process](storage_terms.md#serving-process-and-supervisor), must be the one the kill is aimed by, or the case reports blocked; after it, a different pid must hold that socket, or the case fails and stops there, rather than carrying on to verdicts about a fault nothing confirmed. CHAOS-01 made both checks and DATA-12 and DATA-13, injecting the same kill, made neither, so the two checks are one pair of helpers the cases share rather than lines in any one of them (#99).
 - **A node runs at most one NFS server process, and the suite assumes it.** A signal is delivered by matching the process name across the whole node, so a node carrying two servers would take one fault and lose both, and the case would attribute a two-server outage to a one-server fault. Nothing in Kubernetes prevents that arrangement: a server pod has its own network namespace, so two of them on one node would each bind 2049 without conflict. What makes the assumption safe against the deployment under test is the provisioner, which advertises a Service address and [refuses to provision at all](https://github.com/kubernetes-sigs/nfs-ganesha-server-and-external-provisioner/blob/master/pkg/volume/provision.go#L425-L444) when that Service resolves to more than one endpoint, capping its fan-out at one pod per cluster. A deployment that genuinely runs several servers needs the signal scoped to the pid discovery already records, and that is work for the case that needs it rather than ahead of it.
 - **A baseline that could not be read blocks the assertion that needs it, not the case that carries it.** A before-and-after reading whose "before" is unavailable returns an error, never a zero: two zeros compare equal and the assertion passes without having measured anything. The assertion reports blocked on its own, so that the rest of the case, which is usually about something else entirely, still returns a verdict. This is why the server restart count refuses to answer where discovery found no server pods, and where the pods it found have not reported a container yet.
+- **What the server says about itself is read where it writes it.** That is its log stream through the Kubernetes API and the log files its [serving process](storage_terms.md#serving-process-and-supervisor) writes, found from the paths on that process's own command line and read through the node agent, live, because what they hold is what the case just did. A file's lines carry the server's own timestamps, so they are used only where the file's newest line agrees with its modification time; and what could not be read is named next to the verdict, never read as the server having said nothing ([F-030](findings.md)).
 - **Both ends of any measurement come from one clock.** Times that will be compared are read from the same pod, never one from a pod and one from the workstation: a few seconds of skew is invisible and moves every number. Where two clocks are unavoidable, because the two ends are on different nodes by construction, the window is narrowed by a guard band in `pkg/slo` and only an unambiguous violation is reported.
 - **A case waits past its target rather than up to it.** Stopping at the SLO reports "timed out" where the case could report how long recovery actually took, and the second is what a defect report needs.
 - **A tool the image may not carry is probed before it is used**, and its absence reports blocked, naming the flag that fixes it. A missing tool is never a protocol finding.
@@ -404,7 +405,7 @@ Triage order:
 
 1. **Is it the harness?** Check the failure's bundle first, then re-run the single case in isolation (`make test-case`), under a new run ID so its bundle stays apart from the failure's. Two patterns point at the harness (file against the suite): the case's own collected evidence contradicts what its failure message claimed (a lock table holding the lock the case reported lost in [F-010](findings.md), a workload log with a 1m43s stall reported as 0s in [F-014](findings.md), or a readiness wait satisfied by a terminating pod in [F-013](findings.md)); or the failure depends on residue an earlier case left behind — leaked objects, an uncleaned mount, a server still in recovery, or an un-baselined scrape that inherited earlier traffic ([F-025](findings.md)) — so it reproduces after that earlier case and never on a clean cluster across repeated isolated runs. **Passing on a single isolated re-run, or failing intermittently across runs whether alone or in the suite, does not point at the harness**: a concurrency race on the share or a tight recovery margin is intermittent by nature — DATA-02 passed both `make test-data` runs and failed 9 of 13 whole-suite runs ([F-016](findings.md)), and CHAOS-06 lost a late client's locks on 1 of 6 runs ([F-028](findings.md)) — and both are deployment behavior, not harness bugs. One green `make test-case` means the race did not fire that time.
 2. **Which side of the mount?** Compare client `/proc/mounts` and dmesg against server logs around the fault. Client stuck with a healthy server means client or network. Server restarted means server. **Do not line `dmesg-<node>.txt` timestamps directly up against `fault-timeline.json` or the server log** until #124 is fixed: the bundle runs `dmesg -T`, which reconstructs wall time from boot time plus the kernel clock and drifts as the node stays up (`dmesg(1)`). On the reference nodes it ran about two minutes early, stamping CHAOS-06's `lost 2 locks` line 31 seconds before the fault that caused it ([F-028](findings.md)). Until #124 anchors those stamps, only the relative order of entries within `dmesg-<node>.txt` itself is reliable, not their wall-clock alignment with `fault-timeline.json` or the server log.
-3. **Is it grace?** Look for repeated grace entry in the window. While a server is in [grace](storage_terms.md#grace-period), new opens and locks wait in the client's kernel and nothing returns an error, so a server that keeps re-entering grace looks like "hung client, healthy server". Rule it out before filing against the client or the network. CHAOS-05 exists for this: among the upstream reports in Appendix A are clients stalled for hours after repeated grace entry during address takeover. Check `server-pods/*.log` in the bundle first; **where a supervised server directs the NFS daemon's log to a file instead of stdout/stderr, as both reference deployments do, `server-pods/*.log` will not have these lines**: it is the container log stream (`kubectl logs`), which then carries only the PID 1 supervisor's output ([F-008](findings.md), [F-026](findings.md)). On both reference deployments `ganesha.nfsd` is started with `-L /export/ganesha.log` and writes grace entry, reclaim progress, and grace exit to that file inside the export volume ([F-022](findings.md)), which the harness does not collect until #123 is settled. Fetch it by hand from the server pod before the export is wiped: `kubectl -n <server-ns> exec <server-pod> -- grep -E 'GRACE|reclaim complete' /export/ganesha.log` (or the log path on the serving process's command line).
+3. **Is it grace?** Look for repeated grace entry in the window. While a server is in [grace](storage_terms.md#grace-period), new opens and locks wait in the client's kernel and nothing returns an error, so a server that keeps re-entering grace looks like "hung client, healthy server". Rule it out before filing against the client or the network. CHAOS-05 exists for this: among the upstream reports in Appendix A are clients stalled for hours after repeated grace entry during address takeover. Check `server-pods/*.log` in the bundle first; **where a supervised server directs the NFS daemon's log to a file instead of stdout/stderr, as both reference deployments do, `server-pods/*.log` will not have these lines**: it is the container log stream (`kubectl logs`), which then carries only the PID 1 supervisor's output ([F-008](findings.md), [F-026](findings.md)). On both reference deployments `ganesha.nfsd` is started with `-L /export/ganesha.log` and writes grace entry, reclaim progress, and grace exit to that file inside the export volume ([F-022](findings.md)). Every case that observes grace reads that file through the node agent and keeps what it read, with what it could not, in the bundle as `grace*.txt` ([F-030](findings.md)); read that next. For a case that does not observe grace, fetch the file by hand from the server pod before the export is wiped: `kubectl -n <server-ns> exec <server-pod> -- grep -E 'GRACE|reclaim complete' /export/ganesha.log` (or the log path on the serving process's command line).
 4. **Provisioning or data path?** Provisioning failures go to the CSI driver owner. Data path failures go to the server owner.
 5. **Version skew?** Compare the two versions in `environment.json`. If they are independently versioned and differ from the last green run, suspect skew first.
 6. **Reproduce minimally**, then file with the artifact bundle attached. A failure filed without `environment.json` will be closed as unreproducible.
@@ -423,8 +424,9 @@ Defect routing when the sharing layer is independently versioned: reproduce outs
 
 ### 5.1 Progress summary
 
-Forty-three cases are in the tree today out of 66 core cases (65.2%) and 69
-total cases (62.3%) including conditional skew testing. Each case's status is
+Forty-two cases are in the tree today out of 65 core cases (64.6%) and 68
+total cases (61.8%) including conditional skew testing. OBS-02 was folded into
+OBS-03 on 2026-10-02, which took one case out of every count. Each case's status is
 marked directly in Section 3: shipped cases carry a ✅, and the rest carry nothing.
 
 | Category | Shipped | Deferred | Remaining | Total | Status |
@@ -432,11 +434,11 @@ marked directly in Section 3: shipped cases carry a ✅, and the rest carry noth
 | PROV | 11 | 0 | 0 | 11 | Complete (Steps 1, 2, 5) |
 | DATA | 13 | 1 | 0 | 14 | Complete (DATA-14 deferred to SCALE-07) (Steps 1, 2, 2b, 6) |
 | CHAOS | 5 | 0 | 13 | 18 | In progress (Steps 3, 4 done; Step 10 remaining) |
-| OBS | 5 | 0 | 2 | 7 | In progress (Steps 2b, 4 done; Step 7 in progress, OBS-01 and OBS-05 left; OBS-01 half in Step 10) |
+| OBS | 4 | 0 | 2 | 6 | In progress (Steps 2b, 4 done; Step 7 in progress, OBS-01 and OBS-05 left; OBS-01 half in Step 10). OBS-02 is folded into OBS-03 |
 | SEC | 9 | 0 | 0 | 9 | Complete (Steps 2, 2b, 8). SEC-05 is red against this deployment ([F-018](findings.md)) and SEC-06 skips on a single-stack cluster |
 | SCALE | 0 | 0 | 7 | 7 | Not started (Step 9) |
 | SKEW | 0 | 0 | 3 | 3 | Not started (Step 11, conditional on independent versions) |
-| **Total** | **43** | **1** | **25** | **69** | **43 / 66 core cases shipped (65.2%)** |
+| **Total** | **42** | **1** | **25** | **68** | **42 / 65 core cases shipped (64.6%)** |
 
 ### 5.2 What the latest runs returned
 
@@ -497,7 +499,7 @@ Two cases are intermittent, and a green from either clears nothing:
 | CHAOS-06 | passed 3 of 3 | failed 1 of 3 | A client's reclaim arrived after the 90s grace ended, and the server lawfully refused it. Both of that client's locks were granted to others. [F-028](findings.md) |
 
 The one case reported blocked is CHAOS-07, which needs the grace window OBS-03
-cannot see. DATA-11's hole-punch subtest is blocked on busybox `fallocate`.
+could not see on this date; both have since run green, under 2026-10-02 below. DATA-11's hole-punch subtest is blocked on busybox `fallocate`.
 SEC-06 skips because both clusters are single-stack. **Blocked and skipped are
 not passes**: those vectors are unexercised here, and a green run against these
 provisioners is not evidence that grace behaves.
@@ -536,6 +538,45 @@ older records through `-env-file` on purpose, one with no capabilities
 (`w1-issue98-nodigest-stale-*`), and both reported blocked, naming
 `-refresh-preflight`, which is the expected answer to a stale record.
 [F-026](findings.md)
+
+**OBS-03 with OBS-02 folded in, and the grace observer reading the server's log
+file, 2026-10-02** ([#19](https://github.com/mikebz/nfs-verification/issues/19),
+[F-030](findings.md)), `make test-case` on both clusters concurrently, one case
+at a time per cluster:
+
+- **OBS-03**, `CASE=TestObsGracePeriodIsObservable`. Passed on both
+  (`w1-i19-obs03-032512`, `w2-i19-obs03-032512`): grace recorded in
+  `/export/ganesha.log`, entered once, 1m30s on both, against a client outage of
+  1m44s on `gke-w1` and 1m46s on `gke-w2`. The first attempt
+  (`w{1,2}-issue19-TestObsGracePeriodIsObservable-20261002-030639`) failed on
+  both with the file unread, because that run ID was too long for the script id
+  process discovery builds from it; the failure message named that, and F-030
+  has it.
+- **CHAOS-07**, `CASE=TestChaosNewLockDuringGrace`, blocked in every earlier
+  run. Passed on both (`w{1,2}-issue19-TestChaosNewLockDuringGrace-20261002-030639`):
+  no new lock granted inside a 1m30s window, the first granted 5s after it.
+- **CHAOS-05**, `CASE=TestChaosRepeatedFailover`. Passed on both
+  (`w{1,2}-issue19-TestChaosRepeatedFailover-20261002-030639`), with one grace
+  entry read per cycle, which is the first time its re-entry check has read
+  anything (#21). Five cycles took 9m1s and 9m5s.
+
+After review of [#135](https://github.com/mikebz/nfs-verification/pull/135) made
+two changes, the same three cases ran again on both clusters. Script ids made
+from the run ID are now bounded, and a failed file read is reported instead of
+being parsed. The flags and the profile were unchanged.
+
+- **OBS-03** passed on both under the long run ID that had failed before
+  (`w1-issue19-TestObsGracePeriodIsObservable-20261002-033749`,
+  `w2-…-033751`): grace 1m30s on both, outage 1m45s and 1m43s.
+- **CHAOS-07** passed on both (`w1-issue19-TestChaosNewLockDuringGrace-20261002-033749`,
+  `w2-…-033751`): first new lock 5s after grace on both.
+- **CHAOS-05** passed on `gke-w1`
+  (`w1-issue19-TestChaosRepeatedFailover-20261002-033749`, 9m5s) and **failed**
+  on `gke-w2` (`w2-…-033751`): cycle 4 recovered in 2m1s against the 2m0s budget. The server
+  restarted in 3s and held grace for 90s, and the writer resumed 28s after
+  grace ended. F-029 had blamed the restart for overshoots like this, but here
+  the time came after grace (F-031). Grace was read once per cycle in all ten
+  cycles, and every committed record survived.
 
 ### 5.3 Delivery steps
 

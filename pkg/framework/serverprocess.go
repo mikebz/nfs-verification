@@ -113,7 +113,7 @@ func DiscoverServerProcess(ctx context.Context, c *Client, agent *Agent, namespa
 	scanCtx, cancel := context.WithTimeout(ctx, serverProcessProbeTimeout)
 	defer cancel()
 	out, err := agent.RunScript(scanCtx, node, "nfs-listener.sh",
-		"listener-"+strings.ToLower(Cfg().RunID), append([]string{"/proc"}, inodes...)...)
+		runScriptID("listener-"), append([]string{"/proc"}, inodes...)...)
 	if err != nil {
 		return ServerProcess{}, fmt.Errorf("scanning %s for the holder of socket %s: %w",
 			node, strings.Join(inodes, ","), err)
@@ -139,7 +139,7 @@ func listeningSocket(ctx context.Context, c *Client, namespace, pod string, cont
 	if len(containers) == 0 {
 		return nil, "", fmt.Errorf("server pod %s/%s has no containers to look in", namespace, pod)
 	}
-	script, err := RunScript("nfs-listener.sh", "listener-"+strings.ToLower(Cfg().RunID))
+	script, err := RunScript("nfs-listener.sh", runScriptID("listener-"))
 	if err != nil {
 		return nil, "", err
 	}

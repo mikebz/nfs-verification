@@ -14,10 +14,10 @@ import (
 
 // The chaos cases are named TestChaos... so that the fast gate can exclude them
 // by name. They are slow, their failures need human triage, and red in the fast
-// path trains people to ignore red. The prefix marks what a case does rather
-// than where it sits in the plan: OBS-02 and OBS-03 injure the server too, so
-// they carry it, and the plan ID in the comment above each case stays the only
-// place its section is recorded.
+// path trains people to ignore red. The prefix is the plan category, as every
+// other prefix is: OBS-03 and OBS-07 injure the server too and are TestObs, so
+// excluding TestChaos does not exclude every fault, and the plan ID in the
+// comment above each case stays the only place its section is recorded.
 //
 // Every assertion here is client-observable. Nothing asserts how failover
 // happens: the HA mechanism is a black box by design, and the server is a
@@ -305,39 +305,79 @@ func assertLoadHealthy(ctx context.Context, t *testing.T, s chaosSetup, committe
 	assertCommittedRecordsIntact(ctx, t, s.f, s.verifier, s.dir, committed)
 }
 
-// observeGrace reads what the server's log stream said about grace since a
-// moment. It never fails a case on its own: a server that says nothing is
-// OBS-03's finding, and one missing signal should produce one failure rather
-// than four.
-func observeGrace(ctx context.Context, t *testing.T, f *framework.Framework, since time.Time) framework.GraceObservation {
+// graceAgent returns the node agent where the cluster has one, so the grace
+// observer reads the files the server writes as well as its log stream; both
+// reference deployments announce grace only in a file (F-008, F-030). Nil
+// otherwise, and the observation then says it did not read them.
+func graceAgent(ctx context.Context, t *testing.T, f *framework.Framework) *framework.Agent {
 	t.Helper()
-	obs, err := framework.ObserveGrace(ctx, f.C, since)
+	if !f.Caps.NodeAgent {
+		return nil
+	}
+	agent, err := framework.NodeAgent(ctx, f.C)
+	if err != nil {
+		t.Logf("no node agent, so the files the server writes are not read for grace: %v", err)
+		return nil
+	}
+	return agent
+}
+
+// reportGrace logs an observation and keeps it in the bundle under name, on a
+// pass as well as a failure, so a reader can check a verdict against the lines
+// it rested on.
+func reportGrace(t *testing.T, f *framework.Framework, name string, obs framework.GraceObservation) {
+	t.Helper()
+	t.Logf("grace: %s", obs.Describe())
+	if n := len(obs.Unclassified); n > 0 {
+		t.Logf("%d server log line(s) mention grace in a wording this suite does not classify as entry or "+
+			"exit, which is a gap in the harness rather than in the server only if one of them is a transition; "+
+			"the first is %q", n, obs.Unclassified[0])
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "sources: %s\n", strings.Join(obs.Sources, ", "))
+	for _, g := range obs.Gaps {
+		fmt.Fprintf(&b, "not read: %s\n", g)
+	}
+	for _, s := range obs.Signals {
+		fmt.Fprintf(&b, "%s exit=%v %s %s\n", s.At.UTC().Format(time.RFC3339), s.Exit, s.Source, s.Line)
+	}
+	for _, l := range obs.Unclassified {
+		fmt.Fprintf(&b, "unclassified %s\n", l)
+	}
+	if err := f.WriteArtifact(name, []byte(b.String())); err != nil {
+		t.Logf("keeping the grace observation in the bundle: %v", err)
+	}
+}
+
+// observeGrace reads what the server said about grace since a moment. It
+// never fails a case on its own: a server that says nothing is OBS-03's
+// finding, and one missing signal should produce one failure rather than four.
+func observeGrace(ctx context.Context, t *testing.T, f *framework.Framework, since time.Time, name string) framework.GraceObservation {
+	t.Helper()
+	obs, err := framework.ObserveGrace(ctx, f.C, graceAgent(ctx, t, f), since)
 	if err != nil {
 		t.Logf("could not read the server log stream for grace: %v", err)
 		return framework.GraceObservation{}
 	}
-	t.Logf("grace: %s", obs.Describe())
-	for _, line := range obs.Unclassified {
-		t.Logf("a server log line mentions grace in a wording this suite does not classify, which is a gap "+
-			"in the harness rather than in the server: %q", line)
-	}
+	reportGrace(t, f, name, obs)
 	return obs
 }
 
-// waitGraceWindow polls the log stream until grace has been both entered and
-// left, which is the only window a case may measure against. A window derived
-// from the configured grace value anchored at the fault would end after the
-// real one, because grace begins when the server restarts, and it would report
-// a lawful lock grant as a violation.
+// waitGraceWindow polls the server's stream and files until grace has been
+// both entered and left, which is the only window a case may measure against.
+// A window derived from the configured grace value anchored at the fault would
+// end after the real one, because grace begins when the server restarts, and
+// it would report a lawful lock grant as a violation.
 func waitGraceWindow(ctx context.Context, t *testing.T, f *framework.Framework, since time.Time,
 	within time.Duration) (framework.GraceWindow, framework.GraceObservation, bool) {
 	t.Helper()
+	agent := graceAgent(ctx, t, f)
 	var obs framework.GraceObservation
 	var window framework.GraceWindow
 	ok := false
 	err := framework.Poll(ctx, framework.PollInterval, within, func(ctx context.Context) (bool, error) {
 		var err error
-		obs, err = framework.ObserveGrace(ctx, f.C, since)
+		obs, err = framework.ObserveGrace(ctx, f.C, agent, since)
 		if err != nil {
 			return false, err
 		}
@@ -350,11 +390,7 @@ func waitGraceWindow(ctx context.Context, t *testing.T, f *framework.Framework, 
 		// cases that ask make opposite choices.
 		t.Logf("grace was not observed to start and finish within %s: %v", within, err)
 	}
-	t.Logf("grace: %s", obs.Describe())
-	for _, line := range obs.Unclassified {
-		t.Logf("a server log line mentions grace in a wording this suite does not classify, which is a gap "+
-			"in the harness rather than in the server: %q", line)
-	}
+	reportGrace(t, f, "grace.txt", obs)
 	return window, obs, ok
 }
 
@@ -711,7 +747,7 @@ func TestChaosRepeatedFailover(t *testing.T) {
 		// Attributed to this cycle rather than summed over the run: a count
 		// over five failovers cannot tell a re-entry loop from five ordinary
 		// grace periods.
-		obs := observeGrace(ctx, t, f, since)
+		obs := observeGrace(ctx, t, f, since, fmt.Sprintf("grace-cycle%d.txt", cycle))
 		enters := len(obs.Entries())
 		if enters > 0 {
 			graceObserved = true
@@ -726,8 +762,9 @@ func TestChaosRepeatedFailover(t *testing.T) {
 		"grace alone is %s per cycle", failoverCycles, time.Since(started).Round(time.Second),
 		profile(t).Name, profile(t).Grace)
 	if !graceObserved {
-		t.Logf("grace was never observable in the server's log stream, so the re-entry check above proved " +
-			"nothing. OBS-03 is the case that fails for that missing signal")
+		t.Logf("grace was never observed in any cycle, so the re-entry check above proved nothing; " +
+			"each cycle's grace file in the bundle says what was read and what could not be. OBS-03 is " +
+			"the case that fails for that missing signal")
 	}
 
 	assertLoadHealthy(ctx, t, s, committed)
@@ -981,7 +1018,7 @@ func TestChaosLockReclaimAcrossFailover(t *testing.T) {
 	if err := chaos.WaitServerBack(ctx, f, framework.PodReadyTimeout); err != nil {
 		t.Errorf("no server pod is ready again after the delete, even though I/O resumed: %v", err)
 	}
-	observeGrace(ctx, t, f, since)
+	observeGrace(ctx, t, f, since, "grace.txt")
 
 	// Both ends, for every lock. The holder still believing it holds the lock
 	// proves nothing on its own: a client that lost a lock does not find out
@@ -1280,11 +1317,11 @@ func TestChaosNewLockDuringGrace(t *testing.T) {
 
 	assertRecovered(ctx, t, s, faultAt)
 
-	window, _, ok := waitGraceWindow(ctx, t, f, since, slo.GraceExitBound(profile(t))+s.budget)
+	window, obs, ok := waitGraceWindow(ctx, t, f, since, slo.GraceExitBound(profile(t))+s.budget)
 	if !ok {
-		t.Skipf("blocked: this server does not make grace observable, so there is no window to place a " +
-			"lock grant inside or outside of. OBS-03 is the case that fails for that, and F-008 in " +
-			"docs/findings.md is this deployment met in the field")
+		t.Skipf("blocked: grace was not observed both entered and left, so there is no window to place a "+
+			"lock grant inside or outside of: %s. OBS-03 is the case that fails for that, and F-008 in "+
+			"docs/findings.md is what this looked like before the server's log file was read", obs.Describe())
 	}
 	t.Logf("grace ran %s", window)
 
